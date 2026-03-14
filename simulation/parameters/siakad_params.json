@@ -1,0 +1,114 @@
+{
+  "_source": "Berbasis multi referensi — lihat simulation/references/README.md",
+  "_references": [
+    "Salmuasih & Setiawan (2023). JSiI Vol.10 No.1 — SSO SAML/OAuth2 pada PT Yogyakarta",
+    "Rezaldy et al. (2017). Microservices SIAKAD iGracias Telkom University (ATAM)",
+    "MDPI (2025). Authentication Challenges in Microservice Architectures. App. Sci. 15(22)",
+    "MDPI (2025). Authentication Latency Benchmark — avg 197ms baseline, P99 320ms",
+    "Pu, Z. (2023). Smart Campus Unified Identity Auth & Microservices. ICSETPSD 2023"
+  ],
+  "system": "SIAKAD SSO — Sistem Informasi Akademik dengan Single Sign-On",
+  "description": "Autentikasi terpusat untuk layanan akademik perguruan tinggi Indonesia (SIAKAD, LMS, Perpustakaan, Portal Nilai)",
+
+  "institution_profile": {
+    "type": "Perguruan Tinggi Menengah-Besar (>10.000 mahasiswa)",
+    "total_active_users": 18000,
+    "user_breakdown": {
+      "mahasiswa": 15000,
+      "dosen": 800,
+      "tenaga_kependidikan": 400,
+      "alumni_aktif": 1800
+    },
+    "integrated_services": [
+      "SIAKAD (portal nilai, KRS, transkrip)",
+      "LMS / e-learning",
+      "Perpustakaan digital",
+      "Portal keuangan mahasiswa",
+      "Sistem akreditasi internal"
+    ],
+    "sso_protocol": "OAuth 2.0 + CAS (Central Authentication Service)",
+    "note_source": "Profil umum PT Indonesia berdasarkan Salmuasih & Setiawan (2023); survey 17 PT Yogyakarta"
+  },
+
+  "traffic": {
+    "baseline_concurrent_users": 120,
+    "peak_krs_concurrent_users": 800,
+    "peak_uts_uas_concurrent_users": 450,
+    "daily_auth_requests_normal": 22000,
+    "daily_auth_requests_krs": 95000,
+    "read_ratio": 0.92,
+    "write_ratio": 0.08,
+    "note": "Estimasi berbasis profil PT menengah-besar; KRS online menghasilkan spike 6–8x dari normal"
+  },
+
+  "latency_without_cache": {
+    "avg_ms": 197,
+    "p95_ms": 270,
+    "p99_ms": 320,
+    "unit": "milliseconds",
+    "note": "Baseline dari MDPI 2025 — Authentication Latency Benchmark in Microservices (500 sample logins)",
+    "source": "MDPI (2025). Applied Sciences, 15(22), 12088"
+  },
+
+  "latency_with_cache": {
+    "avg_ms": 20,
+    "p95_ms": 38,
+    "p99_ms": 55,
+    "unit": "milliseconds",
+    "note": "Estimasi berbasis CAS in-memory token cache + PSKC predictive pre-fetching; mendekati hasil EVCache Netflix (~10ms) dan CAS normal ops"
+  },
+
+  "availability": {
+    "slo_target": "99.5%",
+    "note": "Target umum SIAKAD PT Indonesia; lebih rendah dari enterprise karena on-premise infrastruktur"
+  },
+
+  "academic_periods": {
+    "krs_online": {
+      "traffic_multiplier": 6.5,
+      "duration_days": 7,
+      "occurrences_per_year": 2,
+      "note": "Semua mahasiswa login bersamaan untuk pilih mata kuliah — bottleneck terbesar SIAKAD"
+    },
+    "uts": {
+      "traffic_multiplier": 3.2,
+      "duration_days": 14,
+      "occurrences_per_year": 2
+    },
+    "uas": {
+      "traffic_multiplier": 3.5,
+      "duration_days": 14,
+      "occurrences_per_year": 2
+    },
+    "wisuda": {
+      "traffic_multiplier": 2.1,
+      "duration_days": 3,
+      "occurrences_per_year": 2
+    },
+    "liburan": {
+      "traffic_multiplier": 0.15,
+      "duration_days": 60,
+      "occurrences_per_year": 2
+    }
+  },
+
+  "token_management": {
+    "jwt_ttl_hours": 4,
+    "jwt_ttl_range_hours": [1, 8],
+    "refresh_token_ttl_days": 7,
+    "key_rotation_days": 30,
+    "request_timeout_ms": 5000,
+    "note": "TTL berbasis common practice OAuth 2.0 pada implementasi PT Indonesia"
+  },
+
+  "simulation_use": {
+    "log_mu_cached"     : 2.996,
+    "log_sigma_cached"  : 0.35,
+    "log_mu_miss"       : 5.28,
+    "log_sigma_miss"    : 0.40,
+    "log_mu_no_cache"   : 5.28,
+    "log_sigma_no_cache": 0.42,
+    "cache_hit_rate"    : 0.83,
+    "note_mu": "log(20) ≈ 2.996 untuk cache hit (20ms avg); log(197) ≈ 5.28 untuk no-cache (197ms avg baseline MDPI)"
+  }
+}

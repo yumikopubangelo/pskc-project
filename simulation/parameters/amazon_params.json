@@ -1,0 +1,36 @@
+{
+  "_source": "AWS Key Management Service Official Documentation",
+  "_url": "https://docs.aws.amazon.com/kms/latest/developerguide/requests-per-second.html",
+  "system": "AWS KMS (Key Management Service)",
+  "description": "Layanan manajemen kunci kriptografi AWS yang digunakan oleh ribuan perusahaan termasuk Amazon",
+
+  "traffic": {
+    "default_quota_symmetric_rps": 10000,
+    "external_key_store_rps": 1800,
+    "operations": ["GenerateDataKey", "Decrypt", "Encrypt", "Sign", "Verify"],
+    "note": "Symmetric KMS keys share a quota of 10,000 requests per second per region"
+  },
+
+  "latency": {
+    "external_key_store_timeout_ms": 250,
+    "retry_timeout_total_ms": 500,
+    "recommended_proxy_response_ms": 250,
+    "encryption_overhead_kinesis_us": 100,
+    "note": "AWS KMS expects external key store proxy to respond within 250ms"
+  },
+
+  "caching_recommendation": {
+    "data_key_caching_ttl_range": ["5 minutes", "24 hours"],
+    "note": "AWS explicitly recommends data key caching to reduce KMS API calls and cost",
+    "source": "AWS KMS FAQs — data key caching section"
+  },
+
+  "simulation_use": {
+    "baseline_kms_latency_ms": 54,
+    "cached_latency_ms": 5,
+    "timeout_threshold_ms": 250,
+    "traffic_distribution": "log-normal",
+    "quota_rps": 10000,
+    "improvement_note": "Sourced from multi-cloud API gateway benchmark showing AWS API Gateway avg 54ms JWT auth"
+  }
+}

@@ -1,0 +1,132 @@
+% ============================================================
+% Daftar Referensi untuk Simulasi PSKC
+% Studi Kasus: Sistem Autentikasi Akademik & Pemerintahan Indonesia
+% Format: BibTeX
+% ============================================================
+
+% --------------------------------------------------------
+% SKENARIO 1: SIAKAD SSO
+% --------------------------------------------------------
+
+@article{salmuasih_setiawan_2023,
+  author    = {Salmuasih and Setiawan, Muhammad Aris},
+  title     = {Evaluasi Penerapan Single Sign-On SAML dan OAuth 2.0:
+               Studi pada Perguruan Tinggi Yogyakarta},
+  journal   = {JSiI (Jurnal Sistem Informasi)},
+  volume    = {10},
+  number    = {1},
+  pages     = {41--49},
+  year      = {2023},
+  doi       = {10.30656/jsii.v10i1.6186},
+  url       = {https://e-jurnal.lppmunsera.org/index.php/jsii/article/download/6186/2493},
+  note      = {Parameter: 17 PT Yogyakarta disurvei; 60\% klaim riset protokol;
+               banyak ketidaksesuaian implementasi SSO SAML vs OAuth 2.0}
+}
+
+@techreport{rezaldy_microservices_siakad_2017,
+  author      = {Rezaldy, Muhammad and Asror, Ibnu and Sardi, Iwan Lazuardi},
+  title       = {Desain dan Analisis Arsitektur Microservices Pada Sistem
+                 Informasi Akademik Perguruan Tinggi Dengan Pendekatan
+                 Architecture Tradeoff Analysis Method (ATAM):
+                 Studi Kasus iGracias Universitas Telkom},
+  institution = {Universitas Telkom},
+  year        = {2017},
+  volume      = {4},
+  number      = {2},
+  note        = {Parameter: arsitektur microservices iGracias; SSO integrasi
+                 SIAKAD + LMS (iDea) + e-library Telkom University}
+}
+
+@article{mdpi_auth_microservices_2025,
+  author    = {{El Akhdar}, Asmaa and {Baidada}, Charifa and others},
+  title     = {Authentication Challenges and Solutions in Microservice Architectures},
+  journal   = {Applied Sciences},
+  volume    = {15},
+  number    = {22},
+  pages     = {12088},
+  year      = {2025},
+  doi       = {10.3390/app152212088},
+  url       = {https://www.mdpi.com/2076-3417/15/22/12088},
+  note      = {Parameter: baseline auth latency avg 197ms, P95 270ms, P99 320ms
+               (500 successful logins); JWT authentication overhead microservices}
+}
+
+@inproceedings{pu_smart_campus_2023,
+  author    = {Pu, Zhiqiang},
+  title     = {Smart Campus Business Flow Reconstruction Algorithm Based on
+               Unified Identity Authentication and Microservices},
+  booktitle = {Proceedings of the First International Conference on Science,
+               Engineering and Technology Practices for Sustainable Development
+               (ICSETPSD 2023)},
+  address   = {Coimbatore, India},
+  year      = {2023},
+  note      = {Konteks: unified identity auth pada smart campus berbasis microservices}
+}
+
+% --------------------------------------------------------
+% SKENARIO 2: SEVIMA SIAKADCLOUD (Multi-Tenant)
+% --------------------------------------------------------
+
+@online{sevima_siakadcloud_2024,
+  author    = {{PT Sentra Vidya Utama (SEVIMA)}},
+  title     = {Siakadcloud — Platform Sistem Informasi Akademik No. 1 Indonesia},
+  year      = {2024},
+  url       = {https://sevima.com/siakadcloud},
+  note      = {Parameter: >900 PT Indonesia dilayani; beroperasi sejak 2004;
+               99\% tingkat keberhasilan implementasi}
+}
+
+@online{sevima_sso_manfaat_2024,
+  author    = {{PT Sentra Vidya Utama (SEVIMA)}},
+  title     = {Manfaat Single Sign On (SSO) Bagi Tim IT, Admin dan Civitas Akademik},
+  year      = {2024},
+  url       = {https://sevima.com/manfaat-single-sign-on-sso-bagi-tim-it-admin-dan-civitas-akademik},
+  note      = {Parameter: SSO SEVIMA Platform terintegrasi — 1 login untuk SIAKAD,
+               Edlink (LMS), portal akademik; mendukung 2FA (OTP) dan MFA}
+}
+
+% --------------------------------------------------------
+% SKENARIO 3: PDDIKTI (Skala Nasional)
+% --------------------------------------------------------
+
+@online{pddikti_kemdikbud_2024,
+  author    = {{Kemdikbudristek}},
+  title     = {PDDikti — Pangkalan Data Pendidikan Tinggi},
+  year      = {2024},
+  url       = {https://pddikti.kemdikbud.go.id},
+  publisher = {Kementerian Pendidikan, Kebudayaan, Riset, dan Teknologi},
+  note      = {Parameter: >4.900 PT terdaftar aktif; >9,6 juta mahasiswa aktif;
+               ~340.000 dosen aktif (data 2024)}
+}
+
+@online{feeder_pddikti_2024,
+  author    = {{Kemdikbudristek}},
+  title     = {Feeder PDDikti — Panduan Pelaporan Data Semester},
+  year      = {2024},
+  url       = {https://feeder.kemdikbud.go.id},
+  publisher = {Kementerian Pendidikan, Kebudayaan, Riset, dan Teknologi},
+  note      = {Parameter: deadline 2x per tahun (Januari \& Juli);
+               semua operator ~4.900 PT melaporkan data secara serentak;
+               traffic spike ekstrem menjelang deadline}
+}
+
+% --------------------------------------------------------
+% REFERENSI METODOLOGI (dipertahankan dari versi sebelumnya)
+% --------------------------------------------------------
+
+@article{mdpi_auth_latency_2025,
+  title     = {Authentication Latency Benchmark in Microservices},
+  journal   = {MDPI Applied Sciences},
+  year      = {2025},
+  note      = {Parameter baseline: 500 successful logins, avg latency 197ms,
+               P95 270ms, P99 320ms — digunakan sebagai baseline semua skenario}
+}
+
+@online{spotify_els_2015,
+  author    = {{Spotify Engineering}},
+  title     = {ELS: A Latency-Based Load Balancer},
+  year      = {2015},
+  url       = {https://engineering.atspotify.com/2015/12/els-part-1},
+  note      = {Metodologi: log-normal distribution untuk microservice latency —
+               prinsip matematis universal, dipertahankan untuk metodologi simulasi}
+}

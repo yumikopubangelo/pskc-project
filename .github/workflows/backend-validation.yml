@@ -1,0 +1,73 @@
+name: backend-validation
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - master
+
+jobs:
+  focused-tests:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run focused backend test suite
+        run: >
+          pytest
+          tests/test_api_request_paths.py
+          tests/test_http_security_middleware.py
+          tests/test_prometheus_exporter.py
+          tests/test_audit_logger.py
+          tests/test_fips_self_tests.py
+          tests/test_redis_resilience.py
+          tests/test_ml.py
+          -q
+
+  docker-smoke:
+    runs-on: ubuntu-latest
+    needs: focused-tests
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Start backend stack
+        run: docker compose up -d --build api redis prefetch-worker
+
+      - name: Run live backend smoke validation
+        run: >
+          python scripts/smoke_backend_runtime.py
+          --base-url http://127.0.0.1:8000
+          --redis-url redis://:pskc_redis_secret@127.0.0.1:6379/0
+
+      - name: Print container state on failure
+        if: failure()
+        run: |
+          docker compose ps
+          docker compose logs --no-color api redis prefetch-worker
+
+      - name: Stop backend stack
+        if: always()
+        run: docker compose down -v

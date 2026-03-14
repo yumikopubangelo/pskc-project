@@ -1,0 +1,69 @@
+% ============================================================
+% Daftar Referensi untuk Simulasi PSKC
+% Format: BibTeX
+% ============================================================
+
+@online{spotify_padlock_2018,
+  author    = {Leenders, Bram},
+  title     = {Scalable User Privacy},
+  year      = {2018},
+  url       = {https://engineering.atspotify.com/2018/09/scalable-user-privacy},
+  publisher = {Spotify Engineering Blog},
+  note      = {Parameter: Padlock KMS, 1M lookup/s kapasitas, p99 <5ms normal ops,
+               p99 <15ms SLO, Cassandra ~10ms, memcached 2–4ms}
+}
+
+@online{aws_kms_quotas,
+  author    = {{Amazon Web Services}},
+  title     = {Request Quotas — AWS Key Management Service},
+  year      = {2024},
+  url       = {https://docs.aws.amazon.com/kms/latest/developerguide/requests-per-second.html},
+  publisher = {AWS Documentation},
+  note      = {Parameter: 10,000 req/s quota symmetric KMS, throttling policy}
+}
+
+@online{aws_kms_xks_monitoring,
+  author    = {{Amazon Web Services}},
+  title     = {Monitor external key stores — AWS KMS},
+  year      = {2024},
+  url       = {https://docs.aws.amazon.com/kms/latest/developerguide/xks-monitoring.html},
+  publisher = {AWS Documentation},
+  note      = {Parameter: 250ms timeout hard limit, 1800 req/s external key store}
+}
+
+@online{aws_kms_caching_recommendation,
+  author    = {{Amazon Web Services}},
+  title     = {FAQs — AWS Key Management Service},
+  year      = {2024},
+  url       = {https://aws.amazon.com/kms/faqs/},
+  publisher = {AWS},
+  note      = {AWS merekomendasikan data key caching TTL 5 menit–24 jam untuk performa}
+}
+
+@article{mdpi_auth_latency_2025,
+  title     = {Authentication Latency Benchmark in Microservices},
+  journal   = {MDPI},
+  year      = {2025},
+  note      = {Parameter: 500 successful logins, avg latency 197ms, P95 270ms, P99 320ms}
+}
+
+@online{netflix_tech_stack_2025,
+  author    = {{VdoCipher}},
+  title     = {Netflix Tech Stack Explained: CDN (Open Connect) and Microservices},
+  year      = {2025},
+  url       = {https://www.vdocipher.com/blog/netflix-tech-stack-and-architecture},
+  note      = {Parameter: 260M subscribers, 14B API calls/day, Zuul 2 + EVCache architecture}
+}
+
+@online{multicloud_apigw_benchmark,
+  title     = {Multi-cloud API Gateway Benchmark},
+  note      = {Parameter: AWS API Gateway avg 54ms JWT auth, Apigee avg 96ms}
+}
+
+@online{spotify_els_2015,
+  author    = {{Spotify Engineering}},
+  title     = {ELS: A Latency-Based Load Balancer},
+  year      = {2015},
+  url       = {https://engineering.atspotify.com/2015/12/els-part-1},
+  note      = {Log-normal distribution untuk microservice latency; 800ms penalty cross-globe retry}
+}

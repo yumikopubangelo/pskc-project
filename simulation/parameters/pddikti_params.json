@@ -1,0 +1,62 @@
+{
+  "_source": "Berbasis data resmi Kemdikbudristek dan jurnal terkait",
+  "_references": [
+    "Kemdikbudristek (2024). PDDikti — Pangkalan Data Pendidikan Tinggi. https://pddikti.kemdikbud.go.id",
+    "Kemdikbudristek (2024). Feeder PDDikti — Panduan Pelaporan Data. https://feeder.kemdikbud.go.id",
+    "MDPI (2025). Authentication Challenges in Microservice Architectures. App. Sci. 15(22), 12088",
+    "MDPI (2025). Authentication Latency Benchmark — avg 197ms, P99 320ms (500 sample logins)",
+    "Salmuasih & Setiawan (2023). JSiI Vol.10 No.1 — SSO SAML/OAuth2 pada PT Yogyakarta"
+  ],
+  "system": "PDDikti — Pangkalan Data Pendidikan Tinggi Kemdikbudristek",
+  "description": "Portal data nasional pendidikan tinggi Indonesia; autentikasi wajib bagi semua operator PT dan publik",
+
+  "national_scale": {
+    "pt_terdaftar_aktif": 4900,
+    "mahasiswa_aktif": 9600000,
+    "dosen_aktif": 340000,
+    "tenaga_kependidikan": 420000,
+    "estimated_feeder_operators": 14700,
+    "note_source": "Kemdikbudristek (2024). Data PDDikti resmi per 2024"
+  },
+
+  "traffic": {
+    "normal_daily_auth": 85000,
+    "peak_deadline_daily_auth": 620000,
+    "feeder_deadline_occurrences_per_year": 2,
+    "peak_concurrent_users_normal": 200,
+    "peak_concurrent_users_deadline": 4500,
+    "note": "Deadline Feeder 2x per tahun (Januari & Juli); seluruh operator ~4.900 PT login bersamaan"
+  },
+
+  "latency_without_cache": {
+    "avg_ms": 197,
+    "p95_ms": 270,
+    "p99_ms": 320,
+    "unit": "milliseconds",
+    "note": "Baseline MDPI 2025 — microservices authentication benchmark",
+    "source": "MDPI (2025). Applied Sciences, 15(22), 12088"
+  },
+
+  "latency_with_cache": {
+    "avg_ms": 21,
+    "p95_ms": 40,
+    "p99_ms": 58,
+    "note": "Estimasi PSKC; operator Feeder punya pola akses sangat predictable (per-PT key access) → hit rate tinggi"
+  },
+
+  "system": {
+    "request_timeout_ms": 8000,
+    "note": "Portal pemerintah umumnya lebih toleran timeout vs komersial"
+  },
+
+  "simulation_use": {
+    "log_mu_cached"      : 3.045,
+    "log_sigma_cached"   : 0.36,
+    "log_mu_miss"        : 5.28,
+    "log_sigma_miss"     : 0.42,
+    "log_mu_no_cache"    : 5.28,
+    "log_sigma_no_cache" : 0.43,
+    "cache_hit_rate"     : 0.84,
+    "note_mu": "log(21) ≈ 3.045; log(197) ≈ 5.28 (baseline MDPI 2025)"
+  }
+}

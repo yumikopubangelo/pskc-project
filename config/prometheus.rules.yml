@@ -1,0 +1,190 @@
+# ============================================================
+# PSKC — Prometheus Alerting Rules
+# ============================================================
+#
+# Basic alerting rules for PSKC operations.
+# These rules trigger on operational issues that need attention.
+#
+# Place this file in:
+#   - Docker: /etc/prometheus/prometheus.rules.yml
+#   - Local: config/prometheus.rules.yml
+#
+# ============================================================
+
+groups:
+  - name: pskc_alerts
+    interval: 30s
+    rules:
+      # ---------------------------------------------
+      # Redis Alerts
+      # ---------------------------------------------
+      
+      - alert: PSKCRedisUnavailable
+        expr: pskc_cache_shared_available == 0
+        for: 1m
+        labels:
+          severity: critical
+          component: redis
+        annotations:
+          summary: "PSKC Redis cache is unavailable"
+          description: "Redis shared cache has been unavailable for more than 1 minute. Cache hits will fail."
+      
+      - alert: PSKCRedisHighLatency
+        expr: pskc_cache_shared_available == 1
+        for: 2m
+        labels:
+          severity: warning
+          component: redis
+        annotations:
+          summary: "PSKC Redis latency is high"
+          description: "Redis cache latency is elevated. Check Redis connection and load."
+
+      # ---------------------------------------------
+      # Queue & Prefetch Alerts
+      # ---------------------------------------------
+      
+      - alert: PSKCPrefetchDLQGrowing
+        expr: pskc_prefetch_dlq_length > 10
+        for: 5m
+        labels:
+          severity: warning
+          component: prefetch
+        annotations:
+          summary: "PSKC Prefetch DLQ is growing"
+          description: "Dead-letter queue has {{ $value }} items. Check for persistent failures."
+      
+      - alert: PSKCPrefetchDLQCritical
+        expr: pskc_prefetch_dlq_length > 100
+        for: 10m
+        labels:
+          severity: critical
+          component: prefetch
+        annotations:
+          summary: "PSKC Prefetch DLQ is critical"
+          description: "Dead-letter queue has {{ $value }} items. Immediate attention required."
+      
+      - alert: PSKCPrefetchQueueBacklog
+        expr: pskc_prefetch_queue_length > 1000
+        for: 10m
+        labels:
+          severity: warning
+          component: prefetch
+        annotations:
+          summary: "PSKC Prefetch queue is backlogged"
+          description: "Prefetch queue has {{ $value }} pending jobs. Worker may be behind."
+      
+      - alert: PSKCPrefetchWorkerStagnant
+        expr: rate(pskc_prefetch_jobs_total[5m]) == 0
+        for: 15m
+        labels:
+          severity: warning
+          component: prefetch
+        annotations:
+          summary: "PSKC Prefetch worker is stagnant"
+          description: "No prefetch jobs completed in 15 minutes. Worker may be hung."
+
+      # ---------------------------------------------
+      # Cache Performance Alerts
+      # ---------------------------------------------
+      
+      - alert: PSKCCacheHitRateLow
+        expr: pskc_cache_hit_rate_ratio < 0.5
+        for: 10m
+        labels:
+          severity: warning
+          component: cache
+        annotations:
+          summary: "PSKC cache hit rate is low"
+          description: "Cache hit rate is {{ $value | humanizePercentage }}. Check cache sizing and TTL."
+      
+      - alert: PSKCActiveKeysHigh
+        expr: pskc_active_keys > 9000
+        for: 5m
+        labels:
+          severity: info
+          component: cache
+        annotations:
+          summary: "PSKC active keys high"
+          description: "Active keys count is {{ $value }}. Approaching cache capacity."
+
+      # ---------------------------------------------
+      # ML Model Alerts
+      # ---------------------------------------------
+      
+      - alert: PSKCMLModelNotLoaded
+        expr: pskc_ml_model_loaded == 0
+        for: 5m
+        labels:
+          severity: critical
+          component: ml
+        annotations:
+          summary: "PSKC ML model not loaded"
+          description: "ML model is not loaded. Prefetch predictions will fail."
+      
+      - alert: PSKCMLInsufficientSamples
+        expr: pskc_ml_samples_total < pskc_ml_required_samples
+        for: 30m
+        labels:
+          severity: warning
+          component: ml
+        annotations:
+          summary: "PSKC ML insufficient training samples"
+          description: "Only {{ $value }} samples collected. Need {{ $value }} for training."
+
+      # ---------------------------------------------
+      # Security Alerts
+      # ---------------------------------------------
+      
+      - alert: PSKCAuditLoggerUnavailable
+        expr: pskc_audit_logger_available == 0
+        for: 1m
+        labels:
+          severity: critical
+          component: security
+        annotations:
+          summary: "PSKC Audit logger unavailable"
+          description: "Audit logging is not available. Security events may not be recorded."
+
+      # ---------------------------------------------
+      # System Alerts
+      # ---------------------------------------------
+      
+      - alert: PSKCHighLatency
+        expr: pskc_avg_latency_ms > 1000
+        for: 5m
+        labels:
+          severity: warning
+          component: api
+        annotations:
+          summary: "PSKC API latency is high"
+          description: "Average latency is {{ $value }}ms. Check system load and dependencies."
+
+      - alert: PSKCRequestRateHigh
+        expr: rate(pskc_requests_total[1m]) > 1000
+        for: 2m
+        labels:
+          severity: info
+          component: api
+        annotations:
+          summary: "PSKC request rate is high"
+          description: "Request rate is {{ $value }} req/s. Monitor for capacity planning."
+
+  - name: pskc_recording_rules
+    interval: 60s
+    rules:
+      # Recording rules for better query performance
+      
+      - record: pskc:cache_hit_rate_5m
+        expr: rate(pskc_cache_hits_total[5m]) / (rate(pskc_cache_hits_total[5m]) + rate(pskc_cache_misses_total[5m]))
+      
+      - record: pskc:latency_p95_5m
+        expr: histogram_quantile(0.95, rate(pskc_latency_bucket[5m]))
+      
+      - record: pskc:latency_p99_5m
+        expr: histogram_quantile(0.99, rate(pskc_latency_bucket[5m]))
+      
+      - record: pskc:queue_growth_rate
+        expr: rate(pskc_prefetch_queue_length[5m])
+      
+      - record: pskc:dlq_growth_rate
+        expr: rate(pskc_prefetch_dlq_length[5m])

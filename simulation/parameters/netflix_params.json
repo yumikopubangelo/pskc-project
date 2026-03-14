@@ -1,0 +1,39 @@
+{
+  "_source": "Netflix Tech Blog + VdoCipher Netflix Architecture Analysis (2025)",
+  "_url": "https://www.vdocipher.com/blog/netflix-tech-stack-and-architecture",
+  "system": "Netflix Edge Auth (Zuul 2 + Identity Propagation)",
+  "description": "Netflix menggunakan Zuul 2 sebagai edge gateway dengan token-agnostic identity propagation untuk semua API request",
+
+  "traffic": {
+    "subscribers_global": 260000000,
+    "api_calls_per_day": 14000000000,
+    "avg_requests_per_second": 162037,
+    "peak_multiplier": 3.5,
+    "peak_rps_estimate": 567000,
+    "note": "Netflix processes ~14 billion API calls per day across all devices"
+  },
+
+  "architecture": {
+    "gateway": "Zuul 2 (Netty-based, async non-blocking)",
+    "caching": "EVCache (memcached-based ephemeral cache)",
+    "identity": "Token-agnostic identity propagation at edge",
+    "service_discovery": "Eureka",
+    "fault_tolerance": "Hystrix",
+    "note": "Zuul 2 re-architected on Netty for persistent connections at high scale"
+  },
+
+  "latency_context": {
+    "round_trip_penalty_ms": 800,
+    "note": "Netflix ELS load balancer assumes 800ms penalty for cross-globe retry round-trip",
+    "source": "Spotify Engineering ELS blog (comparable architecture)"
+  },
+
+  "simulation_use": {
+    "baseline_auth_latency_ms": 197,
+    "source_baseline": "MDPI peer-reviewed journal — avg 197ms auth latency (P95: 270ms, P99: 320ms)",
+    "cached_latency_ms": 8,
+    "cache_hit_rate_target": 0.85,
+    "traffic_pattern": "bursty — peaks at content release events",
+    "traffic_distribution": "log-normal with spike multiplier"
+  }
+}

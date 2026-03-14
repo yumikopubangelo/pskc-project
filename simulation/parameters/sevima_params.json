@@ -1,0 +1,57 @@
+{
+  "_source": "Berbasis referensi publik SEVIMA dan jurnal SSO PT Indonesia",
+  "_references": [
+    "SEVIMA (2024). Siakadcloud — Platform SIAKAD No. 1 Indonesia. https://sevima.com/siakadcloud",
+    "SEVIMA (2024). Manfaat SSO bagi PT. https://sevima.com/manfaat-single-sign-on-sso-bagi-tim-it-admin-dan-civitas-akademik",
+    "Salmuasih & Setiawan (2023). JSiI Vol.10 No.1 — SSO PT Yogyakarta",
+    "MDPI (2025). Authentication Challenges in Microservice Architectures. App. Sci. 15(22), 12088",
+    "MDPI (2025). Baseline latency benchmark — avg 197ms, P99 320ms"
+  ],
+  "system": "SEVIMA Siakadcloud — Platform SIAKAD Multi-Tenant",
+  "description": "Platform cloud SIAKAD yang melayani >900 perguruan tinggi di Indonesia dengan SSO terpusat",
+
+  "platform_profile": {
+    "tenant_count": 900,
+    "estimated_total_users": 2700000,
+    "services_per_tenant": ["SIAKAD", "Edlink (LMS)", "portal akademik"],
+    "deployment_model": "Multi-tenant SaaS cloud",
+    "sso_integration": "SSO terintegrasi — satu login untuk semua modul SEVIMA Platform",
+    "note_source": "SEVIMA (2024) — >900 PT, pioneer SIAKAD Indonesia sejak 2004"
+  },
+
+  "traffic": {
+    "normal_aggregate_rps": 500,
+    "peak_krs_aggregate_rps": 8500,
+    "peak_uas_aggregate_rps": 5200,
+    "per_tenant_quota_rps": 150,
+    "platform_max_rps": 12000,
+    "note": "KRS antar PT bisa overlap karena jadwal akademik serupa → spike besar pada platform"
+  },
+
+  "latency_without_cache": {
+    "avg_ms": 197,
+    "p95_ms": 270,
+    "p99_ms": 320,
+    "timeout_ms": 3000,
+    "note": "Baseline MDPI 2025; platform multi-tenant menambah overhead routing ~15–30ms vs single-tenant",
+    "source": "MDPI (2025). Applied Sciences, 15(22), 12088"
+  },
+
+  "latency_with_cache": {
+    "avg_ms": 22,
+    "p95_ms": 42,
+    "p99_ms": 65,
+    "note": "Estimasi PSKC per-tenant key cache; overhead sedikit lebih tinggi dari single-tenant karena tenant isolation"
+  },
+
+  "simulation_use": {
+    "log_mu_cached"      : 3.091,
+    "log_sigma_cached"   : 0.38,
+    "log_mu_miss"        : 5.28,
+    "log_sigma_miss"     : 0.42,
+    "log_mu_no_cache"    : 5.28,
+    "log_sigma_no_cache" : 0.44,
+    "cache_hit_rate"     : 0.82,
+    "note_mu": "log(22) ≈ 3.091 untuk cache hit; log(197) ≈ 5.28 untuk baseline no-cache (MDPI 2025)"
+  }
+}

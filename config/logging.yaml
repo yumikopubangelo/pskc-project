@@ -1,0 +1,61 @@
+# ============================================================
+# PSKC — Logging Configuration
+# ============================================================
+version: 1
+disable_existing_loggers: false
+
+formatters:
+  default:
+    format: '[%(asctime)s] %(levelname)s in %(module)s: %(message)s'
+    datefmt: '%Y-%m-%d %H:%M:%S'
+  
+  detailed:
+    format: '%(asctime)s - %(name)s - %(levelname)s - %(funcName)s:%(lineno)d - %(message)s'
+    datefmt: '%Y-%m-%d %H:%M:%S'
+  
+  json:
+    class: pythonjsonlogger.jsonlogger.JsonFormatter
+    format: '%(asctime)s %(name)s %(levelname)s %(message)s'
+
+handlers:
+  console:
+    class: logging.StreamHandler
+    level: DEBUG
+    formatter: default
+    stream: ext://sys.stdout
+  
+  file:
+    class: logging.handlers.RotatingFileHandler
+    level: INFO
+    formatter: detailed
+    filename: /app/logs/pskc.log
+    maxBytes: 10485760  # 10MB
+    backupCount: 5
+  
+  error_file:
+    class: logging.handlers.RotatingFileHandler
+    level: ERROR
+    formatter: detailed
+    filename: /app/logs/pskc_error.log
+    maxBytes: 10485760  # 10MB
+    backupCount: 5
+
+loggers:
+  pskc:
+    level: DEBUG
+    handlers: [console, file, error_file]
+    propagate: false
+  
+  uvicorn:
+    level: INFO
+    handlers: [console]
+    propagate: false
+  
+  redis:
+    level: WARNING
+    handlers: [console]
+    propagate: false
+
+root:
+  level: INFO
+  handlers: [console, file]

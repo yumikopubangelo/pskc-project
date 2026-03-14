@@ -1,0 +1,245 @@
+# ============================================================
+# PSKC — Predictive Secure Key Caching
+# Docker Compose — Development & Demo Environment
+# ============================================================
+# Usage:
+#   docker compose up -d           → jalankan semua service
+#   docker compose up api redis    → jalankan service tertentu saja
+#   docker compose logs -f api     → lihat log API
+#   docker compose down -v         → stop + hapus volume
+# ============================================================
+
+services:
+
+  # ----------------------------------------------------------
+  # PSKC API — Backend utama (FastAPI)
+  # ----------------------------------------------------------
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runtime
+    container_name: pskc-api
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      APP_ENV: development
+      APP_PORT: 8000
+      LOG_LEVEL: debug
+      FIPS_SELF_TEST_ENABLED: "true"
+      AUDIT_LOG_DIRECTORY: /app/logs/api
+
+      # Redis connection
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_DB: 0
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-pskc_redis_secret}
+      REDIS_CACHE_PREFIX: pskc:cache
+      PREFETCH_QUEUE_KEY: pskc:prefetch:jobs
+      PREFETCH_WORKER_BLOCK_TIMEOUT: 5
+      PREFETCH_MAX_RETRIES: 3
+      PREFETCH_RETRY_BACKOFF_SECONDS: 5
+
+      # Cache settings (dari referensi AWS KMS & Spotify Padlock)
+      CACHE_TTL_SECONDS: 300          # 5 menit — sesuai AWS KMS recommendation
+      CACHE_MAX_SIZE: 10000           # max keys in local cache
+      CACHE_ENCRYPTION_KEY: ${CACHE_ENCRYPTION_KEY:-dev_key_change_in_prod}
+
+      # ML model settings
+      ML_MODEL_NAME: pskc_model
+      ML_MODEL_REGISTRY_DIR: /app/data/models
+      ML_MODEL_STAGE: development
+      ML_MODEL_SIGNING_KEY: ${ML_MODEL_SIGNING_KEY:-}
+      ML_MODEL_PATH: /app/data/models/pskc_model.pskc.json
+      ML_PREDICTION_THRESHOLD: 0.75   # confidence minimum untuk pre-cache
+      ML_UPDATE_INTERVAL_SECONDS: 30  # retrain interval (online learning)
+      ML_TOP_N_PREDICTIONS: 10        # jumlah kunci yang di-pre-cache per siklus
+
+      # Simulation mode (aktifkan untuk demo/presentasi)
+      SIMULATION_MODE: "true"
+      SIMULATION_SCENARIO: "all"      # spotify | amazon | netflix | all
+
+    volumes:
+      - ./src:/app/src              # Hot-reload untuk source code
+      - ./config:/app/config        # Sinkronkan settings/config tanpa rebuild image
+      - ./data:/app/data              # persist model & histori data
+      - ./simulation:/app/simulation  # mount simulation scripts
+      - ./logs:/app/logs
+    command: >
+      uvicorn src.api.routes:app --host 0.0.0.0 --port 8000 --reload
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks:
+      - pskc-net
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+  # ----------------------------------------------------------
+  # Redis — In-memory cache layer
+  # Digunakan sebagai distributed cache antar microservice
+  # (mirip EVCache Netflix / Memcached Spotify Padlock)
+  # ----------------------------------------------------------
+  redis:
+    image: redis:7.2-alpine
+    container_name: pskc-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    command: >
+      redis-server
+      --requirepass ${REDIS_PASSWORD:-pskc_redis_secret}
+      --maxmemory 256mb
+      --maxmemory-policy allkeys-lru
+      --save 60 1000
+      --loglevel notice
+    volumes:
+      - redis-data:/data
+    networks:
+      - pskc-net
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:-pskc_redis_secret}", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ----------------------------------------------------------
+  # Frontend — Website visualisasi & presentasi (Vite Dev Server)
+  # ----------------------------------------------------------
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: pskc-frontend
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      - VITE_API_MODE=auto
+      - VITE_API_URL=/api
+      - VITE_API_PROXY_TARGET=http://api:8000
+    volumes:
+      - ./frontend/src:/app/src
+      - ./frontend/public:/app/public
+    command: npm run dev -- --host 0.0.0.0
+    depends_on:
+      - api
+    networks:
+      - pskc-net
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:3000"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  # ----------------------------------------------------------
+  # Prometheus — Metrics scraping
+  # Mengumpulkan metrik: cache hit rate, latency, ML accuracy
+  # ----------------------------------------------------------
+  prefetch-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runtime
+    container_name: pskc-prefetch-worker
+    restart: unless-stopped
+    environment:
+      APP_ENV: development
+      LOG_LEVEL: debug
+      FIPS_SELF_TEST_ENABLED: "true"
+      AUDIT_LOG_DIRECTORY: /app/logs/prefetch-worker
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_DB: 0
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-pskc_redis_secret}
+      REDIS_CACHE_PREFIX: pskc:cache
+      PREFETCH_QUEUE_KEY: pskc:prefetch:jobs
+      PREFETCH_WORKER_BLOCK_TIMEOUT: 5
+      PREFETCH_MAX_RETRIES: 3
+      PREFETCH_RETRY_BACKOFF_SECONDS: 5
+      CACHE_TTL_SECONDS: 300
+      CACHE_MAX_SIZE: 10000
+      CACHE_ENCRYPTION_KEY: ${CACHE_ENCRYPTION_KEY:-dev_key_change_in_prod}
+      ML_MODEL_NAME: pskc_model
+      ML_MODEL_REGISTRY_DIR: /app/data/models
+      ML_MODEL_STAGE: development
+      ML_MODEL_SIGNING_KEY: ${ML_MODEL_SIGNING_KEY:-}
+      ML_MODEL_PATH: /app/data/models/pskc_model.pskc.json
+      ML_PREDICTION_THRESHOLD: 0.75
+      ML_UPDATE_INTERVAL_SECONDS: 30
+      ML_TOP_N_PREDICTIONS: 10
+    volumes:
+      - ./src:/app/src
+      - ./config:/app/config
+      - ./data:/app/data
+      - ./simulation:/app/simulation
+      - ./logs:/app/logs
+    command: >
+      python -m src.workers.prefetch_worker
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks:
+      - pskc-net
+
+  prometheus:
+    image: prom/prometheus:v2.52.0
+    container_name: pskc-prometheus
+    restart: unless-stopped
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./config/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.retention.time=7d'
+    networks:
+      - pskc-net
+    profiles:
+      - monitoring             # jalankan hanya jika: docker compose --profile monitoring up
+
+  # ----------------------------------------------------------
+  # Grafana — Dashboard visualisasi metrik
+  # ----------------------------------------------------------
+  grafana:
+    image: grafana/grafana:10.4.3
+    container_name: pskc-grafana
+    restart: unless-stopped
+    ports:
+      - "3001:3000"
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-admin}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - grafana-data:/var/lib/grafana
+    depends_on:
+      - prometheus
+    networks:
+      - pskc-net
+    profiles:
+      - monitoring             # jalankan hanya jika: docker compose --profile monitoring up
+
+# ----------------------------------------------------------
+# Networks
+# ----------------------------------------------------------
+networks:
+  pskc-net:
+    driver: bridge
+    name: pskc-network
+
+# ----------------------------------------------------------
+# Volumes (persistent storage)
+# ----------------------------------------------------------
+volumes:
+  redis-data:
+    name: pskc-redis-data
+  prometheus-data:
+    name: pskc-prometheus-data
+  grafana-data:
+    name: pskc-grafana-data

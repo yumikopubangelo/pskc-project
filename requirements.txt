@@ -1,0 +1,55 @@
+# ============================================================
+# PSKC — Predictive Secure Key Caching
+# Python Dependencies
+# ============================================================
+
+# --- Web Framework ---
+fastapi==0.111.0
+uvicorn[standard]==0.30.1
+pydantic==2.7.1
+pydantic-settings==2.3.0
+python-multipart==0.0.9
+
+# --- Machine Learning ---
+torch==2.3.1
+scikit-learn==1.5.0
+numpy==1.26.4
+pandas==2.2.2
+river==0.21.2            # Online / incremental learning
+
+# --- Cache & Storage ---
+redis==5.0.6
+hiredis==2.3.2           # C-based Redis parser (faster)
+
+# --- Cryptography & Security ---
+cryptography==42.0.8
+PyJWT==2.8.0
+passlib[bcrypt]==1.7.4
+python-jose[cryptography]==3.3.0
+
+# --- Monitoring & Observability ---
+prometheus-client==0.20.0
+opentelemetry-api==1.24.0
+opentelemetry-sdk==1.24.0
+structlog==24.1.0
+
+# --- HTTP Client (for KMS calls) ---
+httpx==0.27.0
+aiohttp==3.9.5
+
+# --- Utilities ---
+python-dotenv==1.0.1
+tenacity==8.3.0          # Retry logic
+cachetools==5.3.3        # TTL cache utilities
+schedule==1.2.2          # Background job scheduler
+
+# --- Testing ---
+pytest==8.2.2
+pytest-asyncio==0.23.7
+pytest-cov==5.0.0
+httpx==0.27.0            # Test client for FastAPI
+
+# --- Dev Tools ---
+black==24.4.2
+ruff==0.4.8
+mypy==1.10.0

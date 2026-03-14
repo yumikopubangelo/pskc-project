@@ -1,0 +1,45 @@
+{
+  "_source": "Spotify Engineering Blog — Scalable User Privacy (2018)",
+  "_url": "https://engineering.atspotify.com/2018/09/scalable-user-privacy",
+  "system": "Spotify Padlock (KMS)",
+  "description": "Key management service yang mengenkripsi personal data semua user Spotify",
+
+  "traffic": {
+    "capacity_per_second": 1000000,
+    "read_ratio": 0.999,
+    "write_ratio": 0.001,
+    "services_calling_padlock": ["login", "playlist", "spotify-connect"]
+  },
+
+  "latency_without_cache": {
+    "cassandra_p99_ms": 15,
+    "cassandra_normal_ms": 10,
+    "unit": "milliseconds",
+    "note": "Cassandra request latency grows to p99 ~15ms when serving without cache"
+  },
+
+  "latency_with_cache": {
+    "memcached_p99_ms": 4,
+    "memcached_range_ms": [2, 4],
+    "slo_target_p99_ms": 15,
+    "normal_operations_p99_ms": 5,
+    "unit": "milliseconds",
+    "note": "p99 under 5ms during normal operations with memcached layer"
+  },
+
+  "availability": {
+    "slo_target": "99.95%",
+    "target_upgrade": "99.99%",
+    "regions": 3,
+    "zones_per_region": 3,
+    "deployment_groups": ["padlock", "padlock-mirror"]
+  },
+
+  "simulation_use": {
+    "baseline_latency_ms": 15,
+    "cached_latency_ms": 4,
+    "cache_miss_latency_ms": 15,
+    "traffic_distribution": "log-normal",
+    "improvement_factor": 3.75
+  }
+}
