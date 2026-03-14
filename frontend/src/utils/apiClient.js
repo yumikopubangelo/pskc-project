@@ -97,6 +97,17 @@ class ApiClient {
     return this.request(`/simulation/results/${id}`);
   }
 
+  // Live System Test - Tests real ML, cache, and prefetch
+  async runLiveTest(numRequests = 50, seedData = true) {
+    return this.request(`/simulation/live-test?num_requests=${numRequests}&seed_data=${seedData}`, {
+      method: 'POST',
+    });
+  }
+
+  async getLiveTestStatus() {
+    return this.request('/simulation/live-test');
+  }
+
   // Security
   async getSecurityAudit() {
     return this.request('/security/audit');
