@@ -36,9 +36,9 @@ Tujuannya bukan hanya mencatat apa yang masih kurang, tetapi juga:
 | Zero-downtime key rotation | `P1` | ✅ Selesai - rotation dengan grace period dan atomicity sudah tersedia |
 | Governance model release | `P1` | ✅ Selesai - signing, provenance, promotion, rollback aktif, ensemble LSTM+RF+Markov berjalan |
 | Key lifecycle management | `P1` | ✅ Selesai - cache access, secure store, rotate, revoke, expire semua terintegrasi dalam workflow lengkap dengan API endpoints |
-| Admin dan ops control plane | `P1` | observability dasar ada, tetapi endpoint kontrol operasional masih minim |
-| River online learning integration | `P2` | RF+Markov sudah stabil, River untuk true online learning belum terintegrasi |
-| Frontend productization | `P2` | halaman utama sudah online, tetapi masih ada area UI yang menyisakan pola demo-heavy |
+| Admin dan ops control plane | `P1` | ✅ Selesai - Admin API dengan auth, cache management, model management, dan security endpoints tersedia |
+| River online learning integration | `P2` | ✅ Selesai - River dengan Adaptive Random Forest, Hoeffding Tree, dan drift handling terintegrasi |
+| Frontend productization | `P2` | ✅ Selesai - Production Dockerfile, nginx config, production build config, admin API clients tersedia |
 | Test matrix dan CI yang lebih lengkap | `P2` | CI backend minimum sudah ada, tetapi belum mencakup topology matrix dan failure path penuh |
 | Multi-environment artifacts | `P3` | Docker Compose demo sudah ada, tetapi staging/production manifest belum rapi |
 

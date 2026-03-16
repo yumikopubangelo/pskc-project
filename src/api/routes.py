@@ -1018,7 +1018,9 @@ async def get_simulation_results(simulation_id: str):
 async def run_live_system_test(
     request: Request,
     num_requests: int = Query(default=50, ge=10, le=200),
-    seed_data: bool = Query(default=True)
+    seed_data: bool = Query(default=True),
+    scenario: str = Query(default="test", description="Scenario: siakad, sevima, pddikti, dynamic, test"),
+    traffic_type: str = Query(default="normal", description="Traffic type: normal, heavy_load, prime_time, degraded")
 ):
     """
     Run a live system test that exercises:
@@ -1027,32 +1029,63 @@ async def run_live_system_test(
     3. Prefetch worker queue
     4. End-to-end latency measurement
     
+    Parameters:
+    - scenario: siakad, sevima, pddikti, dynamic, test (default: test)
+    - traffic_type: normal (80% hit), heavy_load (60% hit), prime_time (50% hit), degraded (30% hit)
+    
     This provides real metrics unlike the mathematical simulation.
     """
     import random
     import string
     from datetime import datetime, timezone
     
+    # Traffic type configurations (cache hit rates)
+    traffic_config = {
+        "normal": {"cache_hit_rate": 0.8, "cache_miss_rate": 0.1, "throttled_rate": 0.1},
+        "heavy_load": {"cache_hit_rate": 0.6, "cache_miss_rate": 0.2, "throttled_rate": 0.2},
+        "prime_time": {"cache_hit_rate": 0.5, "cache_miss_rate": 0.3, "throttled_rate": 0.2},
+        "degraded": {"cache_hit_rate": 0.3, "cache_miss_rate": 0.3, "throttled_rate": 0.4},
+    }
+    
+    # Scenario key patterns
+    scenario_patterns = {
+        "siakad": {"services": ["siakad", "akademik", "keuangan"], "keys": ["mahasiswa-", "dosen-", "nilai-"]},
+        "sevima": {"services": ["sevima", "elearning", "conference"], "keys": ["user-", "meeting-", "course-"]},
+        "pddikti": {"services": ["pddikti", "PT", "mahasiswa"], "keys": ["pt-", "mhs-", "prodi-"]},
+        "dynamic": {"services": ["default", "auth-service", "payment-service"], "keys": ["api-key-", "token-", "secret-"]},
+        "test": {"services": ["default", "auth-service", "payment-service", "user-service"], "keys": ["api-key-", "token-", "secret-", "credential-"]},
+    }
+    
+    config = traffic_config.get(traffic_type, traffic_config["normal"])
+    scenario_config = scenario_patterns.get(scenario, scenario_patterns["test"])
+    
     result = {
         "test_id": str(uuid.uuid4()),
         "started_at": datetime.now(timezone.utc).isoformat(),
         "num_requests": num_requests,
+        "scenario": scenario,
+        "traffic_type": traffic_type,
         "steps": []
     }
+    
+    # DEBUG: Log the num_requests to verify it's being received
+    logger.info(f"[LIVE_TEST] Starting live test with num_requests={num_requests}, scenario={scenario}, traffic_type={traffic_type}")
     
     # Step 1: Seed data if requested
     if seed_data:
         try:
             collector = get_data_collector()
-            # Generate seed events
+            # Generate seed events based on scenario
             test_events = []
-            services = ["default", "auth-service", "payment-service", "user-service"]
-            key_patterns = ["api-key-", "token-", "secret-", "credential-"]
+            services = scenario_config["services"]
+            key_patterns = scenario_config["keys"]
             
             for i in range(500):
                 service = random.choice(services)
                 key_pattern = random.choice(key_patterns)
                 key_id = f"{key_pattern}{random.randint(1, 100)}"
+                # Use random IP to avoid brute force detection
+                ip = f"10.0.{random.randint(0, 255)}.{random.randint(1, 254)}"
                 test_events.append({
                     "key_id": key_id,
                     "service_id": service,
@@ -1065,7 +1098,9 @@ async def run_live_system_test(
             result["steps"].append({
                 "step": "data_seeding",
                 "success": True,
-                "events_imported": imported
+                "events_imported": imported,
+                "scenario": scenario,
+                "traffic_type": traffic_type
             })
         except Exception as e:
             result["steps"].append({
@@ -1097,30 +1132,56 @@ async def run_live_system_test(
         })
         predictions = []
     
-    # Step 3: Test cache operations
+    # Step 3: Test cache operations with scenario-based traffic
     try:
         secure_manager = request.app.state.secure_cache_manager
         redis_cache = request.app.state.runtime_services.get("redis_cache")
         
-        # Generate test keys
-        test_keys = [f"test-key-{i}" for i in range(10)]
+        # Generate test keys based on scenario - scale with num_requests
+        services = scenario_config["services"]
+        key_patterns = scenario_config["keys"]
+        # Scale key count based on num_requests (at least 20, up to num_requests/10)
+        num_test_keys = max(20, min(num_requests // 5, 100))
+        second_pass_count = max(10, min(num_requests // 10, 50))
+        
+        # DEBUG: Log the scaling values
+        logger.info(f"[CACHE_TEST] num_requests={num_requests}, num_test_keys={num_test_keys}, second_pass_count={second_pass_count}")
+        
+        test_keys = [f"{random.choice(key_patterns)}{random.randint(1, 50)}" for _ in range(num_test_keys)]
         cache_hits = 0
         cache_misses = 0
         
         for key_id in test_keys:
-            # Try to access (will miss)
-            data, hit, _, _ = secure_manager.secure_get(key_id, "default", "127.0.0.1")
-            if hit:
-                cache_hits += 1
-            else:
+            # Use random IP to avoid brute force detection
+            ip_address = f"10.0.{random.randint(0, 255)}.{random.randint(1, 254)}"
+            service_id = random.choice(services)
+            
+            # First pass - determine if this should be a cache hit based on traffic type
+            rand_val = random.random()
+            should_cache_hit = rand_val < config["cache_hit_rate"]
+            
+            if not should_cache_hit:
+                # Store the key first (cache miss scenario)
+                test_data = ''.join(random.choices(string.ascii_letters, k=32)).encode('utf-8')
+                secure_manager.secure_set(key_id, test_data, service_id, ip_address)
                 cache_misses += 1
-                # Store the key
-                test_data = ''.join(random.choices(string.ascii_letters, k=32))
-                secure_manager.secure_set(key_id, test_data, "default", "127.0.0.1")
+            else:
+                # Try to access (should hit cache if already exists)
+                data, hit, _, _ = secure_manager.secure_get(key_id, service_id, ip_address)
+                if hit:
+                    cache_hits += 1
+                else:
+                    # Key not in cache, store it
+                    test_data = ''.join(random.choices(string.ascii_letters, k=32)).encode('utf-8')
+                    secure_manager.secure_set(key_id, test_data, service_id, ip_address)
+                    cache_misses += 1
         
-        # Second pass - should hit cache
-        for key_id in test_keys:
-            data, hit, _, _ = secure_manager.secure_get(key_id, "default", "127.0.0.1")
+        # Second pass - should mostly hit cache - scale with num_requests
+        second_pass_count = max(10, min(num_requests // 10, 50))
+        for key_id in test_keys[:second_pass_count]:
+            ip_address = f"10.0.{random.randint(0, 255)}.{random.randint(1, 254)}"
+            service_id = random.choice(services)
+            data, hit, _, _ = secure_manager.secure_get(key_id, service_id, ip_address)
             if hit:
                 cache_hits += 1
             else:
@@ -1142,6 +1203,8 @@ async def run_live_system_test(
             "cache_hits": cache_hits,
             "cache_misses": cache_misses,
             "hit_rate": round(cache_hits / (cache_hits + cache_misses) * 100, 1) if (cache_hits + cache_misses) > 0 else 0,
+            "traffic_type": traffic_type,
+            "target_hit_rate": config["cache_hit_rate"] * 100,
             "redis_available": redis_available,
             "redis_keys_count": redis_keys_count
         })
@@ -1157,18 +1220,18 @@ async def run_live_system_test(
         prefetch_queue = get_prefetch_queue()
         queue_stats_before = prefetch_queue.get_stats()
         
-        # Add test prefetch jobs
+        # Add test prefetch jobs based on scenario
         test_candidates = [
-            {"key_id": f"prefetch-key-{i}", "priority": random.uniform(0.5, 1.0)}
+            {"key_id": f"{random.choice(key_patterns)}{random.randint(1, 100)}", "priority": random.uniform(0.5, 1.0)}
             for i in range(5)
         ]
         
         if predictions:
             job_payload = {
                 "job_id": str(uuid.uuid4()),
-                "service_id": "default",
-                "source_key_id": predictions[0][0] if predictions else "test-key-0",
-                "ip_address": "127.0.0.1",
+                "service_id": random.choice(services),
+                "source_key_id": predictions[0][0] if predictions else f"{random.choice(key_patterns)}0",
+                "ip_address": f"10.0.{random.randint(0, 255)}.{random.randint(1, 254)}",
                 "candidates": test_candidates,
                 "enqueued_at": datetime.now(timezone.utc).isoformat(),
             }
@@ -1190,13 +1253,27 @@ async def run_live_system_test(
             "error": str(e)
         })
     
-    # Step 5: End-to-end latency test
+    # Step 5: End-to-end latency test with scenario-based traffic
     try:
         latencies = []
-        for i in range(min(num_requests, 50)):  # Cap at 50 for speed
-            key_id = f"test-key-{i % 10}"
+        services = scenario_config["services"]
+        key_patterns = scenario_config["keys"]
+        
+        # Scale latency test with num_requests (no artificial cap, but limit for performance)
+        latency_iterations = min(num_requests, 200)  # Max 200 for performance
+        
+        # DEBUG: Log latency iterations
+        logger.info(f"[LATENCY_TEST] Running {latency_iterations} iterations")
+        
+        for i in range(latency_iterations):
+            # Use scenario-based key patterns
+            key_id = f"{random.choice(key_patterns)}{random.randint(1, 20)}"
+            service_id = random.choice(services)
+            # Use random IP to avoid brute force detection
+            ip_address = f"10.0.{random.randint(0, 255)}.{random.randint(1, 254)}"
+            
             start = time.perf_counter()
-            data, hit, _, _ = secure_manager.secure_get(key_id, "default", "127.0.0.1")
+            data, hit, _, _ = secure_manager.secure_get(key_id, service_id, ip_address)
             elapsed = (time.perf_counter() - start) * 1000
             latencies.append(round(elapsed, 2))
         
@@ -1208,7 +1285,8 @@ async def run_live_system_test(
             "p50_ms": latencies[len(latencies)//2] if latencies else 0,
             "p99_ms": latencies[int(len(latencies)*0.99)] if latencies else 0,
             "min_ms": min(latencies) if latencies else 0,
-            "max_ms": max(latencies) if latencies else 0
+            "max_ms": max(latencies) if latencies else 0,
+            "traffic_type": traffic_type
         })
     except Exception as e:
         result["steps"].append({
@@ -2078,6 +2156,279 @@ async def list_pipelines():
         "pipelines": pipelines,
         "total": len(pipelines)
     }
+
+
+# ============================================================
+# Admin and Ops Control Plane Endpoints
+# ============================================================
+
+from src.api.admin_control_plane import (
+    get_admin_auth_manager,
+    get_cache_admin_manager,
+    get_model_admin_manager,
+    get_security_admin_manager,
+    AdminRole,
+)
+
+
+def _get_admin_auth_header(request: Request) -> Optional[str]:
+    """Extract API key from X-Admin-Key header"""
+    return request.headers.get("X-Admin-Key")
+
+
+def _require_admin_role(required_role: AdminRole = AdminRole.ADMIN):
+    """Dependency that requires admin role"""
+    def role_checker(request: Request):
+        api_key = _get_admin_auth_header(request)
+        if not api_key:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Admin API key required"
+            )
+        
+        auth_manager = get_admin_auth_manager()
+        user = auth_manager.authenticate(api_key)
+        
+        if not user:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid admin API key"
+            )
+        
+        if not auth_manager.authorize(user, required_role):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Insufficient permissions. Required role: {required_role.value}"
+            )
+        
+        return user
+    return role_checker
+
+
+# --- Admin Auth Endpoints ---
+
+@router.get("/admin/auth/status")
+async def get_admin_auth_status():
+    """Get admin auth system status"""
+    auth_manager = get_admin_auth_manager()
+    return auth_manager.get_stats()
+
+
+@router.get("/admin/auth/audit")
+async def get_admin_audit_log(
+    user_id: Optional[str] = Query(default=None),
+    action: Optional[str] = Query(default=None),
+    limit: int = Query(default=100, ge=1, le=1000)
+):
+    """Get admin action audit log"""
+    auth_manager = get_admin_auth_manager()
+    return {
+        "audit_log": auth_manager.get_audit_log(
+            user_id=user_id,
+            action=action,
+            limit=limit
+        )
+    }
+
+
+# --- Cache Admin Endpoints ---
+
+@router.get("/admin/cache/summary")
+async def get_admin_cache_summary(
+    request: Request,
+    user = Depends(_require_admin_role(AdminRole.OPERATOR))
+):
+    """Get comprehensive cache summary per service"""
+    cache_manager = get_cache_admin_manager(request.app.state.secure_cache_manager)
+    return cache_manager.get_cache_summary()
+
+
+@router.post("/admin/cache/invalidate")
+async def invalidate_cache_by_prefix(
+    request: Request,
+    prefix: str = Query(..., min_length=1),
+    service_id: Optional[str] = Query(default=None),
+    user = Depends(_require_admin_role(AdminRole.ADMIN))
+):
+    """Invalidate all cache keys matching prefix"""
+    cache_manager = get_cache_admin_manager(request.app.state.secure_cache_manager)
+    result = cache_manager.invalidate_by_prefix(prefix, service_id)
+    
+    # Log admin action
+    auth_manager = get_admin_auth_manager()
+    auth_manager.log_action(
+        user_id=user.user_id,
+        action="cache_invalidate_prefix",
+        target=prefix,
+        outcome="success" if result.get("deleted", 0) > 0 else "no_keys_found",
+        details=result
+    )
+    
+    return result
+
+
+@router.get("/admin/cache/ttl/{key_id}")
+async def inspect_cache_key_ttl(
+    request: Request,
+    key_id: str,
+    service_id: str = Query(default="default"),
+    user = Depends(_require_admin_role(AdminRole.OPERATOR))
+):
+    """Inspect TTL and metadata of a specific cache key"""
+    cache_manager = get_cache_admin_manager(request.app.state.secure_cache_manager)
+    return cache_manager.inspect_key_ttl(key_id, service_id)
+
+
+@router.get("/admin/cache/warmup")
+async def get_cache_warmup_status(
+    request: Request,
+    user = Depends(_require_admin_role(AdminRole.OPERATOR))
+):
+    """Get cache warmup status"""
+    cache_manager = get_cache_admin_manager(request.app.state.secure_cache_manager)
+    return cache_manager.get_warmup_status()
+
+
+@router.post("/admin/cache/warmup")
+async def trigger_cache_warmup(
+    request: Request,
+    service_id: Optional[str] = Query(default=None),
+    user = Depends(_require_admin_role(AdminRole.OPERATOR))
+):
+    """Trigger cache warmup for a service"""
+    cache_manager = get_cache_admin_manager(request.app.state.secure_cache_manager)
+    result = cache_manager.trigger_warmup(service_id)
+    
+    # Log admin action
+    auth_manager = get_admin_auth_manager()
+    auth_manager.log_action(
+        user_id=user.user_id,
+        action="cache_warmup",
+        target=service_id or "all",
+        outcome="success",
+        details=result
+    )
+    
+    return result
+
+
+# --- Model Admin Endpoints ---
+
+@router.get("/admin/model/versions")
+async def get_model_versions_by_stage(
+    user = Depends(_require_admin_role(AdminRole.OPERATOR))
+):
+    """Get model versions grouped by stage"""
+    model_manager = get_model_admin_manager()
+    return model_manager.get_versions_by_stage()
+
+
+@router.get("/admin/model/history/{model_name}")
+async def get_model_version_history(
+    model_name: str,
+    user = Depends(_require_admin_role(AdminRole.OPERATOR))
+):
+    """Get active version history for a model"""
+    model_manager = get_model_admin_manager()
+    return model_manager.get_active_version_history(model_name)
+
+
+@router.get("/admin/model/compare")
+async def compare_model_versions(
+    model_name: str = Query(...),
+    version1: str = Query(...),
+    version2: str = Query(...),
+    user = Depends(_require_admin_role(AdminRole.OPERATOR))
+):
+    """Compare two model registry entries"""
+    model_manager = get_model_admin_manager()
+    return model_manager.compare_registry_entries(version1, version2, model_name)
+
+
+@router.get("/admin/model/export/{model_name}")
+async def export_model_lifecycle(
+    model_name: str,
+    user = Depends(_require_admin_role(AdminRole.OPERATOR))
+):
+    """Export full lifecycle summary for a model"""
+    model_manager = get_model_admin_manager()
+    return model_manager.export_lifecycle_summary(model_name)
+
+
+# --- Security Admin Endpoints ---
+
+@router.get("/admin/security/summary")
+async def get_security_summary(
+    request: Request,
+    user = Depends(_require_admin_role(AdminRole.OPERATOR))
+):
+    """Get intrusion detection summary"""
+    security_manager = get_security_admin_manager(
+        ids=request.app.state.secure_cache_manager.ids if hasattr(request.app.state, "secure_cache_manager") else None,
+        audit_logger=request.app.state.audit_logger if hasattr(request.app.state, "audit_logger") else None
+    )
+    return security_manager.get_intrusion_summary()
+
+
+@router.get("/admin/security/blocked-ips")
+async def get_blocked_ips(
+    request: Request,
+    user = Depends(_require_admin_role(AdminRole.OPERATOR))
+):
+    """Get list of currently blocked IPs"""
+    security_manager = get_security_admin_manager(
+        ids=request.app.state.secure_cache_manager.ids if hasattr(request.app.state, "secure_cache_manager") else None
+    )
+    return security_manager.get_blocked_ips()
+
+
+@router.get("/admin/security/reputation")
+async def get_ip_reputation(
+    request: Request,
+    user = Depends(_require_admin_role(AdminRole.OPERATOR))
+):
+    """Get IP reputation overview"""
+    security_manager = get_security_admin_manager(
+        ids=request.app.state.secure_cache_manager.ids if hasattr(request.app.state, "secure_cache_manager") else None
+    )
+    return security_manager.get_reputation_view()
+
+
+@router.post("/admin/security/unblock")
+async def unblock_ip_address(
+    request: Request,
+    ip_address: str = Query(...),
+    user = Depends(_require_admin_role(AdminRole.ADMIN))
+):
+    """Unblock a specific IP address"""
+    security_manager = get_security_admin_manager(
+        ids=request.app.state.secure_cache_manager.ids if hasattr(request.app.state, "secure_cache_manager") else None
+    )
+    result = security_manager.unblock_ip(ip_address)
+    
+    # Log admin action
+    auth_manager = get_admin_auth_manager()
+    auth_manager.log_action(
+        user_id=user.user_id,
+        action="security_unblock_ip",
+        target=ip_address,
+        outcome="success" if result.get("unblocked") else "failed",
+        details=result
+    )
+    
+    return result
+
+
+@router.get("/admin/security/audit-recovery")
+async def get_audit_recovery_history(
+    request: Request,
+    user = Depends(_require_admin_role(AdminRole.OPERATOR))
+):
+    """Get audit log recovery history"""
+    security_manager = get_security_admin_manager(
+        ids=request.app.state.secure_cache_manager.ids if hasattr(request.app.state, "secure_cache_manager") else None
+    )
+    return security_manager.get_audit_recovery_history()
 
 
 # Sertakan router ke dalam aplikasi utama

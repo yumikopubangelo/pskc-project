@@ -98,8 +98,8 @@ class ApiClient {
   }
 
   // Live System Test - Tests real ML, cache, and prefetch
-  async runLiveTest(numRequests = 50, seedData = true) {
-    return this.request(`/simulation/live-test?num_requests=${numRequests}&seed_data=${seedData}`, {
+  async runLiveTest(numRequests = 50, seedData = true, scenario = 'test', trafficType = 'normal') {
+    return this.request(`/simulation/live-test?num_requests=${numRequests}&seed_data=${seedData}&scenario=${scenario}&traffic_type=${trafficType}`, {
       method: 'POST',
     });
   }
@@ -155,6 +155,134 @@ class ApiClient {
 
   async getPipelineMetrics(pipelineId) {
     return this.request(`/ml/pipeline/metrics/${pipelineId}`);
+  }
+
+  // ============================================================
+  // Admin Endpoints
+  // ============================================================
+
+  // Admin Auth
+  async getAdminAuthStatus() {
+    return this.request('/admin/auth/status');
+  }
+
+  async getAdminAuditLog(params = {}) {
+    const query = new URLSearchParams(params).toString();
+    return this.request(`/admin/auth/audit?${query}`);
+  }
+
+  // Cache Admin
+  async getAdminCacheSummary() {
+    return this.request('/admin/cache/summary');
+  }
+
+  async invalidateCacheByPrefix(prefix, serviceId = null) {
+    const params = new URLSearchParams({ prefix });
+    if (serviceId) params.append('service_id', serviceId);
+    return this.request(`/admin/cache/invalidate?${params}`, {
+      method: 'POST',
+    });
+  }
+
+  async inspectCacheKeyTtl(keyId, serviceId = 'default') {
+    return this.request(`/admin/cache/ttl/${keyId}?service_id=${serviceId}`);
+  }
+
+  async getCacheWarmupStatus() {
+    return this.request('/admin/cache/warmup');
+  }
+
+  async triggerCacheWarmup(serviceId = null) {
+    const params = serviceId ? `?service_id=${serviceId}` : '';
+    return this.request(`/admin/cache/warmup${params}`, {
+      method: 'POST',
+    });
+  }
+
+  // Model Admin
+  async getModelVersionsByStage() {
+    return this.request('/admin/model/versions');
+  }
+
+  async getModelVersionHistory(modelName) {
+    return this.request(`/admin/model/history/${modelName}`);
+  }
+
+  async compareModelVersions(modelName, version1, version2) {
+    return this.request(`/admin/model/compare?model_name=${modelName}&version1=${version1}&version2=${version2}`);
+  }
+
+  async exportModelLifecycle(modelName) {
+    return this.request(`/admin/model/export/${modelName}`);
+  }
+
+  // Security Admin
+  async getSecuritySummary() {
+    return this.request('/admin/security/summary');
+  }
+
+  async getBlockedIps() {
+    return this.request('/admin/security/blocked-ips');
+  }
+
+  async getIpReputation() {
+    return this.request('/admin/security/reputation');
+  }
+
+  async unblockIp(ipAddress) {
+    return this.request(`/admin/security/unblock?ip_address=${ipAddress}`, {
+      method: 'POST',
+    });
+  }
+
+  async getAuditRecoveryHistory() {
+    return this.request('/admin/security/audit-recovery');
+  }
+
+  // Prefetch Admin
+  async getPrefetchDlq(limit = 20) {
+    return this.request(`/prefetch/dlq?limit=${limit}`);
+  }
+
+  async replayPrefetchDlq(jobId = null, limit = 10) {
+    const params = new URLSearchParams({ limit: limit.toString() });
+    if (jobId) params.append('job_id', jobId);
+    return this.request(`/prefetch/dlq/replay?${params}`, {
+      method: 'POST',
+    });
+  }
+
+  async getPrefetchRateLimitStats() {
+    return this.request('/prefetch/rate-limit');
+  }
+
+  async getReplayHistory(limit = 20) {
+    return this.request(`/prefetch/replay-history?limit=${limit}`);
+  }
+
+  // ML Drift Status
+  async getDriftAnalysis() {
+    return this.request('/ml/drift');
+  }
+
+  // Key Lifecycle
+  async getKeyLifecycle(keyId) {
+    return this.request(`/keys/lifecycle/${keyId}`);
+  }
+
+  async getKeyLifecycleList(status = null, keyType = null) {
+    const params = new URLSearchParams();
+    if (status) params.append('status', status);
+    if (keyType) params.append('key_type', keyType);
+    return this.request(`/keys/lifecycle?${params}`);
+  }
+
+  async getKeyLifecycleEvents(keyId, limit = 100) {
+    return this.request(`/keys/lifecycle/${keyId}/events?limit=${limit}`);
+  }
+
+  async getKeyLifecycleStats() {
+    return this.request('/keys/lifecycle/stats');
   }
 }
 

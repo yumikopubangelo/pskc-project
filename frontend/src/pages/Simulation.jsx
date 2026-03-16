@@ -11,6 +11,28 @@ const Simulation = () => {
   const [liveTestResult, setLiveTestResult] = useState(null);
   const [error, setError] = useState(null);
   
+  // Configuration state
+  const [selectedScenario, setSelectedScenario] = useState('test');
+  const [selectedTrafficType, setSelectedTrafficType] = useState('normal');
+  const [numRequests, setNumRequests] = useState(50);
+  const [seedData, setSeedData] = useState(true);
+  
+  // Scenario and traffic type options
+  const scenarios = [
+    { value: 'test', label: 'Test (Default)' },
+    { value: 'siakad', label: 'SIAKAD (Academic)' },
+    { value: 'sevima', label: 'SEVIMA (Cloud Learning)' },
+    { value: 'pddikti', label: 'PDDikti (Higher Education)' },
+    { value: 'dynamic', label: 'Dynamic Production' },
+  ];
+  
+  const trafficTypes = [
+    { value: 'normal', label: 'Normal (80% hit rate)' },
+    { value: 'heavy_load', label: 'Heavy Load (60% hit rate)' },
+    { value: 'prime_time', label: 'Prime Time (50% hit rate)' },
+    { value: 'degraded', label: 'Degraded (30% hit rate)' },
+  ];
+  
   // Cache visualization data
   const [cacheData, setCacheData] = useState([]);
   // Prefetch visualization data
@@ -46,8 +68,8 @@ const Simulation = () => {
     setTestSummary(null);
 
     try {
-      // Call the backend live-test API
-      const result = await apiClient.runLiveTest(50, true);
+      // Call the backend live-test API with scenario and traffic type
+      const result = await apiClient.runLiveTest(numRequests, seedData, selectedScenario, selectedTrafficType);
       setLiveTestResult(result);
       
       // Process the results for visualization
@@ -118,7 +140,7 @@ const Simulation = () => {
     } finally {
       setIsSimulating(false);
     }
-  }, []);
+  }, [numRequests, seedData, selectedScenario, selectedTrafficType]);
 
   // Load system status on mount
   useEffect(() => {
@@ -158,6 +180,77 @@ const Simulation = () => {
           >
             {isSimulating ? 'Testing...' : 'Run Live Test'}
           </button>
+        </div>
+      </div>
+
+      {/* Configuration Panel */}
+      <div className="bg-dark-card rounded-lg p-4 mb-6 border border-dark-border">
+        <h2 className="text-lg font-semibold mb-4">Test Configuration</h2>
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+          {/* Scenario Selection */}
+          <div>
+            <label className="block text-sm text-gray-400 mb-1">Scenario</label>
+            <select
+              value={selectedScenario}
+              onChange={(e) => setSelectedScenario(e.target.value)}
+              className="w-full bg-dark-bg border border-dark-border rounded px-3 py-2 text-white focus:outline-none focus:border-accent-blue"
+            >
+              {scenarios.map((s) => (
+                <option key={s.value} value={s.value}>{s.label}</option>
+              ))}
+            </select>
+          </div>
+          
+          {/* Traffic Type Selection */}
+          <div>
+            <label className="block text-sm text-gray-400 mb-1">Traffic Type</label>
+            <select
+              value={selectedTrafficType}
+              onChange={(e) => setSelectedTrafficType(e.target.value)}
+              className="w-full bg-dark-bg border border-dark-border rounded px-3 py-2 text-white focus:outline-none focus:border-accent-blue"
+            >
+              {trafficTypes.map((t) => (
+                <option key={t.value} value={t.value}>{t.label}</option>
+              ))}
+            </select>
+          </div>
+          
+          {/* Number of Requests */}
+          <div>
+            <label className="block text-sm text-gray-400 mb-1">Requests</label>
+            <input
+              type="number"
+              min="10"
+              max="200"
+              value={numRequests}
+              onChange={(e) => {
+                const val = e.target.value;
+                if (val === '') {
+                  setNumRequests(50);
+                } else {
+                  const parsed = parseInt(val, 10);
+                  if (!isNaN(parsed)) {
+                    setNumRequests(Math.min(200, Math.max(10, parsed)));
+                  }
+                }
+              }}
+              className="w-full bg-dark-bg border border-dark-border rounded px-3 py-2 text-white focus:outline-none focus:border-accent-blue"
+            />
+          </div>
+          
+          {/* Seed Data Toggle */}
+          <div>
+            <label className="block text-sm text-gray-400 mb-1">Options</label>
+            <label className="flex items-center gap-2 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={seedData}
+                onChange={(e) => setSeedData(e.target.checked)}
+                className="w-4 h-4 accent-accent-blue"
+              />
+              <span className="text-sm">Seed Training Data</span>
+            </label>
+          </div>
         </div>
       </div>
 
@@ -356,6 +449,8 @@ const Simulation = () => {
             <p>Started: <span className="text-gray-300">{new Date(liveTestResult.started_at).toLocaleString()}</span></p>
             <p>Completed: <span className="text-gray-300">{new Date(liveTestResult.completed_at).toLocaleString()}</span></p>
             <p>Requests: <span className="text-gray-300">{liveTestResult.num_requests}</span></p>
+            <p>Scenario: <span className="text-blue-400">{liveTestResult.scenario || 'test'}</span></p>
+            <p>Traffic Type: <span className="text-purple-400">{liveTestResult.traffic_type || 'normal'}</span></p>
           </div>
           
           <h3 className="font-semibold mt-4 mb-2">Step Results:</h3>

@@ -290,6 +290,73 @@ Lihat [`simulation/runner.py`](simulation/runner.py) untuk menjalankan simulasi.
 | Benchmark | [`scripts/benchmark.py`](scripts/benchmark.py) | Benchmark baseline vs PSKC |
 | Seed Data | [`scripts/seed_data.py`](scripts/seed_data.py) | Seed data sintetis |
 
+### 8. Online Learning dengan River
+
+| Komponen | File | Deskripsi |
+|----------|------|------------|
+| River Online Learner | [`src/ml/river_online_learning.py`](src/ml/river_online_learning.py) | **True online learning dengan River** |
+
+**Fitur:**
+- **Adaptive Random Forest (ARF)** - handles concept drift natively
+- **Hoeffding Tree** - efficient incremental decision tree
+- **Logistic Regression** - linear online learning
+- **Drift detection** - menggunakan ADWIN
+- **Ensemble support** - gabungkan dengan model existing (RF + Markov)
+
+**Fungsi utama:**
+- `create_river_learner()` - Factory untuk membuat learner
+- `RiverEnsemble` - Ensemble combining River dengan RF dan Markov
+- `online_learn_from_event()` - Process single event untuk online learning
+
+### 9. Admin dan Ops Control Plane
+
+| Komponen | File | Deskripsi |
+|----------|------|------------|
+| Admin Control Plane | [`src/api/admin_control_plane.py`](src/api/admin_control_plane.py) | **Admin API dengan authentication dan authorization** |
+
+**Fitur:**
+- **Admin Auth** - API key based authentication dengan role levels (Observer, Operator, Admin)
+- **Cache Admin** - Summary per service, invalidate by prefix, inspect TTL, warmup status
+- **Model Admin** - Versions by stage, version history, compare entries, export lifecycle
+- **Security Admin** - Intrusion summary, blocked IPs, reputation view, audit recovery
+- **Audit Log** - Semua admin actions di-log untuk compliance
+
+**Endpoint Admin:**
+- `GET /admin/auth/status` - Admin auth system status
+- `GET /admin/auth/audit` - Admin action audit log
+- `GET /admin/cache/summary` - Cache summary per service
+- `POST /admin/cache/invalidate` - Invalidate keys by prefix
+- `GET /admin/cache/ttl/{key_id}` - Inspect key TTL
+- `GET /admin/cache/warmup` - Warmup status
+- `POST /admin/cache/warmup` - Trigger warmup
+- `GET /admin/model/versions` - Model versions by stage
+- `GET /admin/model/history/{model_name}` - Version history
+- `GET /admin/model/compare` - Compare two versions
+- `GET /admin/model/export/{model_name}` - Export lifecycle
+- `GET /admin/security/summary` - Intrusion summary
+- `GET /admin/security/blocked-ips` - Blocked IP list
+- `GET /admin/security/reputation` - IP reputation overview
+- `POST /admin/security/unblock` - Unblock IP
+- `GET /admin/security/audit-recovery` - Audit recovery history
+
+### 10. Frontend Production
+
+| Komponen | File | Deskripsi |
+|----------|------|------------|
+| Production Dockerfile | [`frontend/Dockerfile.production`](frontend/Dockerfile.production) | Multi-stage build dengan nginx |
+| Nginx Config | [`frontend/nginx.conf`](frontend/nginx.conf) | Production nginx configuration |
+| Vite Config | [`frontend/vite.config.js`](frontend/vite.config.js) | Production build settings |
+| API Client | [`frontend/src/utils/apiClient.js`](frontend/src/utils/apiClient.js) | Admin API endpoints included |
+
+**Fitur Production:**
+- **Multi-stage Dockerfile** - Build React app then serve with nginx
+- **Static asset caching** - 1 year cache for immutable assets
+- **Gzip compression** - Enabled for text assets
+- **Security headers** - X-Frame-Options, X-Content-Type-Options, etc.
+- **API proxy** - Nginx forwards /api/ to backend
+- **Content hashing** - Cache busting for production builds
+- **Admin API integration** - All admin endpoints available in frontend
+
 ### 8. Endpoint ML
 
 | Endpoint | Method | Deskripsi |
