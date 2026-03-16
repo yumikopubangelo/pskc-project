@@ -29,6 +29,14 @@ services:
     image: nginx:1.25-alpine
     container_name: pskc-nginx
     restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 256Mi
+        reservations:
+          cpus: '0.1'
+          memory: 64Mi
     ports:
       - "80:80"
       - "443:443"
@@ -57,6 +65,24 @@ services:
       target: runtime
     container_name: pskc-api
     restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 2Gi
+        reservations:
+          cpus: '0.5'
+          memory: 512Mi
+      replicas: 2
+      update_config:
+        parallelism: 1
+        delay: 10s
+        failure_action: rollback
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 3
+        window: 120s
     environment:
       # Production environment
       APP_ENV: production
@@ -183,6 +209,15 @@ services:
       target: runtime
     container_name: pskc-prefetch-worker
     restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 1Gi
+        reservations:
+          cpus: '0.25'
+          memory: 256Mi
+      replicas: 2
     environment:
       APP_ENV: production
       LOG_LEVEL: info
@@ -222,8 +257,6 @@ services:
         condition: service_healthy
     networks:
       - pskc-net
-    deploy:
-      replicas: 2
 
   # ----------------------------------------------------------
   # Prometheus — Metrics scraping

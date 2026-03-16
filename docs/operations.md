@@ -341,6 +341,20 @@ File `config/prometheus.rules.yml` berisi alert rules untuk:
 | PSKCMLModelNotLoaded | critical | ML model not loaded > 5m |
 | PSKCHighLatency | warning | Avg latency > 1000ms > 5m |
 
+### Comprehensive Metrics API
+
+Metrics sekarang persistent di Redis dan bisa diakses melalui API:
+
+| Endpoint | Fungsi |
+| --- | --- |
+| `/metrics/comprehensive` | Ringkasan metrics lengkap (cache, latency, ML, lifecycle) |
+| `/metrics/historical/cache` | Cache hit rate dalam time window |
+| `/metrics/historical/latency` | Latency percentiles (p50, p95, p99) |
+| `/metrics/ml/training` | History training ML |
+| `/metrics/drift` | History deteksi concept drift |
+| `/metrics/lifecycle/model` | History lifecycle model |
+| `/metrics/lifecycle/key-rotation` | History rotasi kunci |
+
 ### Retention Policy
 
 Konfigurasi retention di environment:

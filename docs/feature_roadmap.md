@@ -29,7 +29,7 @@ Tujuannya bukan hanya mencatat apa yang masih kurang, tetapi juga:
 | Area | Prioritas | Status singkat |
 | --- | --- | --- |
 | Deployment dan topologi runtime | `P0` | stack sudah hidup, tetapi policy deployment nyata masih kurang rinci |
-| Observability historis | `P0` | metrics endpoint sudah ada, tetapi banyak data masih hidup di memori proses |
+| Observability historis | `P0` | ✅ Selesai - metrics endpoint sekarang dengan persistence ke Redis, ML training metrics, drift events, model lifecycle, key rotation events |
 | Prefetch orchestration yang matang | `P1` | queue, retry, DLQ sudah ada, tetapi replay dan rate control belum matang |
 | Concept drift EWMA maturation | `P1` | ada di desain, implementasi belum matang, perlu diselesaikan agar konsisten dengan klaim paper |
 | Benchmark validation suite | `P1` | simulasi sudah berjalan, tetapi reproducibility dan validasi statistik formal belum ada |

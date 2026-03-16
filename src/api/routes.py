@@ -1720,6 +1720,109 @@ async def get_historical_latency_metrics(
     return latency_stats
 
 
+@router.get("/metrics/comprehensive")
+async def get_comprehensive_metrics():
+    """
+    Get comprehensive metrics summary including all types.
+    
+    Returns:
+    - Request metrics (count, hit rate)
+    - Latency metrics (percentiles)
+    - ML metrics (training history, drift events)
+    - Lifecycle metrics (model events, key rotation events)
+    """
+    metrics_persistence = get_metrics_persistence()
+    if metrics_persistence is None or not metrics_persistence.ping():
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Metrics persistence unavailable"
+        )
+    
+    return metrics_persistence.get_comprehensive_metrics()
+
+
+@router.get("/metrics/ml/training")
+async def get_ml_training_history(
+    limit: int = Query(default=10, ge=1, le=100)
+):
+    """
+    Get ML training history from persistent storage.
+    """
+    metrics_persistence = get_metrics_persistence()
+    if metrics_persistence is None or not metrics_persistence.ping():
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Metrics persistence unavailable"
+        )
+    
+    return {
+        "training_history": metrics_persistence.get_ml_training_history(limit=limit)
+    }
+
+
+@router.get("/metrics/drift")
+async def get_drift_history(
+    limit: int = Query(default=50, ge=1, le=200)
+):
+    """
+    Get concept drift detection history from persistent storage.
+    """
+    metrics_persistence = get_metrics_persistence()
+    if metrics_persistence is None or not metrics_persistence.ping():
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Metrics persistence unavailable"
+        )
+    
+    return {
+        "drift_history": metrics_persistence.get_drift_history(limit=limit)
+    }
+
+
+@router.get("/metrics/lifecycle/model")
+async def get_model_lifecycle_history(
+    model_name: Optional[str] = Query(default=None),
+    limit: int = Query(default=50, ge=1, le=200)
+):
+    """
+    Get model lifecycle history from persistent storage.
+    """
+    metrics_persistence = get_metrics_persistence()
+    if metrics_persistence is None or not metrics_persistence.ping():
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Metrics persistence unavailable"
+        )
+    
+    return {
+        "lifecycle_history": metrics_persistence.get_model_lifecycle_history(
+            model_name=model_name, limit=limit
+        )
+    }
+
+
+@router.get("/metrics/lifecycle/key-rotation")
+async def get_key_rotation_history(
+    key_id: Optional[str] = Query(default=None),
+    limit: int = Query(default=50, ge=1, le=200)
+):
+    """
+    Get key rotation lifecycle history from persistent storage.
+    """
+    metrics_persistence = get_metrics_persistence()
+    if metrics_persistence is None or not metrics_persistence.ping():
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Metrics persistence unavailable"
+        )
+    
+    return {
+        "rotation_history": metrics_persistence.get_key_rotation_history(
+            key_id=key_id, limit=limit
+        )
+    }
+
+
 # ============================================================
 # ML Evaluation Endpoints
 # ============================================================

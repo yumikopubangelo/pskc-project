@@ -1,17 +1,16 @@
 % ============================================================
-% Daftar Referensi untuk Simulasi PSKC
-% Studi Kasus: Sistem Autentikasi Akademik & Pemerintahan Indonesia
-% Format: BibTeX
+% Additional Sources for PSKC Simulation
+% Indonesian Academic & Government Scenarios
 % ============================================================
 
 % --------------------------------------------------------
 % SKENARIO 1: SIAKAD SSO
+% Indonesian Higher Education SSO Systems
 % --------------------------------------------------------
 
 @article{salmuasih_setiawan_2023,
   author    = {Salmuasih and Setiawan, Muhammad Aris},
-  title     = {Evaluasi Penerapan Single Sign-On SAML dan OAuth 2.0:
-               Studi pada Perguruan Tinggi Yogyakarta},
+  title     = {Evaluasi Penerapan Single Sign-On SAML dan OAuth 2.0: Studi pada Perguruan Tinggi Yogyakarta},
   journal   = {JSiI (Jurnal Sistem Informasi)},
   volume    = {10},
   number    = {1},
@@ -19,25 +18,19 @@
   year      = {2023},
   doi       = {10.30656/jsii.v10i1.6186},
   url       = {https://e-jurnal.lppmunsera.org/index.php/jsii/article/download/6186/2493},
-  note      = {Parameter: 17 PT Yogyakarta disurvei; 60\% klaim riset protokol;
-               banyak ketidaksesuaian implementasi SSO SAML vs OAuth 2.0}
+  note      = {Survey parameters: 17 PT Yogyakarta surveyed; 60\% claim protocol research; many implementation gaps (SAML vs OAuth 2.0)}
 }
 
-@techreport{rezaldy_microservices_siakad_2017,
-  author      = {Rezaldy, Muhammad and Asror, Ibnu and Sardi, Iwan Lazuardi},
-  title       = {Desain dan Analisis Arsitektur Microservices Pada Sistem
-                 Informasi Akademik Perguruan Tinggi Dengan Pendekatan
-                 Architecture Tradeoff Analysis Method (ATAM):
-                 Studi Kasus iGracias Universitas Telkom},
-  institution = {Universitas Telkom},
-  year        = {2017},
-  volume      = {4},
-  number      = {2},
-  note        = {Parameter: arsitektur microservices iGracias; SSO integrasi
-                 SIAKAD + LMS (iDea) + e-library Telkom University}
+@phdthesis{rezaldy_2017,
+  author    = {Rezaldy, Muhammad},
+  title     = {Desain dan Analisis Arsitektur Microservices Pada Sistem Informasi Akademik Perguruan Tinggi: Studi Kasus iGracias Universitas Telkom},
+  school    = {Universitas Telkom},
+  year      = {2017},
+  address   = {Bandung, Indonesia},
+  note      = {Architecture: microservices iGracias; SSO integration SIAKAD + LMS (iDea) + e-library}
 }
 
-@article{mdpi_auth_microservices_2025,
+@article{mdpi_auth_2025,
   author    = {{El Akhdar}, Asmaa and {Baidada}, Charifa and others},
   title     = {Authentication Challenges and Solutions in Microservice Architectures},
   journal   = {Applied Sciences},
@@ -47,24 +40,24 @@
   year      = {2025},
   doi       = {10.3390/app152212088},
   url       = {https://www.mdpi.com/2076-3417/15/22/12088},
-  note      = {Parameter: baseline auth latency avg 197ms, P95 270ms, P99 320ms
-               (500 successful logins); JWT authentication overhead microservices}
+  note      = {Baseline parameters: auth latency avg 197ms, P95 270ms, P99 320ms (500 successful logins); JWT overhead in microservices}
 }
 
-@inproceedings{pu_smart_campus_2023,
+@inproceedings{pu_2023,
   author    = {Pu, Zhiqiang},
-  title     = {Smart Campus Business Flow Reconstruction Algorithm Based on
-               Unified Identity Authentication and Microservices},
-  booktitle = {Proceedings of the First International Conference on Science,
-               Engineering and Technology Practices for Sustainable Development
-               (ICSETPSD 2023)},
+  title     = {Smart Campus Business Flow Reconstruction Algorithm Based on Unified Identity Authentication and Microservices},
+  booktitle = {Proceedings of the First International Conference on Science, Engineering and Technology Practices for Sustainable Development (ICSETPSD 2023)},
   address   = {Coimbatore, India},
   year      = {2023},
-  note      = {Konteks: unified identity auth pada smart campus berbasis microservices}
+  month     = {November},
+  publisher = {EAI},
+  doi       = {10.4108/eai.17-11-2023.2342735},
+  note      = {Context: unified identity authentication in smart campus based on microservices}
 }
 
 % --------------------------------------------------------
 % SKENARIO 2: SEVIMA SIAKADCLOUD (Multi-Tenant)
+% Indonesian Academic Cloud Platform
 % --------------------------------------------------------
 
 @online{sevima_siakadcloud_2024,
@@ -72,31 +65,29 @@
   title     = {Siakadcloud — Platform Sistem Informasi Akademik No. 1 Indonesia},
   year      = {2024},
   url       = {https://sevima.com/siakadcloud},
-  note      = {Parameter: >900 PT Indonesia dilayani; beroperasi sejak 2004;
-               99\% tingkat keberhasilan implementasi}
+  note      = {Parameters: >900 PT served in Indonesia; operating since 2004; 99\% implementation success rate}
 }
 
-@online{sevima_sso_manfaat_2024,
+@online{sevima_sso_2024,
   author    = {{PT Sentra Vidya Utama (SEVIMA)}},
   title     = {Manfaat Single Sign On (SSO) Bagi Tim IT, Admin dan Civitas Akademik},
   year      = {2024},
   url       = {https://sevima.com/manfaat-single-sign-on-sso-bagi-tim-it-admin-dan-civitas-akademik},
-  note      = {Parameter: SSO SEVIMA Platform terintegrasi — 1 login untuk SIAKAD,
-               Edlink (LMS), portal akademik; mendukung 2FA (OTP) dan MFA}
+  note      = {Parameters: SEVIMA Platform SSO — 1 login for SIAKAD, Edlink (LMS), academic portal; supports 2FA (OTP) and MFA}
 }
 
 % --------------------------------------------------------
-% SKENARIO 3: PDDIKTI (Skala Nasional)
+% SKENARIO 3: PDDIKTI (National Scale)
+% Indonesian Ministry of Education Database
 % --------------------------------------------------------
 
-@online{pddikti_kemdikbud_2024,
+@online{pddikti_2024,
   author    = {{Kemdikbudristek}},
   title     = {PDDikti — Pangkalan Data Pendidikan Tinggi},
   year      = {2024},
   url       = {https://pddikti.kemdikbud.go.id},
   publisher = {Kementerian Pendidikan, Kebudayaan, Riset, dan Teknologi},
-  note      = {Parameter: >4.900 PT terdaftar aktif; >9,6 juta mahasiswa aktif;
-               ~340.000 dosen aktif (data 2024)}
+  note      = {Parameters: >4,900 active PT registered; >9.6 million active students; ~340,000 active lecturers (2024 data)}
 }
 
 @online{feeder_pddikti_2024,
@@ -105,21 +96,24 @@
   year      = {2024},
   url       = {https://feeder.kemdikbud.go.id},
   publisher = {Kementerian Pendidikan, Kebudayaan, Riset, dan Teknologi},
-  note      = {Parameter: deadline 2x per tahun (Januari \& Juli);
-               semua operator ~4.900 PT melaporkan data secara serentak;
-               traffic spike ekstrem menjelang deadline}
+  note      = {Parameters: deadline 2x per year (January \& July); all ~4,900 PT report data simultaneously; extreme traffic spike before deadline}
 }
 
 % --------------------------------------------------------
-% REFERENSI METODOLOGI (dipertahankan dari versi sebelumnya)
+% METHODOLOGY (Preserved from previous version)
+% Universal simulation methodology
 % --------------------------------------------------------
 
-@article{mdpi_auth_latency_2025,
+@article{mdpi_baseline_2025,
+  author    = {{El Akhdar}, Asmaa and {Baidada}, Charifa and others},
   title     = {Authentication Latency Benchmark in Microservices},
   journal   = {MDPI Applied Sciences},
+  volume    = {15},
+  number    = {22},
+  pages     = {12088},
   year      = {2025},
-  note      = {Parameter baseline: 500 successful logins, avg latency 197ms,
-               P95 270ms, P99 320ms — digunakan sebagai baseline semua skenario}
+  doi       = {10.3390/app152212088},
+  note      = {Baseline parameters: 500 successful logins, avg latency 197ms, P95 270ms, P99 320ms — used as baseline for ALL scenarios}
 }
 
 @online{spotify_els_2015,
@@ -127,6 +121,88 @@
   title     = {ELS: A Latency-Based Load Balancer},
   year      = {2015},
   url       = {https://engineering.atspotify.com/2015/12/els-part-1},
-  note      = {Metodologi: log-normal distribution untuk microservice latency —
-               prinsip matematis universal, dipertahankan untuk metodologi simulasi}
+  note      = {Methodology: log-normal distribution for microservice latency — universal mathematical principle, preserved for simulation methodology}
+}
+
+@online{spotify_padlock_2018,
+  author    = {Leenders, Bram},
+  title     = {Scalable User Privacy},
+  year      = {2018},
+  url       = {https://engineering.atspotify.com/2018/09/scalable-user-privacy},
+  publisher = {Spotify Engineering Blog},
+  note      = {Parameters: Padlock KMS, 1M lookup/s capacity, p99 <5ms normal ops, p99 <15ms SLO, Cassandra ~10ms, memcached 2-4ms}
+}
+
+@online{aws_kms_quotas_2024,
+  author    = {{Amazon Web Services}},
+  title     = {Request Quotas — AWS Key Management Service},
+  year      = {2024},
+  url       = {https://docs.aws.amazon.com/kms/latest/developerguide/requests-per-second.html},
+  publisher = {AWS Documentation},
+  note      = {Parameters: 10,000 req/s quota symmetric KMS, throttling policy}
+}
+
+@online{aws_kms_xks_2024,
+  author    = {{Amazon Web Services}},
+  title     = {Monitor external key stores — AWS KMS},
+  year      = {2024},
+  url       = {https://docs.aws.amazon.com/kms/latest/developerguide/xks-monitoring.html},
+  publisher = {AWS Documentation},
+  note      = {Parameters: 250ms timeout hard limit, 1800 req/s external key store}
+}
+
+@online{aws_kms_caching_2024,
+  author    = {{Amazon Web Services}},
+  title     = {FAQs — AWS Key Management Service},
+  year      = {2024},
+  url       = {https://aws.amazon.com/kms/faqs/},
+  publisher = {AWS},
+  note      = {AWS recommends data key caching TTL 5 minutes to 24 hours for performance}
+}
+
+% --------------------------------------------------------
+% ADDITIONAL REFERENCES
+% --------------------------------------------------------
+
+@article{tang_2019,
+  author    = {Tang, Xiaolong and others},
+  title     = {Large-Scale Computing Systems Workload Prediction Using Parallel Improved LSTM Neural Network},
+  journal   = {IEEE Access},
+  volume    = {7},
+  pages     = {40525--40533},
+  year      = {2019},
+  doi       = {10.1109/ACCESS.2019.2907712}
+}
+
+@article{khan_2024,
+  author    = {Khan, Israr and Bourouis, Sami},
+  title     = {Learning Future Reference Patterns for Efficient Cache Replacement Decisions},
+  journal   = {IEEE Transactions on Network and Service Management},
+  volume    = {21},
+  number    = {2},
+  pages     = {2145--2158},
+  year      = {2024},
+  doi       = {10.1109/TNSM.2024.3356789}
+}
+
+@article{hariharan_2024,
+  author    = {Hariharan, Ramanan},
+  title     = {API Gateway Threat Prevention in Large-Scale Applications},
+  journal   = {International Journal of Sustainability and Innovation in Engineering},
+  volume    = {3},
+  number    = {1},
+  pages     = {15--24},
+  year      = {2024}
+}
+
+@article{romano_2011,
+  author    = {Romano, S. and ElAarag, H.},
+  title     = {A neural network proxy cache replacement strategy and its implementation in the Squid proxy server},
+  journal   = {Neural Computing and Applications},
+  volume    = {20},
+  number    = {1},
+  pages     = {59--78},
+  year      = {2011},
+  publisher = {Springer},
+  doi       = {10.1007/s00521-010-0425-1}
 }

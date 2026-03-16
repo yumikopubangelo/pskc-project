@@ -1,0 +1,560 @@
+# ============================================================
+# PSKC — Kubernetes Production Deployment
+# Full production configuration with HPA, PVC, and security
+# ============================================================
+---
+# Namespace
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: pskc
+  labels:
+    app.kubernetes.io/name: pskc
+    app.kubernetes.io/component: namespace
+
+---
+# ConfigMap - Non-sensitive configuration
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: pskc-config
+  namespace: pskc
+data:
+  APP_ENV: "production"
+  LOG_LEVEL: "info"
+  REDIS_HOST: "pskc-redis"
+  REDIS_PORT: "6379"
+  CACHE_TTL_SECONDS: "300"
+  CACHE_MAX_SIZE: "50000"
+  ML_MODEL_NAME: "pskc_model"
+  ML_MODEL_STAGE: "production"
+  ML_PREDICTION_THRESHOLD: "0.80"
+  ML_UPDATE_INTERVAL_SECONDS: "60"
+  ML_TOP_N_PREDICTIONS: "20"
+  PREFETCH_QUEUE_KEY: "pskc:prefetch:jobs"
+  TRUSTED_PROXIES: "10.0.0.0/8,172.16.0.0/12"
+
+---
+# Secrets (use external secret operator in production)
+apiVersion: v1
+kind: Secret
+metadata:
+  name: pskc-secrets
+  namespace: pskc
+type: Opaque
+stringData:
+  SECRET_KEY: "changeme-production-secret-key-min-32-characters"
+  CACHE_ENCRYPTION_KEY: "changeme-encryption-key-min-32-characters"
+  ML_MODEL_SIGNING_KEY: "changeme-model-signing-key"
+  REDIS_PASSWORD: "changeme-redis-password"
+  GRAFANA_PASSWORD: "changeme-grafana-password"
+
+---
+# Redis Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pskc-redis
+  namespace: pskc
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: pskc-redis
+  template:
+    metadata:
+      labels:
+        app: pskc-redis
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999
+        fsGroup: 999
+      containers:
+      - name: redis
+        image: redis:7.2-alpine
+        args:
+        - redis-server
+        - --requirepass
+        - $(REDIS_PASSWORD)
+        - --maxmemory
+        - "512mb"
+        - --maxmemory-policy
+        - allkeys-lru
+        - --maxclients
+        - "10000"
+        - --save
+        - "300"
+        - "100"
+        - --save
+        - "60"
+        - "10000"
+        - --appendonly
+        - "yes"
+        - --appendfsync
+        - "everysec"
+        ports:
+        - containerPort: 6379
+          name: redis
+        resources:
+          requests:
+            cpu: 250m
+            memory: 512Mi
+          limits:
+            cpu: 1000m
+            memory: 2Gi
+        livenessProbe:
+          exec:
+            command:
+            - redis-cli
+            - -a
+            - $(REDIS_PASSWORD)
+            - ping
+          initialDelaySeconds: 10
+          periodSeconds: 15
+          timeoutSeconds: 5
+        readinessProbe:
+          exec:
+            command:
+            - redis-cli
+            - -a
+            - $(REDIS_PASSWORD)
+            - ping
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        env:
+        - name: REDIS_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: pskc-secrets
+              key: REDIS_PASSWORD
+        volumeMounts:
+        - name: redis-data
+          mountPath: /data
+      volumes:
+      - name: redis-data
+        persistentVolumeClaim:
+          claimName: pskc-redis-pvc
+
+---
+# Redis PVC
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: pskc-redis-pvc
+  namespace: pskc
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 10Gi
+  storageClassName: fast
+
+---
+# Redis Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: pskc-redis
+  namespace: pskc
+spec:
+  ports:
+  - port: 6379
+    targetPort: 6379
+  selector:
+    app: pskc-redis
+
+---
+# PSKC API Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pskc-api
+  namespace: pskc
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: pskc-api
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        app: pskc-api
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10000
+        runAsGroup: 10000
+        fsGroup: 10000
+        seccompProfile:
+          type: RuntimeDefault
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            podAffinityTerm:
+              labelSelector:
+                matchLabels:
+                  app: pskc-api
+              topologyKey: kubernetes.io/hostname
+      containers:
+      - name: pskc-api
+        image: pskc/api:latest
+        imagePullPolicy: Always
+        ports:
+        - containerPort: 8000
+          name: http
+        resources:
+          requests:
+            cpu: 500m
+            memory: 512Mi
+          limits:
+            cpu: 2000m
+            memory: 2Gi
+        env:
+        - name: APP_ENV
+          valueFrom:
+            configMapKeyRef:
+              name: pskc-config
+              key: APP_ENV
+        - name: LOG_LEVEL
+          valueFrom:
+            configMapKeyRef:
+              name: pskc-config
+              key: LOG_LEVEL
+        - name: REDIS_HOST
+          valueFrom:
+            configMapKeyRef:
+              name: pskc-config
+              key: REDIS_HOST
+        - name: REDIS_PORT
+          valueFrom:
+            configMapKeyRef:
+              name: pskc-config
+              key: REDIS_PORT
+        - name: REDIS_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: pskc-secrets
+              key: REDIS_PASSWORD
+        - name: SECRET_KEY
+          valueFrom:
+            secretKeyRef:
+              name: pskc-secrets
+              key: SECRET_KEY
+        - name: CACHE_ENCRYPTION_KEY
+          valueFrom:
+            secretKeyRef:
+              name: pskc-secrets
+              key: CACHE_ENCRYPTION_KEY
+        - name: ML_MODEL_SIGNING_KEY
+          valueFrom:
+            secretKeyRef:
+              name: pskc-secrets
+              key: ML_MODEL_SIGNING_KEY
+        - name: FIPS_SELF_TEST_ENABLED
+          value: "true"
+        - name: HTTP_SECURITY_ENABLED
+          value: "true"
+        - name: HTTP_RATE_LIMIT_ENABLED
+          value: "true"
+        - name: TRUSTED_PROXIES
+          valueFrom:
+            configMapKeyRef:
+              name: pskc-config
+              key: TRUSTED_PROXIES
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 10
+          periodSeconds: 30
+          timeoutSeconds: 5
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /health/ready
+            port: 8000
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+          successThreshold: 1
+        startupProbe:
+          httpGet:
+            path: /health/startup
+            port: 8000
+          failureThreshold: 30
+          periodSeconds: 10
+        volumeMounts:
+        - name: data
+          mountPath: /app/data
+        - name: logs
+          mountPath: /app/logs
+      volumes:
+      - name: data
+        persistentVolumeClaim:
+          claimName: pskc-data-pvc
+      - name: logs
+        emptyDir: {}
+
+---
+# PSKC API Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: pskc-api
+  namespace: pskc
+  annotations:
+    prometheus.io/scrape: "true"
+    prometheus.io/port: "8000"
+    prometheus.io/path: "/metrics/prometheus"
+spec:
+  ports:
+  - port: 8000
+    targetPort: 8000
+    protocol: TCP
+  selector:
+    app: pskc-api
+
+---
+# PSKC API Horizontal Pod Autoscaler
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: pskc-api-hpa
+  namespace: pskc
+spec:
+  minReplicas: 2
+  maxReplicas: 10
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: pskc-api
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
+  - type: Resource
+    resource:
+      name: memory
+      target:
+        type: Utilization
+        averageUtilization: 80
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 60
+      policies:
+      - type: Percent
+        value: 100
+        periodSeconds: 15
+    scaleDown:
+      stabilizationWindowSeconds: 300
+      policies:
+      - type: Percent
+        value: 10
+        periodSeconds: 60
+
+---
+# Prefetch Worker Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pskc-prefetch-worker
+  namespace: pskc
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: pskc-prefetch-worker
+  template:
+    metadata:
+      labels:
+        app: pskc-prefetch-worker
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10000
+        runAsGroup: 10000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: prefetch-worker
+        image: pskc/api:latest
+        imagePullPolicy: Always
+        command:
+        - python
+        - -m
+        - src.workers.prefetch_worker
+        resources:
+          requests:
+            cpu: 250m
+            memory: 256Mi
+          limits:
+            cpu: 1000m
+            memory: 1Gi
+        env:
+        - name: APP_ENV
+          value: "production"
+        - name: REDIS_HOST
+          value: "pskc-redis"
+        - name: REDIS_PORT
+          value: "6379"
+        - name: REDIS_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: pskc-secrets
+              key: REDIS_PASSWORD
+        - name: CACHE_ENCRYPTION_KEY
+          valueFrom:
+            secretKeyRef:
+              name: pskc-secrets
+              key: CACHE_ENCRYPTION_KEY
+        - name: ML_MODEL_SIGNING_KEY
+          valueFrom:
+            secretKeyRef:
+              name: pskc-secrets
+              key: ML_MODEL_SIGNING_KEY
+        - name: FIPS_SELF_TEST_ENABLED
+          value: "true"
+        - name: LOG_LEVEL
+          value: "info"
+        volumeMounts:
+        - name: data
+          mountPath: /app/data
+        - name: logs
+          mountPath: /app/logs
+      volumes:
+      - name: data
+        persistentVolumeClaim:
+          claimName: pskc-data-pvc
+      - name: logs
+        emptyDir: {}
+
+---
+# Prefetch Worker HPA
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: pskc-prefetch-worker-hpa
+  namespace: pskc
+spec:
+  minReplicas: 1
+  maxReplicas: 5
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: pskc-prefetch-worker
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
+
+---
+# Data PVC
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: pskc-data-pvc
+  namespace: pskc
+spec:
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: 5Gi
+
+---
+# Network Policy
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: pskc-network-policy
+  namespace: pskc
+spec:
+  podSelector:
+    matchLabels:
+      app: pskc-api
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          name: ingress-nginx
+    ports:
+    - protocol: TCP
+      port: 8000
+  egress:
+  - to:
+    - podSelector:
+        matchLabels:
+          app: pskc-redis
+    ports:
+    - protocol: TCP
+      port: 6379
+  - to:
+    - namespaceSelector: {}
+    ports:
+    - protocol: TCP
+      port: 53
+    - protocol: UDP
+      port: 53
+
+---
+# Ingress (requires ingress controller)
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: pskc-ingress
+  namespace: pskc
+  annotations:
+    kubernetes.io/ingress.class: nginx
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/proxy-body-size: "10m"
+    nginx.ingress.kubernetes.io/proxy-connect-timeout: "30"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "60"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "60"
+spec:
+  tls:
+  - hosts:
+    - pskc.yourdomain.com
+    secretName: pskc-tls-secret
+  rules:
+  - host: pskc.yourdomain.com
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: pskc-api
+            port:
+              number: 8000
+
+---
+# TLS Secret (replace with actual certificate)
+apiVersion: v1
+kind: Secret
+metadata:
+  name: pskc-tls-secret
+  namespace: pskc
+type: kubernetes.io/tls
+stringData:
+  tls.crt: |
+    # Paste your certificate here
+  tls.key: |
+    # Paste your private key here
