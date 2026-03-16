@@ -57,6 +57,51 @@ Request body:
 }
 ```
 
+## Key Lifecycle Management
+
+### `POST /keys/lifecycle/create`
+
+Buat kunci baru dengan lifecycle management terintegrasi (cache + secure store).
+
+Query parameters:
+- `key_id` (required) - Identifier kunci
+- `key_type` (optional, default: "encryption") - Tipe kunci
+- `created_by` (optional, default: "system")
+- `description` (optional)
+- `expires_in_days` (optional) - Hari hingga kunci expired
+
+### `POST /keys/lifecycle/{key_id}/rotate`
+
+Rotasi kunci ke versi baru dengan invalidasi cache otomatis.
+
+Query parameters:
+- `created_by` (optional)
+- `force` (optional, default: false)
+
+### `POST /keys/lifecycle/{key_id}/revoke`
+
+Cabut kunci segera dengan invalidasi cache.
+
+Query parameters:
+- `reason` (optional)
+- `invalidated_by` (optional)
+
+### `POST /keys/lifecycle/{key_id}/expire`
+
+Expired kunci secara manual.
+
+### `GET /keys/lifecycle`
+
+List semua kunci terkelola dengan filter opsional (status, key_type).
+
+### `POST /keys/lifecycle/workflow/{workflow}`
+
+Eksekusi predefined workflow:
+- `create_rotate` - Buat dan langsung rotasi
+- `rotate_revoke` - Rotasi lalu cabut
+- `create_expire` - Buat dengan expiration
+- `full_lifecycle` - Buat → rotasi berkali-kali → cabut
+
 ## Metrics dan Cache
 
 ### `GET /metrics`

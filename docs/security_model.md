@@ -26,6 +26,8 @@ Tujuan utama:
 | Model checksum verification | aktif di registry | `src/ml/model_registry.py` | `checksums.json` wajib untuk load model |
 | Model metadata signing dan provenance | aktif di registry | `src/ml/model_registry.py` | versi model disign, stage/provenance dilacak, dan lifecycle disimpan persisten |
 | Blok `.pkl` saat load | aktif | `src/ml/model_registry.py` | registry menolak unsafe deserialization |
+| Zero-downtime key rotation | aktif | `src/security/secret_rotation.py` | grace period, atomicity, dual-key period |
+| Key lifecycle management | aktif | `src/security/key_lifecycle_manager.py` | unified workflow create → rotate → revoke → expire dengan cache integration |
 
 ## Kontrol yang Masih Parsial
 

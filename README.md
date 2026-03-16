@@ -10,10 +10,16 @@ Dokumentasi di repository ini sekarang mengikuti implementasi yang benar-benar a
 | --- | --- | --- |
 | Backend API | Aktif | FastAPI menyediakan endpoint health, cache metrics, ML status, dan simulation yang dipakai frontend saat ini. |
 | Secure cache | Aktif | Jalur request memakai `LocalCache` sebagai L1, Redis sebagai shared encrypted L2, `EncryptedCacheStore`, dan `SecureCacheManager`. |
-| ML dan simulasi | Online via API | Frontend memanggil endpoint ML dan simulation backend. Request path mengumpulkan event ML runtime, lalu menjadwalkan prefetch via Redis queue ke worker terpisah dengan retry dan DLQ dasar. |
+| ML dan simulasi | Online via API | Frontend memanggil endpoint ML dan simulation backend. Request path mengumpulkan event ML runtime, lalu menjadwalkan prefetch via Redis queue ke worker terpisah dengan retry dan DLQ. EWMA concept drift detection sudah mature dengan multiple methods (EWMA, ADWIN, EDDM). |
+| Incremental Model | Aktif | Single-file model yang terus berkembang, tidak membuat file baru setiap training. |
+| Data Processor | Aktif | Pipeline dari raw ke processed data dengan feature engineering. |
+| Key Rotation | Aktif | Zero-downtime rotation dengan grace period dan atomicity. |
+| Governance Model | Aktif | Signing, provenance, promotion, rollback tersedia. Ensemble LSTM+RF+Markov berjalan. |
 | Security hardening | Aktif dengan caveat | Wrapper kriptografi, trusted proxy parsing, tamper-evident logger, HTTP security middleware, rate limiter, dan FIPS power-on self-tests sudah aktif. Policy deployment seperti `TRUSTED_PROXIES` tetap perlu diisi sesuai topologi nyata. |
 | Frontend | Terhubung ke backend | Overview, Dashboard, Simulation, dan ML Pipeline membaca data backend. Node Graph tetap konseptual tetapi menampilkan status runtime nyata. |
-| Docker stack | Aktif dengan validasi minimum | `api`, `redis`, `prefetch-worker`, dan profile monitoring sekarang bisa dijalankan. Repo juga punya smoke test live `docker compose` dan workflow CI minimum untuk focused backend tests + runtime validation. |
+| Docker stack | Aktif dengan validasi minimum | `api`, `redis`, `prefetch-worker`, dan profile monitoring sekarang bisa dijalankan. Repo juga punya smoke test live `docker compose` dan workflow CI minimum untuk focused backend tests + runtime validation. Benchmark validation suite tersedia untuk reproducibility dan statistical testing. |
+| Kubernetes | Tersedia | Konfigurasi K8s lengkap dengan HPA, network policies, dan persistent volumes. |
+| Deployment Policies | Dokumentasi lengkap | docs/deployment_policies.md berisi scaling, backup, security, dan HA policies.
 
 ## Peta Dokumentasi
 
@@ -29,6 +35,7 @@ Dokumentasi di repository ini sekarang mengikuti implementasi yang benar-benar a
 - [docs/operations.md](docs/operations.md) - konfigurasi, Docker, observability, dan catatan deployment
 - [docs/security_analysis_report.md](docs/security_analysis_report.md) - status terkini dari temuan keamanan historis
 - [docs/gemini.md](docs/gemini.md) - ringkasan tingkat tinggi untuk stakeholder non-teknis
+- [docs/deployment_policies.md](docs/deployment_policies.md) - kebijakan deployment production, scaling, dan backup
 
 ## Arsitektur Singkat
 
@@ -67,6 +74,7 @@ Poin penting:
 |-- data/
 |-- docs/
 |-- frontend/
+|-- k8s/
 |-- scripts/
 |-- simulation/
 |-- src/
@@ -78,7 +86,8 @@ Folder penting:
 - `src/api` - aplikasi FastAPI dan schema request/response
 - `src/cache` - cache in-memory, kebijakan TTL, dan store terenkripsi
 - `src/security` - boundary kriptografi, audit log, IDS, middleware keamanan
-- `src/ml` - collector, feature engineering, model, registry, predictor
+- `src/ml` - collector, feature engineering, model, registry, predictor, incremental model, data processor
+- `k8s` - Kubernetes deployment manifests
 - `simulation` - skenario benchmark berbasis parameter referensi
 - `scripts` - utilitas untuk seed data, generate training data, benchmark, dan training
 - `frontend` - dashboard demo berbasis React/Vite
@@ -156,6 +165,7 @@ Smoke test live di atas memvalidasi startup, security headers, request path `sto
 | `GET` | `/metrics/prefetch` | Status queue prefetch Redis, retry backlog, dan DLQ |
 | `GET` | `/metrics/prometheus` | Exporter Prometheus text exposition untuk observability |
 | `GET` | `/ml/status` | Status runtime ML, jumlah sample collector, dan waktu training terakhir |
+| `GET` | `/ml/drift` | Analisis EWMA concept drift dengan statistik detail |
 | `GET` | `/ml/registry` | Ringkasan registry model aktif, versi, stage, dan signature coverage |
 | `GET` | `/ml/lifecycle` | History lifecycle model yang persisten |
 | `POST` | `/ml/promote` | Promosikan versi model ke stage target dan opsional aktifkan runtime |
@@ -169,17 +179,199 @@ Lihat detail payload dan caveat implementasi di [docs/api_reference.md](docs/api
 
 ## Simulasi dan ML
 
-Contoh command yang relevan:
+PSKC menyediakan engine simulasi yang dirancang untuk studi kasus sistem autentikasi akademik dan pemerintahan Indonesia.
+
+### Skenario Simulasi yang Tersedia
+
+| Skenario | Deskripsi | Sumber Referensi |
+|----------|-----------|------------------|
+| **SIAKAD SSO** | Portal Akademik Perguruan Tinggi (single tenant) | JSiI Vol.10 No.1 (2023); MDPI App.Sci. 15(22) (2025) |
+| **SEVIMA Siakadcloud** | SIAKAD Multi-Tenant Cloud | Data resmi SEVIMA (2024) - >900 PT Indonesia |
+| **PDDikti** | Pangkalan Data Pendidikan Tinggi Nasional | Kemdikbudristek (2024) - >4.900 PT, 9,6 juta mahasiswa |
+| **Dynamic Production** | Perubahan beban kerja dan failure pattern campuran | Simulasi berbasis parameter dinamis |
+| **Cold Start** | Evolusi ML dari warmup hingga mature dengan EWMA concept drift | Analisis fase ML lifecycle |
+
+### Command Simulasi
 
 ```powershell
+# Jalankan semua skenario
 python simulation/runner.py --scenario all
+
+# SIAKAD SSO
+python simulation/runner.py --scenario siakad --requests 2000
+
+# SEVIMA Siakadcloud
+python simulation/runner.py --scenario sevima --requests 2000
+
+# PDDikti
+python simulation/runner.py --scenario pddikti --requests 2000
+
+# Dynamic Production
 python simulation/runner.py --scenario dynamic --requests 2000
+
+# Cold Start Analysis
+python simulation/runner.py --scenario coldstart
+```
+
+### Machine Learning
+
+PSKC menggunakan ensemble model yang menggabungkan:
+- **LSTM** - untuk pola sekuensial temporal
+- **RandomForest** - untuk feature importance dan stabilitas
+- **Markov Chain** - untuk transisi state probabilistik
+
+Pipeline ML:
+```powershell
+# Generate training data dari skenario
 python scripts/generate_training_data.py --scenario all --samples 5000
+
+# Training model
 python scripts/train_model.py --data data/training/pskc_training_data.json
+
+# Benchmark baseline vs PSKC
 python scripts/benchmark.py --all
 ```
 
+**Catatan:** EWMA concept drift detection sudah mature dengan multiple detection methods (EWMA, ADWIN-like, EDDM) dan weighted voting untuk decision making.
+
 Penjelasan lebih lengkap ada di [docs/simulation_and_ml.md](docs/simulation_and_ml.md).
+
+### Incremental Model Persistence
+
+PSKC sekarang mendukung **single-file model yang terus berkembang** selain versioning tradisional:
+
+```python
+from src.ml.incremental_model import get_incremental_model
+
+# Update model (tidak membuat file baru)
+incremental = get_incremental_model()
+result = incremental.update(
+    model_data=serialized_model,
+    reason="scheduled",  # atau "drift", "manual"
+    metrics={"accuracy": 0.85},
+    training_info={"sample_count": 1000}
+)
+```
+
+File model disimpan di `data/models/incremental_model.pskc.json` dan terus di-update, tidak membuat file baru setiap training.
+
+### Data Processor
+
+Pipeline data dari raw ke processed:
+
+```python
+from src.ml.data_processor import get_data_processor
+
+processor = get_data_processor()
+result = processor.process(context_window=10)
+```
+
+Output di `data/processed/`:
+- `training_data.json` - Data training dengan context window
+- `key_features.json` - Fitur agregat per key
+- `temporal_patterns.json` - Pola waktu akses
+- `metadata.json` - Info processing
+
+# Benchmark Validation Suite
+
+PSKC menyediakan benchmark validator dengan reproducibility dan formal statistical validation:
+
+```powershell
+# Test scenario dengan 10 runs
+python simulation/benchmark_validator.py --scenario test --runs 10 --seed 42
+
+# SIAKAD scenario dengan 30 runs
+python simulation/benchmark_validator.py --scenario siakad --runs 30 --seed 123
+
+# Random seed mode (non-reproducible)
+python simulation/benchmark_validator.py --scenario sevima --runs 50 --random-seed
+
+# Save results to JSON
+python simulation/benchmark_validator.py --scenario pddikti --runs 20 --output results.json
+```
+
+Fitur:
+- **Reproducibility**: Seed control, deterministic execution
+- **Statistical Validation**: Confidence intervals, hypothesis testing (Welch's t-test, Mann-Whitney U)
+- **Effect Size**: Cohen's d dengan interpretasi (negligible/small/medium/large)
+- **Multi-run Analysis**: Aggregated results dengan error bounds
+
+Output mencakup:
+- Konfigurasi dan timing
+- Per-metric statistical comparisons (avg_ms, p95_ms, p99_ms, cache_hit_rate)
+- p-values dengan significance indicators
+- Confidence intervals untuk improvement
+- Summary: all_significant, avg_improvement, avg_effect_size
+
+## Production Deployment
+
+PSKC mendukung deployment dengan Docker Compose dan Kubernetes:
+
+### Docker Compose Production
+
+```powershell
+docker compose -f docker-compose.production.yml up -d
+```
+
+Fitur:
+- Resource limits per service
+- Rolling updates dengan auto-rollback
+- Health checks (liveness/readiness)
+- Redis dengan persistence (RDB + AOF)
+- Prometheus + Grafana monitoring
+
+### Kubernetes Deployment
+
+```bash
+kubectl apply -f k8s/pskc-production.yaml
+```
+
+Fitur:
+- Horizontal Pod Autoscaler (HPA)
+- Pod anti-affinity untuk high availability
+- Network policies
+- Persistent volume claims
+- Ingress configuration
+
+### Deployment Policies
+
+Lihat [docs/deployment_policies.md](docs/deployment_policies.md) untuk:
+- Resource allocation matrix
+- Scaling triggers
+- Backup & recovery procedures
+- Security hardening
+- Health check policies
+
+### EWMA Concept Drift Detection
+
+PSKC implements mature EWMA-based concept drift detection untuk auto-retraining:
+
+```python
+from src.ml.trainer import get_model_trainer
+
+trainer = get_model_trainer()
+drift_stats = trainer._drift_detector.get_stats()
+drift_analysis = trainer._drift_detector.get_drift_analysis()
+```
+
+Detection methods:
+- **EWMA**: Exponential weighted moving average comparison
+- **ADWIN-like**: Adaptive windowing dengan statistical testing
+- **EDDM**: Early drift detection method
+- **Weighted voting**: Combines all methods untuk decision
+
+Configuration:
+```python
+DriftDetector(
+    short_window=30,        # Short-term window
+    long_window=200,        # Long-term window
+    drift_threshold=0.12,   # 12% drop triggers retrain
+    warning_threshold=0.06, # 6% drop = warning
+    ewma_alpha=0.3,        # EWMA smoothing factor
+)
+```
+
+API endpoint: `GET /ml/drift`
 
 ## Konfigurasi Utama
 

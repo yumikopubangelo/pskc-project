@@ -40,7 +40,7 @@ Bagian ini berisi hal-hal yang dibutuhkan agar sistem lebih lengkap secara engin
 | Deployment notes yang lebih spesifik | belum ada contoh topologi reverse proxy, volume log, trusted proxy config, dan hardening production yang lebih konkret | operator harus banyak menebak sendiri saat deploy |
 | Error handling yang lebih ketat di API | beberapa jalur masih berpotensi me-return `500` generik | observability buruk dan perilaku API kurang presisi |
 | Sinkronisasi frontend dengan backend aktual | halaman utama frontend sekarang sudah sinkron untuk overview, dashboard, simulation, dan ML pipeline, tetapi masih ada area legacy yang belum disederhanakan | sebagian besar UI utama sudah selaras, namun jejak kode lama masih perlu dibersihkan |
-| Lifecycle operasional artefak model | format artefak aman, checksum manifest, signing metadata, provenance, active version, promotion, rollback, dan runtime load sekarang sudah satu jalur | operasi registry model sudah jauh lebih konsisten, walau governance antar environment masih perlu diperdalam |
+| Lifecycle operasional artefak model | format artefak aman, checksum manifest, signing metadata, provenance, active version, promotion, rollback, dan runtime load sekarang sudah satu jalur | operasi registry model sudah jauh lebih konsisten,walau governance antar environment masih perlu diperdalam |
 
 ## 3. Belum Dikembangkan
 
@@ -54,7 +54,7 @@ Bagian ini berisi kemampuan yang relevan untuk visi PSKC, tetapi saat ini belum 
 | Endpoint admin/ops khusus | belum ada endpoint nyata untuk cache stats, model stats, audit summaries, atau controls | mempermudah operasi, inspeksi, dan debugging |
 | Telemetry historis backend untuk dashboard | dashboard utama sudah membaca backend nyata, tetapi histori metrik masih hidup di memori proses dan mudah hilang saat restart | membuat UI lebih dekat ke alat observability sungguhan |
 | Access control yang lebih dalam | ada pondasi security dan ACL di beberapa modul, tetapi belum jadi policy runtime terpadu | meningkatkan isolasi antar service dan kontrol akses sensitif |
-| Key lifecycle management lengkap | revoke, rotate, expire, consume sudah tersirat di beberapa area tetapi belum jadi flow utuh | penting untuk sistem manajemen key yang lebih realistis |
+| Key lifecycle management lengkap | ✅ **Selesai!** - revoke, rotate, expire, consume sekarang jadi flow utuh dengan API endpoints | workflow manajemen key sekarang terintegrasi penuh dengan cache dan secure store |
 | Multi-environment deployment artifacts | belum ada manifest yang rapi untuk staging/production selain Docker Compose demo | mempermudah transisi dari demo ke lingkungan yang lebih serius |
 
 ## Prioritas Yang Disarankan

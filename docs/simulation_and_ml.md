@@ -30,13 +30,13 @@ python simulation/runner.py --scenario coldstart
 
 ### Skenario yang tersedia
 
-| Skenario | File | Fokus |
-| --- | --- | --- |
-| Spotify Padlock | `simulation/scenarios/spotify_padlock.py` | high read ratio, low-latency internal KMS |
-| Amazon AWS KMS | `simulation/scenarios/amazon_kms.py` | quota pressure, timeout, throttling |
-| Netflix Zuul | `simulation/scenarios/netflix_zuul.py` | edge auth latency dan prime time load |
-| Dynamic production | `simulation/scenarios/dynamic_production.py` | perubahan beban kerja dan failure pattern campuran |
-| Cold start | `simulation/engines/cold_start_simulator.py` | fase warmup, learning, mature |
+| Skenario | File | Fokus | Sumber Referensi |
+|----------|------|-------|------------------|
+| SIAKAD SSO | `simulation/scenarios/siakad_sso.py` | Portal Akademik PT (single tenant), peak KRS/UAS | JSiI Vol.10 No.1 (2023); MDPI App.Sci. 15(22) (2025) |
+| SEVIMA Siakadcloud | `simulation/scenarios/sevima_cloud.py` | Multi-tenant cloud, >900 PT Indonesia | Data resmi SEVIMA (2024) |
+| PDDikti | `simulation/scenarios/pddikti_auth.py` | Skala nasional, >4.900 PT | Kemdikbudristek (2024) |
+| Dynamic production | `simulation/scenarios/dynamic_production.py` | Perubahan beban kerja dan failure pattern campuran | Simulasi berbasis parameter dinamis |
+| Cold start | `simulation/engines/cold_start_simulator.py` | Fase warmup, learning, mature dengan EWMA concept drift | Analisis ML lifecycle |
 
 ### Sumber parameter
 
@@ -89,6 +89,20 @@ Script training melakukan hal berikut:
 ```powershell
 python scripts/benchmark.py --all
 ```
+
+### 5. Benchmark Validator (Statistical Validation)
+
+```powershell
+python simulation/benchmark_validator.py --runs 10 --seed 42 --scenario spotify
+```
+
+**Fitur:**
+- Reproducibility dengan seed control
+- Validasi statistik formal:
+  - Confidence intervals
+  - Hypothesis testing (Welch's t-test, Mann-Whitney U)
+  - Cohen's d effect size
+- CLI untuk custom runs, seeds, dan scenarios
 
 ## Modul ML Utama
 
