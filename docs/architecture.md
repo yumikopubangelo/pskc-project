@@ -35,6 +35,7 @@ request
 | Audit logger | `src/security/tamper_evident_logger.py` | Hash-chained audit log |
 | KMS fetcher | `src/auth/key_fetcher.py` | Fallback fetch saat cache miss |
 | Prefetch worker | `src/workers/prefetch_worker.py` | Konsumsi job prefetch Redis dan isi cache bersama |
+| **Key Lifecycle Manager** | `src/security/key_lifecycle_manager.py` | **Unified workflow: create → rotate → revoke → expire** |
 
 ## Inisialisasi Aplikasi
 
