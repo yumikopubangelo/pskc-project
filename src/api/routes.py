@@ -732,6 +732,7 @@ async def invalidate_key(
 
 from typing import List, Dict, Any
 from src.ml.data_collector import get_data_collector
+from src.ml.trainer import get_model_trainer
 import json
 import os
 
@@ -867,6 +868,30 @@ async def get_predictions(n: int = 10):
 async def get_ml_status():
     """Get ML model status"""
     return get_ml_status_payload()
+
+
+@router.get("/ml/drift")
+async def get_drift_analysis():
+    """
+    Get detailed drift analysis from the EWMA-based concept drift detector.
+    
+    Returns:
+    - ewma_short: Short-term EWMA accuracy
+    - ewma_long: Long-term EWMA accuracy  
+    - ewma_drop: Difference between long and short term
+    - drift_count: Number of drift events detected
+    - warning_count: Number of warning events
+    - total_records: Total cache outcomes recorded
+    - drift_analysis: Trend analysis and history
+    """
+    trainer = get_model_trainer()
+    drift_stats = trainer._drift_detector.get_stats()
+    drift_analysis = trainer._drift_detector.get_drift_analysis()
+    
+    return {
+        "drift_stats": drift_stats,
+        "drift_analysis": drift_analysis,
+    }
 
 
 @router.get("/ml/registry")
@@ -1224,6 +1249,236 @@ async def get_live_test_status():
 
 
 # ============================================================
+# Key Lifecycle Management Endpoints
+# ============================================================
+
+from src.security.key_lifecycle_manager import (
+    KeyLifecycleManager,
+    LifecyclePolicy,
+    LifecycleEvent,
+    get_lifecycle_manager,
+)
+
+# Global lifecycle manager instance
+_lifecycle_manager: Optional[KeyLifecycleManager] = None
+
+def get_key_lifecycle_manager() -> KeyLifecycleManager:
+    """Get or create the key lifecycle manager"""
+    global _lifecycle_manager
+    if _lifecycle_manager is None:
+        policy = LifecyclePolicy(
+            rotation_interval_days=30,
+            max_versions=5,
+            grace_period_hours=24,
+            auto_rotate=True,
+            auto_expire=True,
+            cache_enabled=True,
+            cache_ttl_seconds=300
+        )
+        _lifecycle_manager = KeyLifecycleManager(policy=policy)
+    return _lifecycle_manager
+
+
+@router.post("/keys/lifecycle/create")
+async def create_lifecycle_key(
+    key_id: str = Query(..., min_length=1, max_length=128),
+    key_type: str = Query(default="encryption"),
+    created_by: str = Query(default="system"),
+    description: str = Query(default=""),
+    expires_in_days: Optional[int] = Query(default=None, ge=1, le=365)
+):
+    """
+    Create a new key with complete lifecycle management.
+    
+    This integrates with both cache and secure store.
+    """
+    manager = get_key_lifecycle_manager()
+    
+    try:
+        metadata = manager.create_key(
+            key_id=key_id,
+            key_type=key_type,
+            created_by=created_by,
+            description=description,
+            expires_in_days=expires_in_days
+        )
+        return {
+            "success": True,
+            "key_id": key_id,
+            "metadata": metadata.to_dict()
+        }
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.exception("Error creating key")
+        raise HTTPException(status_code=500, detail="Failed to create key")
+
+
+@router.get("/keys/lifecycle/{key_id}")
+async def get_lifecycle_key(key_id: str):
+    """Get key metadata from lifecycle manager"""
+    manager = get_key_lifecycle_manager()
+    metadata = manager.get_key_metadata(key_id)
+    
+    if metadata is None:
+        raise HTTPException(status_code=404, detail=f"Key not found: {key_id}")
+    
+    return {
+        "key_id": key_id,
+        "metadata": metadata.to_dict()
+    }
+
+
+@router.post("/keys/lifecycle/{key_id}/rotate")
+async def rotate_lifecycle_key(
+    key_id: str,
+    created_by: str = Query(default="system"),
+    force: bool = Query(default=False)
+):
+    """
+    Rotate a key to a new version.
+    
+    This automatically invalidates the cache and creates a new key version.
+    """
+    manager = get_key_lifecycle_manager()
+    
+    try:
+        metadata = manager.rotate_key(key_id, created_by=created_by, force=force)
+        return {
+            "success": True,
+            "key_id": key_id,
+            "metadata": metadata.to_dict()
+        }
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        logger.exception("Error rotating key")
+        raise HTTPException(status_code=500, detail="Failed to rotate key")
+
+
+@router.post("/keys/lifecycle/{key_id}/revoke")
+async def revoke_lifecycle_key(
+    key_id: str,
+    reason: str = Query(default="manual"),
+    invalidated_by: str = Query(default="system")
+):
+    """
+    Revoke a key immediately.
+    
+    This invalidates the cache and marks the key as revoked.
+    """
+    manager = get_key_lifecycle_manager()
+    
+    success = manager.revoke_key(key_id, reason=reason, invalidated_by=invalidated_by)
+    
+    if not success:
+        raise HTTPException(status_code=404, detail=f"Key not found: {key_id}")
+    
+    return {
+        "success": True,
+        "key_id": key_id,
+        "status": "revoked"
+    }
+
+
+@router.post("/keys/lifecycle/{key_id}/expire")
+async def expire_lifecycle_key(key_id: str):
+    """
+    Manually expire a key.
+    
+    This marks the key as expired and invalidates the cache.
+    """
+    manager = get_key_lifecycle_manager()
+    
+    success = manager.expire_key(key_id)
+    
+    if not success:
+        raise HTTPException(status_code=404, detail=f"Key not found or already expired: {key_id}")
+    
+    return {
+        "success": True,
+        "key_id": key_id,
+        "status": "expired"
+    }
+
+
+@router.get("/keys/lifecycle")
+async def list_lifecycle_keys(
+    status: Optional[str] = Query(default=None),
+    key_type: Optional[str] = Query(default=None)
+):
+    """List all keys managed by the lifecycle manager"""
+    manager = get_key_lifecycle_manager()
+    
+    keys = manager.list_keys(status=status, key_type=key_type)
+    
+    return {
+        "keys": [k.to_dict() for k in keys],
+        "count": len(keys)
+    }
+
+
+@router.get("/keys/lifecycle/{key_id}/events")
+async def get_lifecycle_events(
+    key_id: str,
+    limit: int = Query(default=100, ge=1, le=1000)
+):
+    """Get lifecycle events for a specific key"""
+    manager = get_key_lifecycle_manager()
+    
+    events = manager.get_lifecycle_events(key_id=key_id, limit=limit)
+    
+    return {
+        "key_id": key_id,
+        "events": [e.to_dict() for e in events],
+        "count": len(events)
+    }
+
+
+@router.get("/keys/lifecycle/stats")
+async def get_lifecycle_stats():
+    """Get lifecycle manager statistics"""
+    manager = get_key_lifecycle_manager()
+    
+    return manager.get_stats()
+
+
+@router.post("/keys/lifecycle/workflow/{workflow}")
+async def execute_lifecycle_workflow(
+    workflow: str,
+    key_id: str = Query(..., min_length=1, max_length=128),
+    created_by: str = Query(default="system"),
+    expires_in_days: Optional[int] = Query(default=None, ge=1, le=365),
+    rotate_count: int = Query(default=2, ge=1, le=10)
+):
+    """
+    Execute a predefined lifecycle workflow.
+    
+    Available workflows:
+    - create_rotate: Create key and immediately rotate
+    - rotate_revoke: Rotate key then revoke
+    - create_expire: Create key with expiration
+    - full_lifecycle: Create -> rotate multiple -> revoke
+    """
+    manager = get_key_lifecycle_manager()
+    
+    try:
+        result = manager.execute_workflow(
+            workflow=workflow,
+            key_id=key_id,
+            created_by=created_by,
+            expires_in_days=expires_in_days,
+            rotate_count=rotate_count
+        )
+        return result
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.exception("Error executing workflow")
+        raise HTTPException(status_code=500, detail="Failed to execute workflow")
+
+
+# ============================================================
 # Security Endpoints
 # ============================================================
 
@@ -1340,6 +1595,85 @@ async def get_prometheus_metrics(
 async def get_prefetch_dlq(limit: int = 20):
     """Inspect the latest dead-lettered prefetch jobs."""
     return get_prefetch_dlq_payload(limit=limit)
+
+
+@router.post("/prefetch/dlq/replay")
+async def replay_prefetch_dlq(
+    job_id: Optional[str] = None,
+    limit: int = Query(default=10, ge=1, le=100),
+):
+    """
+    Replay jobs from DLQ back to the main queue.
+    
+    - If job_id is provided: replay specific job
+    - Otherwise: replay up to `limit` jobs from DLQ
+    """
+    queue = get_prefetch_queue()
+    result = queue.replay_from_dlq(job_id=job_id, limit=limit)
+    return result
+
+
+@router.post("/prefetch/retry/replay")
+async def replay_prefetch_retry(
+    limit: int = Query(default=50, ge=1, le=200),
+):
+    """
+    Manually promote jobs from retry queue to main queue.
+    Useful for draining the retry queue during maintenance.
+    """
+    queue = get_prefetch_queue()
+    count = queue.replay_from_retry(limit=limit)
+    return {"success": True, "replayed_count": count}
+
+
+@router.delete("/prefetch/dlq")
+async def clear_prefetch_dlq():
+    """Clear all jobs from DLQ. Use with caution!"""
+    queue = get_prefetch_queue()
+    return queue.clear_dlq()
+
+
+@router.get("/prefetch/rate-limit")
+async def get_rate_limit_stats():
+    """Get rate limiter statistics."""
+    queue = get_prefetch_queue()
+    return queue.get_rate_limit_stats()
+
+
+@router.post("/prefetch/rate-limit/adjust")
+async def adjust_rate_limit(
+    factor: float = Query(default=1.5, ge=0.1, le=10.0),
+):
+    """
+    Adjust rate limit by multiplicative factor.
+    
+    Example: factor=1.5 increases rate by 50%, factor=0.5 decreases by 50%
+    """
+    queue = get_prefetch_queue()
+    return queue.adjust_rate_limit(factor)
+
+
+@router.post("/prefetch/rate-limit/set")
+async def set_rate_limit(
+    rate: float = Query(default=10.0, ge=0.1, le=1000.0),
+):
+    """Set the rate limit to a specific value (jobs per second)."""
+    queue = get_prefetch_queue()
+    return queue.set_rate_limit(rate)
+
+
+@router.post("/prefetch/rate-limit/adaptive")
+async def trigger_adaptive_rate():
+    """Trigger adaptive rate adjustment based on recent capacity."""
+    queue = get_prefetch_queue()
+    return queue.trigger_adaptive_adjust()
+
+
+@router.get("/prefetch/replay-history")
+async def get_replay_history(limit: int = 20):
+    """Get replay history."""
+    queue = get_prefetch_queue()
+    return {"history": queue.get_replay_history(limit=limit)}
 
 
 # ============================================================

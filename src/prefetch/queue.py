@@ -3,6 +3,8 @@ import logging
 import time
 import uuid
 from typing import Any, Dict, List, Optional
+from collections import deque
+from threading import Lock
 
 import redis
 from redis.exceptions import RedisError
@@ -16,8 +18,171 @@ def _get_setting(name: str, default: Any) -> Any:
     return getattr(settings, name, default)
 
 
+class RateLimiter:
+    """
+    Token bucket rate limiter for prefetch operations.
+    
+    Controls the rate at which prefetch jobs are processed to prevent
+    overwhelming the system.
+    
+    Features:
+    - Configurable rate (jobs per second)
+    - Burst allowance
+    - Thread-safe
+    - Adaptive rate limiting based on system load
+    """
+    
+    def __init__(
+        self,
+        rate: float = 10.0,        # jobs per second
+        burst: int = 20,           # max burst allowance
+        adaptive: bool = True,      # enable adaptive rate limiting
+        increase_threshold: float = 0.3,  # increase rate if idle for this fraction
+        decrease_threshold: float = 0.8,  # decrease rate if at capacity for this fraction
+    ):
+        self._rate = rate
+        self._burst = burst
+        self._adaptive = adaptive
+        self._increase_threshold = increase_threshold
+        self._decrease_threshold = decrease_threshold
+        
+        self._tokens = float(burst)
+        self._last_update = time.time()
+        self._lock = Lock()
+        
+        # Adaptive metrics
+        self._processed_count = 0
+        self._total_processed = 0
+        self._last_check = time.time()
+        self._capacity_history = deque(maxlen=60)  # 60 seconds of history
+        
+    @property
+    def rate(self) -> float:
+        return self._rate
+    
+    @property
+    def burst(self) -> int:
+        return self._burst
+
+    def _refill_tokens(self) -> None:
+        """Refill tokens based on elapsed time."""
+        now = time.time()
+        elapsed = now - self._last_update
+        self._last_update = now
+        
+        # Add tokens based on rate
+        self._tokens = min(self._burst, self._tokens + elapsed * self._rate)
+    
+    def acquire(self, tokens: int = 1, blocking: bool = False, timeout: float = 5.0) -> bool:
+        """
+        Try to acquire tokens for processing.
+        
+        Args:
+            tokens: Number of tokens to acquire
+            blocking: If True, wait for tokens to become available
+            timeout: Maximum time to wait (only if blocking=True)
+            
+        Returns:
+            True if tokens acquired, False otherwise
+        """
+        with self._lock:
+            self._refill_tokens()
+            
+            if self._tokens >= tokens:
+                self._tokens -= tokens
+                self._processed_count += 1
+                self._total_processed += 1
+                return True
+            
+            if not blocking:
+                return False
+            
+            # Blocking wait for tokens
+            start_time = time.time()
+            while self._tokens < tokens:
+                if time.time() - start_time >= timeout:
+                    return False
+                # Wait a bit and refill
+                time.sleep(0.01)
+                self._refill_tokens()
+            
+            self._tokens -= tokens
+            self._processed_count += 1
+            self._total_processed += 1
+            return True
+    
+    def record_processed(self, tokens: int = 1) -> None:
+        """Record successful processing for adaptive rate limiting."""
+        with self._lock:
+            self._processed_count += tokens
+            self._total_processed += tokens
+    
+    def record_skipped(self) -> None:
+        """Record skipped processing for adaptive rate limiting."""
+        pass  # Could track skipped for adaptive logic
+    
+    def get_stats(self) -> Dict[str, Any]:
+        """Get rate limiter statistics."""
+        with self._lock:
+            # Record capacity for last check period
+            now = time.time()
+            elapsed = now - self._last_check
+            if elapsed >= 1.0:  # Update every second
+                capacity = self._processed_count / (self._rate * elapsed) if elapsed > 0 else 0
+                self._capacity_history.append(capacity)
+                self._processed_count = 0
+                self._last_check = now
+            
+            avg_capacity = sum(self._capacity_history) / len(self._capacity_history) if self._capacity_history else 0
+            
+            return {
+                "rate": round(self._rate, 2),
+                "burst": self._burst,
+                "current_tokens": round(self._tokens, 2),
+                "adaptive": self._adaptive,
+                "avg_capacity_percent": round(avg_capacity * 100, 1),
+                "total_processed": self._total_processed,
+            }
+    
+    def set_rate(self, rate: float) -> None:
+        """Manually set the rate."""
+        with self._lock:
+            self._rate = max(0.1, min(1000.0, rate))
+    
+    def adjust_rate(self, factor: float) -> None:
+        """Adjust rate by a multiplicative factor."""
+        with self._lock:
+            new_rate = self._rate * factor
+            self._rate = max(0.1, min(1000.0, new_rate))
+            logger.info(f"Rate limiter adjusted: rate={self._rate:.2f}")
+    
+    def adaptive_adjust(self) -> None:
+        """
+        Automatically adjust rate based on recent capacity.
+        
+        Called periodically to adapt to system load.
+        """
+        if not self._adaptive:
+            return
+            
+        with self._lock:
+            if not self._capacity_history:
+                return
+            
+            avg_capacity = sum(self._capacity_history) / len(self._capacity_history)
+            
+            # If consistently running below threshold, increase rate
+            if avg_capacity < self._increase_threshold:
+                self._rate = min(1000.0, self._rate * 1.2)
+                logger.info(f"Rate increased: rate={self._rate:.2f}, capacity={avg_capacity:.1%}")
+            # If consistently at capacity, decrease rate
+            elif avg_capacity > self._decrease_threshold:
+                self._rate = max(0.1, self._rate * 0.8)
+                logger.info(f"Rate decreased: rate={self._rate:.2f}, capacity={avg_capacity:.1%}")
+
+
 class PrefetchQueue:
-    """Redis-backed queue for async prefetch jobs."""
+    """Redis-backed queue for async prefetch jobs with rate limiting and replay support."""
 
     def __init__(
         self,
@@ -34,6 +199,7 @@ class PrefetchQueue:
         self._retry_key = f"{self._queue_key}:retry"
         self._dlq_key = f"{self._queue_key}:dlq"
         self._stats_key = f"{self._queue_key}:stats"
+        self._replay_key = f"{self._queue_key}:replay"  # Track replay history
         self._client = redis.Redis.from_url(
             effective_redis_url,
             decode_responses=True,
@@ -41,6 +207,14 @@ class PrefetchQueue:
             socket_timeout=effective_socket_timeout,
             retry_on_timeout=False,
         )
+        
+        # Rate limiter initialization
+        self._rate_limiter = RateLimiter(
+            rate=float(_get_setting("prefetch_rate_limit_rps", 10.0)),
+            burst=int(_get_setting("prefetch_rate_limit_burst", 20)),
+            adaptive=bool(_get_setting("prefetch_rate_adaptive", True)),
+        )
+        
         logger.info("PrefetchQueue initialized: key=%s", self._queue_key)
 
     def _is_available(self) -> bool:
@@ -114,6 +288,13 @@ class PrefetchQueue:
     def dequeue(self, timeout: Optional[int] = None) -> Optional[Dict[str, Any]]:
         if not self._is_available():
             return None
+        
+        # Apply rate limiting before processing
+        if not self._rate_limiter.acquire(blocking=False):
+            # Rate limited - try again later
+            self._increment_stat("rate_limited")
+            return None
+        
         effective_timeout = (
             timeout if timeout is not None else int(_get_setting("prefetch_worker_block_timeout", 5))
         )
@@ -194,6 +375,165 @@ class PrefetchQueue:
                 jobs.append(payload)
         return jobs
 
+    # ----------------------------------------------------------
+    # Replay Functionality
+    # ----------------------------------------------------------
+    
+    def replay_from_dlq(self, job_id: Optional[str] = None, limit: int = 10) -> Dict[str, Any]:
+        """
+        Replay jobs from DLQ back to the main queue.
+        
+        Args:
+            job_id: Specific job ID to replay, or None for all
+            limit: Maximum number of jobs to replay
+            
+        Returns:
+            Result dict with replay count and details
+        """
+        if not self._is_available():
+            return {"success": False, "reason": "unavailable"}
+        
+        try:
+            if job_id:
+                # Replay specific job
+                items = self._client.lrange(self._dlq_key, 0, -1)
+                target_job = None
+                for item in items:
+                    payload = self._deserialize(item)
+                    if payload and payload.get("job_id") == job_id:
+                        target_job = payload
+                        break
+                
+                if target_job is None:
+                    return {"success": False, "reason": "job_not_found", "job_id": job_id}
+                
+                # Remove from DLQ and re-enqueue
+                self._remove_from_dlq(job_id)
+                target_job["replayed_at"] = time.time()
+                target_job["replay_count"] = target_job.get("replay_count", 0) + 1
+                self.enqueue(target_job)
+                
+                self._increment_stat("replayed_total")
+                self._track_replay(target_job)
+                
+                return {
+                    "success": True,
+                    "replayed_count": 1,
+                    "job_id": job_id,
+                }
+            else:
+                # Replay multiple jobs
+                items = self._client.lrange(self._dlq_key, 0, min(limit - 1, 99))
+                replayed = 0
+                
+                for item in items[:limit]:
+                    payload = self._deserialize(item)
+                    if payload:
+                        self._remove_from_dlq(payload.get("job_id", ""))
+                        payload["replayed_at"] = time.time()
+                        payload["replay_count"] = payload.get("replay_count", 0) + 1
+                        
+                        if self.enqueue(payload):
+                            replayed += 1
+                
+                self._increment_stat("replayed_total", replayed)
+                
+                return {
+                    "success": True,
+                    "replayed_count": replayed,
+                }
+                
+        except RedisError as exc:
+            self._record_failure("replay_dlq", exc)
+            return {"success": False, "reason": str(exc)}
+    
+    def _remove_from_dlq(self, job_id: str) -> bool:
+        """Remove a specific job from DLQ."""
+        try:
+            items = self._client.lrange(self._dlq_key, 0, -1)
+            for i, item in enumerate(items):
+                payload = self._deserialize(item)
+                if payload and payload.get("job_id") == job_id:
+                    self._client.lrem(self._dlq_key, 1, item)
+                    return True
+            return False
+        except RedisError:
+            return False
+    
+    def _track_replay(self, job: Dict[str, Any]) -> None:
+        """Track replay history for analysis."""
+        try:
+            replay_entry = {
+                "job_id": job.get("job_id"),
+                "original_attempt": job.get("attempt", 0),
+                "replay_count": job.get("replay_count", 1),
+                "replayed_at": time.time(),
+            }
+            self._client.lpush(self._replay_key, self._serialize(replay_entry))
+            # Keep only last 1000 replay entries
+            self._client.ltrim(self._replay_key, 0, 999)
+        except RedisError:
+            pass  # Non-critical
+    
+    def get_replay_history(self, limit: int = 20) -> List[Dict[str, Any]]:
+        """Get replay history."""
+        if not self._is_available():
+            return []
+        try:
+            items = self._client.lrange(self._replay_key, 0, max(0, limit - 1))
+            return [self._deserialize(item) for item in items if self._deserialize(item)]
+        except RedisError:
+            return []
+    
+    def replay_from_retry(self, limit: int = 50) -> int:
+        """
+        Manually promote jobs from retry queue to main queue.
+        Useful for draining the retry queue during maintenance.
+        """
+        if not self._is_available():
+            return 0
+        
+        try:
+            # Get all retry jobs (regardless of scheduled time)
+            due_items = self._client.zrangebyscore(self._retry_key, min=0, max=time.time() + 3600, start=0, num=limit)
+            
+            if not due_items:
+                return 0
+            
+            moved = 0
+            pipeline = self._client.pipeline()
+            for item in due_items:
+                pipeline.zrem(self._retry_key, item)
+                pipeline.lpush(self._queue_key, item)
+                moved += 1
+            
+            pipeline.execute()
+            self._increment_stat("manual_replay_total", moved)
+            
+            return moved
+            
+        except RedisError as exc:
+            self._record_failure("manual_replay_retry", exc)
+            return 0
+    
+    def clear_dlq(self) -> Dict[str, Any]:
+        """Clear all jobs from DLQ. Use with caution!"""
+        if not self._is_available():
+            return {"success": False, "reason": "unavailable"}
+        
+        try:
+            dlq_length = int(self._client.llen(self._dlq_key))
+            self._client.delete(self._dlq_key)
+            self._increment_stat("dlq_cleared", dlq_length)
+            
+            return {
+                "success": True,
+                "cleared_count": dlq_length,
+            }
+        except RedisError as exc:
+            self._record_failure("clear_dlq", exc)
+            return {"success": False, "reason": str(exc)}
+
     def get_stats(self) -> Dict[str, Any]:
         if not self._is_available():
             return {
@@ -228,6 +568,7 @@ class PrefetchQueue:
             "max_retries": int(_get_setting("prefetch_max_retries", 3)),
             "retry_backoff_seconds": int(_get_setting("prefetch_retry_backoff_seconds", 5)),
             "stats": stats,
+            "rate_limiter": self._rate_limiter.get_stats(),
         }
 
     def ping(self) -> bool:
@@ -238,6 +579,37 @@ class PrefetchQueue:
         except RedisError as exc:
             self._record_failure("ping", exc)
             return False
+
+    # ----------------------------------------------------------
+    # Rate Limiter Control
+    # ----------------------------------------------------------
+    
+    def set_rate_limit(self, rate: float) -> Dict[str, Any]:
+        """Set the rate limit (jobs per second)."""
+        self._rate_limiter.set_rate(rate)
+        return {"success": True, "rate": rate}
+    
+    def adjust_rate_limit(self, factor: float) -> Dict[str, Any]:
+        """Adjust rate by multiplicative factor."""
+        old_rate = self._rate_limiter.rate
+        self._rate_limiter.adjust_rate(factor)
+        return {
+            "success": True,
+            "old_rate": old_rate,
+            "new_rate": self._rate_limiter.rate,
+        }
+    
+    def get_rate_limit_stats(self) -> Dict[str, Any]:
+        """Get detailed rate limiter statistics."""
+        return self._rate_limiter.get_stats()
+    
+    def trigger_adaptive_adjust(self) -> Dict[str, Any]:
+        """Trigger adaptive rate adjustment."""
+        self._rate_limiter.adaptive_adjust()
+        return {
+            "success": True,
+            "new_rate": self._rate_limiter.rate,
+        }
 
     def close(self) -> None:
         try:
