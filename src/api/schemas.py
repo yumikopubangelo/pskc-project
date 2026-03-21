@@ -433,6 +433,8 @@ class DataGenerationProgressResponse(BaseModel):
 
 class TrainingResultResponse(BaseModel):
     """Response after training completion"""
+    model_config = ConfigDict(protected_namespaces=())
+    
     success: bool
     model_version: Optional[str] = None
     accuracy: Optional[float] = None
