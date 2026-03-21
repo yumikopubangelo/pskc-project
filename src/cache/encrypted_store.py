@@ -198,6 +198,15 @@ class EncryptedCacheStore:
             return self._shared_cache.exists(cache_key)
         return False
 
+    def probe_location(self, key_id: str, service_id: str = "default") -> str:
+        """Inspect which cache layer currently holds the encrypted value."""
+        cache_key = self._get_cache_key(key_id, service_id)
+        if self._cache.exists(cache_key):
+            return "l1"
+        if self._shared_cache is not None and self._shared_cache.exists(cache_key):
+            return "l2"
+        return "miss"
+
     def get_cache_keys(self) -> list:
         local_keys = set(self._cache.get_keys())
         shared_keys = set(self._shared_cache.get_keys()) if self._shared_cache is not None else set()

@@ -2,6 +2,8 @@
 
 Dokumen ini menjelaskan bagian simulasi dan machine learning di repository PSKC, termasuk apa yang benar-benar bisa dijalankan saat ini dan apa yang masih perlu disatukan.
 
+Jika Anda ingin memahami arti metrik di halaman realtime simulation, baca juga [realtime_simulation.md](realtime_simulation.md).
+
 ## Ruang Lingkup
 
 Ada dua dunia yang berbeda tetapi sekarang sudah saling terhubung lewat API:

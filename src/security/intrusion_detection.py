@@ -390,6 +390,10 @@ class SecureCacheManager:
         """Periksa apakah key sudah ada di secure cache."""
         return self._cache.exists(key_id, service_id)
 
+    def inspect_cache_path(self, key_id: str, service_id: str) -> str:
+        """Inspect whether a key will be served from L1, L2, or miss."""
+        return self._cache.probe_location(key_id, service_id)
+
     def get_cache_keys(self) -> List[str]:
         """Dapatkan daftar key cache yang tersedia di runtime."""
         return self._cache.get_cache_keys()

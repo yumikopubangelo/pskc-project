@@ -16,6 +16,9 @@ import numpy as np
 from collections import defaultdict, deque
 from typing import Dict, List, Optional, Tuple, Any
 import logging
+import time
+
+from config.settings import settings
 
 logger = logging.getLogger(__name__)
 
@@ -59,13 +62,15 @@ class MarkovChainPredictor:
     def __init__(
         self,
         num_classes: int = 100,
-        smoothing: float = 0.1,
-        max_history: int = 10_000,
+        smoothing: float = None,
+        max_history: int = None,
+        max_transitions: int = None,
     ):
         self.num_classes = num_classes
-        self.smoothing = smoothing
-        self.max_history = max_history
-
+        self.smoothing = smoothing if smoothing is not None else settings.ml_markov_smoothing
+        self.max_history = max_history if max_history is not None else settings.ml_markov_max_history
+        self.max_transitions = max_transitions if max_transitions is not None else settings.ml_markov_max_transitions
+        
         # transition_counts[from_key][to_key] = count
         self._transition_counts: Dict[str, Dict[str, int]] = defaultdict(
             lambda: defaultdict(int)
@@ -74,21 +79,63 @@ class MarkovChainPredictor:
         self._index_key: Dict[int, str] = {}  # class index → key_id
         self._history: deque = deque(maxlen=max_history)
         self._last_key: Optional[str] = None
+        self._total_transitions: int = 0  # Track total for bounds enforcement
 
     def update(self, key_id: str) -> None:
-        """Record a new access event and update transition counts."""
+        """
+        Record a new access event and update transition counts.
+        Enforces max_transitions limit to prevent unbounded memory growth.
+        """
         # Register key if new
         if key_id not in self._key_index:
             idx = len(self._key_index)
             self._key_index[key_id] = idx
             self._index_key[idx] = key_id
 
-        # Update transition
+        # Update transition with bounds checking
         if self._last_key is not None:
             self._transition_counts[self._last_key][key_id] += 1
+            self._total_transitions += 1
+            
+            # If exceeding max_transitions, prune old entries
+            if self._total_transitions > self.max_transitions:
+                self._prune_transitions()
 
         self._history.append(key_id)
         self._last_key = key_id
+
+    def _prune_transitions(self) -> None:
+        """
+        Prune transition counts to stay within max_transitions limit.
+        Removes lowest-count transitions first.
+        """
+        total = 0
+        for source_dict in self._transition_counts.values():
+            total += sum(source_dict.values())
+        
+        if total <= self.max_transitions:
+            return
+        
+        # Create list of (count, source_key, dest_key) sorted by count ascending
+        transitions_list: List[Tuple[int, str, str]] = []
+        for source_key, destinations in self._transition_counts.items():
+            for dest_key, count in destinations.items():
+                transitions_list.append((count, source_key, dest_key))
+        
+        transitions_list.sort()
+        
+        # Remove lowest count transitions until under limit
+        target_size = int(self.max_transitions * 0.8)  # Prune to 80% to reduce churn
+        removed = 0
+        for count, source_key, dest_key in transitions_list:
+            if total <= target_size:
+                break
+            del self._transition_counts[source_key][dest_key]
+            total -= count
+            removed += 1
+        
+        self._total_transitions = total
+        logger.debug(f"Markov: Pruned {removed} transitions, total now: {total}")
 
     def predict_proba_from_key(self, current_key: str) -> np.ndarray:
         """
@@ -140,9 +187,7 @@ class MarkovChainPredictor:
 
     @property
     def n_transitions(self) -> int:
-        return sum(
-            sum(v.values()) for v in self._transition_counts.values()
-        )
+        return self._total_transitions
 
 
 # ============================================================
@@ -169,16 +214,16 @@ class EnsembleWeightTracker:
     def __init__(
         self,
         model_names: List[str],
-        window_size: int = 200,
-        update_every: int = 50,
-        temperature: float = 3.0,
-        min_weight: float = 0.05,
+        window_size: int = None,
+        update_every: int = None,
+        temperature: float = None,
+        min_weight: float = None,
     ):
         self.model_names = model_names
-        self.window_size = window_size
-        self.update_every = update_every
-        self.temperature = temperature
-        self.min_weight = min_weight
+        self.window_size = window_size if window_size is not None else settings.ml_ensemble_window_size
+        self.update_every = update_every if update_every is not None else settings.ml_ensemble_update_every
+        self.temperature = temperature if temperature is not None else settings.ml_ensemble_temperature
+        self.min_weight = min_weight if min_weight is not None else settings.ml_ensemble_min_weight
 
         n = len(model_names)
         # Start with equal weights
@@ -186,13 +231,13 @@ class EnsembleWeightTracker:
 
         # Per-model rolling accuracy window: deque of 0/1 (miss/hit)
         self._windows: Dict[str, deque] = {
-            name: deque(maxlen=window_size) for name in model_names
+            name: deque(maxlen=self.window_size) for name in model_names
         }
         self._step = 0
 
         logger.info(
             f"EnsembleWeightTracker initialized: models={model_names}, "
-            f"window={window_size}, update_every={update_every}"
+            f"window={self.window_size}, update_every={self.update_every}"
         )
 
     def record(self, model_name: str, correct: bool) -> None:
@@ -251,19 +296,36 @@ class EnsembleWeightTracker:
 # ============================================================
 
 class LSTMModel(nn.Module if TORCH_AVAILABLE else object):
-    """LSTM model for sequence-based key prediction."""
+    """
+    LSTM model for sequence-based key prediction.
+    
+    Improvements:
+    - Configurable hyperparameters via settings
+    - Learning rate scheduling with ReduceLROnPlateau
+    - Early stopping with patience and min_delta
+    - Validation loss tracking  
+    """
 
     def __init__(
         self,
-        input_size: int = 30,
-        hidden_size: int = 64,
-        num_layers: int = 2,
+        input_size: int = None,
+        hidden_size: int = None,
+        num_layers: int = None,
         num_classes: int = 100,
-        dropout: float = 0.2,
+        dropout: float = None,
     ):
         if not TORCH_AVAILABLE:
             return
+        
         super().__init__()
+        
+        # Use config defaults if not provided
+        input_size = input_size if input_size is not None else settings.ml_lstm_input_size
+        hidden_size = hidden_size if hidden_size is not None else settings.ml_lstm_hidden_size
+        num_layers = num_layers if num_layers is not None else settings.ml_lstm_num_layers
+        dropout = dropout if dropout is not None else settings.ml_lstm_dropout
+        
+        self.input_size = input_size
         self.hidden_size = hidden_size
         self.num_layers = num_layers
         self.lstm = nn.LSTM(
@@ -277,6 +339,11 @@ class LSTMModel(nn.Module if TORCH_AVAILABLE else object):
         self.relu = nn.ReLU()
         self.dropout = nn.Dropout(dropout)
         self.fc2 = nn.Linear(hidden_size // 2, num_classes)
+        
+        # Training state
+        self.is_trained = False
+        self._last_training_epochs = 0
+        self._training_history = {"loss": [], "val_loss": []}
 
     def forward(self, x):
         if len(x.shape) == 2:
@@ -304,27 +371,54 @@ class LSTMModel(nn.Module if TORCH_AVAILABLE else object):
 # ============================================================
 
 class RandomForestModel:
-    """Random Forest model for feature-based key prediction."""
+    """
+    Random Forest model for feature-based key prediction.
+    
+    Improvements:
+    - Configurable hyperparameters via settings
+    - Class weight balancing for imbalanced data
+    - Feature importance tracking
+    """
 
     def __init__(
         self,
-        n_estimators: int = 100,
-        max_depth: int = 10,
+        n_estimators: int = None,
+        max_depth: int = None,
+        min_samples_split: int = None,
+        min_samples_leaf: int = None,
         num_classes: int = 100,
+        use_class_weight: bool = None,
     ):
         if not SKLEARN_AVAILABLE:
             return
+        
+        # Use config defaults if not provided
+        n_estimators = n_estimators if n_estimators is not None else settings.ml_rf_n_estimators
+        max_depth = max_depth if max_depth is not None else settings.ml_rf_max_depth
+        min_samples_split = min_samples_split if min_samples_split is not None else settings.ml_rf_min_samples_split
+        min_samples_leaf = min_samples_leaf if min_samples_leaf is not None else settings.ml_rf_min_samples_leaf
+        use_class_weight = use_class_weight if use_class_weight is not None else settings.ml_rf_use_class_weight
+        
         self.n_estimators = n_estimators
         self.max_depth = max_depth
         self.num_classes = num_classes
+        self.use_class_weight = use_class_weight
+        
+        # class_weight="balanced" addresses label imbalance (Issue #6)
+        class_weight = "balanced" if use_class_weight else None
+        
         self.model = RandomForestClassifier(
             n_estimators=n_estimators,
             max_depth=max_depth,
-            random_state=42,
-            n_jobs=-1,
+            min_samples_split=min_samples_split,
+            min_samples_leaf=min_samples_leaf,
+            class_weight=class_weight,
+            random_state=settings.ml_rf_random_state,
+            n_jobs=settings.ml_rf_n_jobs,
         )
         self.label_encoder = LabelEncoder()
         self.is_trained = False
+        self._feature_importances = None
 
     def fit(self, X: np.ndarray, y: np.ndarray):
         if not SKLEARN_AVAILABLE:
@@ -332,7 +426,14 @@ class RandomForestModel:
         y_encoded = self.label_encoder.fit_transform(y)
         self.model.fit(X, y_encoded)
         self.is_trained = True
-        logger.info(f"RandomForest trained on {len(X)} samples")
+        
+        # Track feature importances for monitoring (Issue #5)
+        self._feature_importances = self.model.feature_importances_
+        
+        logger.info(
+            f"RandomForest trained: n_estimators={self.n_estimators}, "
+            f"max_depth={self.max_depth}, samples={len(X)}, classes={len(self.label_encoder.classes_)}"
+        )
 
     def predict_proba(self, X: np.ndarray) -> np.ndarray:
         if not SKLEARN_AVAILABLE or not self.is_trained:
@@ -343,6 +444,31 @@ class RandomForestModel:
         if not SKLEARN_AVAILABLE or not self.is_trained:
             return None
         return self.model.predict(X)
+    
+    def get_feature_importances(self) -> Optional[np.ndarray]:
+        """Return feature importances for debugging/monitoring."""
+        return self._feature_importances if self.is_trained else None
+    
+    def log_feature_importances(self, feature_names: List[str] = None):
+        """Log top feature importances for inspection."""
+        if self._feature_importances is None:
+            return
+        
+        importances = self._feature_importances
+        if feature_names is None:
+            feature_names = [f"feature_{i}" for i in range(len(importances))]
+        
+        # Top 10 features
+        top_indices = np.argsort(importances)[::-1][:10]
+        top_features = [
+            (feature_names[i] if i < len(feature_names) else f"feature_{i}", float(importances[i]))
+            for i in top_indices
+        ]
+        
+        logger.info(
+            "RandomForest top features: " +
+            ", ".join(f"{name}={imp:.4f}" for name, imp in top_features)
+        )
 
 
 # ============================================================
@@ -362,13 +488,20 @@ class EnsembleModel:
 
     def __init__(
         self,
-        lstm_weight: float = 0.5,
-        rf_weight: float = 0.35,
-        markov_weight: float = 0.15,
+        lstm_weight: float = None,
+        rf_weight: float = None,
+        markov_weight: float = None,
         num_classes: int = 100,
-        dynamic_weights: bool = True,
+        dynamic_weights: bool = None,
     ):
         self.num_classes = num_classes
+        
+        # Use config defaults if not provided
+        lstm_weight = lstm_weight if lstm_weight is not None else settings.ml_ensemble_lstm_weight
+        rf_weight = rf_weight if rf_weight is not None else settings.ml_ensemble_rf_weight
+        markov_weight = markov_weight if markov_weight is not None else settings.ml_ensemble_markov_weight
+        dynamic_weights = dynamic_weights if dynamic_weights is not None else settings.ml_ensemble_dynamic_weights
+        
         self.dynamic_weights = dynamic_weights
 
         # Sub-models
@@ -379,11 +512,8 @@ class EnsembleModel:
         # Dynamic weight tracker
         self._weight_tracker = EnsembleWeightTracker(
             model_names=["lstm", "rf", "markov"],
-            window_size=200,
-            update_every=50,
         )
         # Seed with initial weights
-        # (tracker starts equal, but we nudge it toward config values via temp)
         self._static_weights = {
             "lstm":   lstm_weight,
             "rf":     rf_weight,
@@ -393,7 +523,7 @@ class EnsembleModel:
         self.is_trained = False
         logger.info(
             f"EnsembleModel initialized: "
-            f"LSTM={lstm_weight}, RF={rf_weight}, Markov={markov_weight}, "
+            f"LSTM={lstm_weight:.2f}, RF={rf_weight:.2f}, Markov={markov_weight:.2f}, "
             f"dynamic_weights={dynamic_weights}"
         )
 
@@ -427,26 +557,123 @@ class EnsembleModel:
         self.is_trained = True
 
     def _train_lstm(self, X: np.ndarray, y: np.ndarray):
-        if not TORCH_AVAILABLE:
+        """
+        Train LSTM with improvements:
+        - Learning rate scheduling
+        - Early stopping with patience
+        - Validation monitoring
+        - Adaptive epochs (configurable, not fixed to 10)
+        """
+        if not TORCH_AVAILABLE or self.lstm is None:
             return
-        X_tensor = torch.FloatTensor(X)
-        y_tensor = torch.LongTensor(y)
-        dataset = TensorDataset(X_tensor, y_tensor)
-        loader = DataLoader(dataset, batch_size=32, shuffle=True)
-        self.lstm.train()
-        criterion = nn.CrossEntropyLoss()
-        optimizer = torch.optim.Adam(self.lstm.parameters(), lr=0.001)
-        for epoch in range(10):
-            total_loss = 0
-            for batch_X, batch_y in loader:
-                optimizer.zero_grad()
-                outputs = self.lstm(batch_X)
-                loss = criterion(outputs, batch_y)
-                loss.backward()
-                optimizer.step()
-                total_loss += loss.item()
-            logger.debug(f"LSTM Epoch {epoch+1}/10, Loss: {total_loss/len(loader):.4f}")
-        logger.info("LSTM training completed")
+        
+        try:
+            # Config parameters
+            batch_size = settings.ml_lstm_batch_size
+            max_epochs = settings.ml_lstm_max_epochs
+            learning_rate = settings.ml_lstm_learning_rate
+            patience = settings.ml_lstm_early_stopping_patience
+            min_delta = settings.ml_lstm_early_stopping_min_delta
+            use_lr_scheduler = settings.ml_lstm_use_lr_scheduler
+            
+            # Prepare dataset with validation split
+            X_tensor = torch.FloatTensor(X)
+            y_tensor = torch.LongTensor(y)
+            dataset = TensorDataset(X_tensor, y_tensor)
+            
+            # 80/20 train/val split
+            val_size = int(0.2 * len(dataset))
+            train_size = len(dataset) - val_size
+            train_dataset, val_dataset = torch.utils.data.random_split(
+                dataset, [train_size, val_size]
+            )
+            
+            train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+            val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
+            
+            self.lstm.train()
+            criterion = nn.CrossEntropyLoss()
+            optimizer = torch.optim.Adam(self.lstm.parameters(), lr=learning_rate)
+            
+            # Learning rate scheduler (if enabled)
+            scheduler = None
+            if use_lr_scheduler:
+                scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+                    optimizer,
+                    mode='min',
+                    factor=settings.ml_lstm_lr_scheduler_factor,
+                    patience=settings.ml_lstm_lr_scheduler_patience,
+                    verbose=False
+                )
+            
+            # Early stopping tracking
+            best_val_loss = float('inf')
+            patience_counter = 0
+            
+            for epoch in range(max_epochs):
+                # Training phase
+                train_loss = 0.0
+                for batch_X, batch_y in train_loader:
+                    optimizer.zero_grad()
+                    outputs = self.lstm(batch_X)
+                    loss = criterion(outputs, batch_y)
+                    loss.backward()
+                    optimizer.step()
+                    train_loss += loss.item()
+                
+                avg_train_loss = train_loss / len(train_loader)
+                
+                # Validation phase
+                val_loss = 0.0
+                self.lstm.eval()
+                with torch.no_grad():
+                    for batch_X, batch_y in val_loader:
+                        outputs = self.lstm(batch_X)
+                        loss = criterion(outputs, batch_y)
+                        val_loss += loss.item()
+                
+                avg_val_loss = val_loss / len(val_loader)
+                
+                # Track history
+                self.lstm._training_history["loss"].append(avg_train_loss)
+                self.lstm._training_history["val_loss"].append(avg_val_loss)
+                
+                logger.debug(
+                    f"LSTM Epoch {epoch+1}/{max_epochs}, "
+                    f"Loss: {avg_train_loss:.4f}, Val Loss: {avg_val_loss:.4f}"
+                )
+                
+                # Learning rate scheduling
+                if scheduler:
+                    scheduler.step(avg_val_loss)
+                
+                # Early stopping check
+                if avg_val_loss < best_val_loss - min_delta:
+                    best_val_loss = avg_val_loss
+                    patience_counter = 0
+                else:
+                    patience_counter += 1
+                    if patience_counter >= patience:
+                        logger.info(
+                            f"LSTM early stopping at epoch {epoch+1} "
+                            f"(val_loss: {avg_val_loss:.4f})"
+                        )
+                        break
+                
+                self.lstm.train()
+            
+            self.lstm.is_trained = True
+            self.lstm._last_training_epochs = epoch + 1
+            
+            logger.info(
+                f"LSTM training completed: {epoch + 1} epochs, "
+                f"final val_loss: {avg_val_loss:.4f}"
+            )
+        
+        except Exception as e:
+            logger.error(f"LSTM training failed: {e}", exc_info=True)
+            if self.lstm:
+                self.lstm.is_trained = False
 
     def _train_rf(self, X: np.ndarray, y: np.ndarray):
         if not SKLEARN_AVAILABLE:

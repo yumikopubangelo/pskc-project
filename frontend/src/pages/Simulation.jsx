@@ -1,23 +1,89 @@
-import React, { useState, useCallback, useEffect } from 'react';
-import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, BarChart, Bar, PieChart, Pie, Cell } from 'recharts';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import {
+  Bar,
+  BarChart,
+  CartesianGrid,
+  Cell,
+  Legend,
+  Line,
+  LineChart,
+  Pie,
+  PieChart,
+  ResponsiveContainer,
+  Tooltip,
+  XAxis,
+  YAxis,
+} from 'recharts';
 import apiClient from '../utils/apiClient';
+import MLStatus from '../components/MLStatus';
+import ScenarioSimulationLab from '../components/ScenarioSimulationLab';
+import LiveSimulationDashboard from '../components/LiveSimulationDashboard';
 
-// Color palette
-const COLORS = ['#0088FE', '#00C49F', '#FFBB28', '#FF8042', '#8884d8'];
+const TERMINAL_STATUSES = new Set(['completed', 'stopped', 'failed']);
+const PIE_COLORS = ['#14b8a6', '#0ea5e9', '#f59e0b', '#ef4444', '#a855f7'];
+
+const formatFractionPercent = (value, digits = 1) =>
+  value == null ? 'N/A' : `${(Number(value) * 100).toFixed(digits)}%`;
+
+const formatPercent = (value, digits = 2) =>
+  value == null ? 'N/A' : `${Number(value).toFixed(digits)}%`;
+
+const formatMs = (value) =>
+  value == null ? 'N/A' : `${Number(value).toFixed(2)} ms`;
+
+const getStatusTone = (status) => {
+  if (status === 'running' || status === 'stopping') return 'text-blue-300';
+  if (status === 'completed') return 'text-green-300';
+  if (status === 'failed') return 'text-red-300';
+  if (status === 'stopped') return 'text-yellow-300';
+  return 'text-slate-300';
+};
+
+const getPathTone = (path) => {
+  if (path === 'l1_hit') return 'text-emerald-300';
+  if (path === 'l2_hit') return 'text-sky-300';
+  if (path === 'kms_fetch') return 'text-amber-300';
+  if (path === 'kms_miss') return 'text-red-300';
+  if (path === 'blocked') return 'text-fuchsia-300';
+  return 'text-slate-300';
+};
+
+const formatPathLabel = (path) => {
+  if (path === 'l1_hit') return 'L1 hit';
+  if (path === 'l2_hit') return 'L2 hit';
+  if (path === 'late_cache_hit') return 'Late cache hit';
+  if (path === 'kms_fetch') return 'Cache miss -> KMS fallback';
+  if (path === 'kms_miss') return 'Cache miss -> KMS failed/not found';
+  if (path === 'blocked') return 'Blocked';
+  return path || 'unknown';
+};
+
+const formatCacheOriginLabel = (row) => {
+  if (row.prefetched_by_worker || row.cache_origin_before === 'worker_prefetch') return 'Worker-prefetched';
+  if (row.prefetched_before_request && row.cache_origin_before === 'request_fetch') return 'Request-cached';
+  if (row.prefetched_before_request) return 'Warm cache (origin unknown)';
+  return 'No';
+};
 
 const Simulation = () => {
-  const [isSimulating, setIsSimulating] = useState(false);
-  const [simulationStatus, setSimulationStatus] = useState('Not Started');
-  const [liveTestResult, setLiveTestResult] = useState(null);
+  const pollerRef = useRef(null);
+  const eventSourceRef = useRef(null);
   const [error, setError] = useState(null);
-  
-  // Configuration state
+  const [isStarting, setIsStarting] = useState(false);
+  const [isStopping, setIsStopping] = useState(false);
+  const [sessionId, setSessionId] = useState(null);
+  const [liveSession, setLiveSession] = useState(null);
+  const [transportMode, setTransportMode] = useState('idle');
+  const [simulationView, setSimulationView] = useState('realtime');
+
   const [selectedScenario, setSelectedScenario] = useState('test');
   const [selectedTrafficType, setSelectedTrafficType] = useState('normal');
-  const [numRequests, setNumRequests] = useState(50);
   const [seedData, setSeedData] = useState(true);
-  
-  // Scenario and traffic type options
+  const [simulateKms, setSimulateKms] = useState(true);
+  const [modelPreference, setModelPreference] = useState('best_available');
+  const [keyMode, setKeyMode] = useState('auto');
+  const [virtualNodes, setVirtualNodes] = useState(3);
+
   const scenarios = [
     { value: 'test', label: 'Test (Default)' },
     { value: 'siakad', label: 'SIAKAD (Academic)' },
@@ -25,451 +91,747 @@ const Simulation = () => {
     { value: 'pddikti', label: 'PDDikti (Higher Education)' },
     { value: 'dynamic', label: 'Dynamic Production' },
   ];
-  
-  const trafficTypes = [
-    { value: 'normal', label: 'Normal (80% hit rate)' },
-    { value: 'heavy_load', label: 'Heavy Load (60% hit rate)' },
-    { value: 'prime_time', label: 'Prime Time (50% hit rate)' },
-    { value: 'degraded', label: 'Degraded (30% hit rate)' },
-  ];
-  
-  // Cache visualization data
-  const [cacheData, setCacheData] = useState([]);
-  // Prefetch visualization data
-  const [prefetchData, setPrefetchData] = useState([]);
-  // ML predictions
-  const [mlPredictions, setMlPredictions] = useState([]);
-  // Latency data
-  const [latencyData, setLatencyData] = useState([]);
-  // Overall results
-  const [testSummary, setTestSummary] = useState(null);
 
-  // Fetch initial system status
-  const fetchSystemStatus = useCallback(async () => {
-    try {
-      const status = await apiClient.getLiveTestStatus();
-      return status;
-    } catch (err) {
-      console.error('Failed to fetch system status:', err);
-      return null;
+  const trafficTypes = [
+    { value: 'normal', label: 'Normal' },
+    { value: 'heavy_load', label: 'Heavy Load' },
+    { value: 'prime_time', label: 'Prime Time' },
+    { value: 'degraded', label: 'Degraded' },
+    { value: 'overload', label: 'Overload' },
+  ];
+  const keyModes = [
+    { value: 'auto', label: 'Auto by Traffic' },
+    { value: 'stable', label: 'Stable Keys' },
+    { value: 'mixed', label: 'Mixed Rotation' },
+    { value: 'high_churn', label: 'High Churn' },
+  ];
+
+  const cleanupLiveTransport = useCallback(() => {
+    if (pollerRef.current) {
+      window.clearInterval(pollerRef.current);
+      pollerRef.current = null;
+    }
+    if (eventSourceRef.current) {
+      eventSourceRef.current.close();
+      eventSourceRef.current = null;
     }
   }, []);
 
-  // Run live system test
-  const handleStartSimulation = useCallback(async () => {
-    setIsSimulating(true);
-    setSimulationStatus('Running');
-    setError(null);
-    setLiveTestResult(null);
-    setCacheData([]);
-    setPrefetchData([]);
-    setMlPredictions([]);
-    setLatencyData([]);
-    setTestSummary(null);
-
+  const fetchSnapshot = useCallback(async (id) => {
     try {
-      // Call the backend live-test API with scenario and traffic type
-      const result = await apiClient.runLiveTest(numRequests, seedData, selectedScenario, selectedTrafficType);
-      setLiveTestResult(result);
-      
-      // Process the results for visualization
-      if (result.steps) {
-        // Extract data from each step
-        const cacheStep = result.steps.find(s => s.step === 'cache_test');
-        const prefetchStep = result.steps.find(s => s.step === 'prefetch_test');
-        const mlStep = result.steps.find(s => s.step === 'ml_predictions');
-        const latencyStep = result.steps.find(s => s.step === 'latency_test');
-        const seedingStep = result.steps.find(s => s.step === 'data_seeding');
-
-        // Build cache visualization data
-        if (cacheStep) {
-          setCacheData([
-            { name: 'Hits', value: cacheStep.cache_hits, color: '#00C49F' },
-            { name: 'Misses', value: cacheStep.cache_misses, color: '#FF8042' },
-          ]);
-        }
-
-        // Build prefetch visualization data
-        if (prefetchStep) {
-          setPrefetchData([
-            { name: 'Before', jobs: prefetchStep.queue_before },
-            { name: 'After', jobs: prefetchStep.queue_after },
-            { name: 'Enqueued', jobs: prefetchStep.jobs_enqueued },
-          ]);
-        }
-
-        // Build ML predictions list
-        if (mlStep && mlStep.predictions) {
-          setMlPredictions(mlStep.predictions.map((p, i) => ({
-            key: i,
-            keyId: p.key_id,
-            confidence: (p.confidence * 100).toFixed(1),
-          })));
-        }
-
-        // Build latency visualization data
-        if (latencyStep) {
-          setLatencyData([
-            { name: 'Average', latency: latencyStep.avg_latency_ms, color: '#0088FE' },
-            { name: 'P50', latency: latencyStep.p50_ms, color: '#00C49F' },
-            { name: 'P99', latency: latencyStep.p99_ms, color: '#FFBB28' },
-            { name: 'Min', latency: latencyStep.min_ms, color: '#8884d8' },
-            { name: 'Max', latency: latencyStep.max_ms, color: '#FF8042' },
-          ]);
-        }
-
-        // Build test summary
-        const summary = {
-          overallSuccess: result.overall_success,
-          stepsCompleted: result.steps.filter(s => s.success).length,
-          totalSteps: result.steps.length,
-          dataSeeding: seedingStep?.success ? '✓' : '✗',
-          mlPredictions: mlStep?.success ? '✓' : '✗',
-          cacheTest: cacheStep?.success ? '✓' : '✗',
-          prefetchTest: prefetchStep?.success ? '✓' : '✗',
-          latencyTest: latencyStep?.success ? '✓' : '✗',
-        };
-        setTestSummary(summary);
+      const snapshot = await apiClient.getLiveSimulationSession(id);
+      setLiveSession(snapshot);
+      if (TERMINAL_STATUSES.has(snapshot.status)) {
+        cleanupLiveTransport();
       }
-
-      setSimulationStatus('Finished');
     } catch (err) {
-      console.error('Live test failed:', err);
-      setError(err.message || 'Failed to run live test');
-      setSimulationStatus('Failed');
-    } finally {
-      setIsSimulating(false);
+      setError(err.message || 'Failed to fetch live simulation snapshot');
+      cleanupLiveTransport();
     }
-  }, [numRequests, seedData, selectedScenario, selectedTrafficType]);
+  }, [cleanupLiveTransport]);
 
-  // Load system status on mount
-  useEffect(() => {
-    fetchSystemStatus();
-  }, [fetchSystemStatus]);
+  const startPolling = useCallback((id) => {
+    cleanupLiveTransport();
+    setTransportMode('polling');
+    fetchSnapshot(id);
+    pollerRef.current = window.setInterval(() => {
+      fetchSnapshot(id);
+    }, 1000);
+  }, [cleanupLiveTransport, fetchSnapshot]);
+
+  const startEventStream = useCallback((id) => {
+    if (typeof window === 'undefined' || typeof window.EventSource === 'undefined') {
+      startPolling(id);
+      return;
+    }
+
+    cleanupLiveTransport();
+    setTransportMode('sse');
+    const source = new window.EventSource(apiClient.getLiveSimulationStreamUrl(id));
+    eventSourceRef.current = source;
+
+    source.addEventListener('snapshot', (event) => {
+      try {
+        const snapshot = JSON.parse(event.data);
+        setLiveSession(snapshot);
+        if (TERMINAL_STATUSES.has(snapshot.status)) {
+          cleanupLiveTransport();
+        }
+      } catch (err) {
+        console.error('Failed to parse simulation stream snapshot', err);
+      }
+    });
+
+    source.addEventListener('end', () => {
+      cleanupLiveTransport();
+    });
+
+    source.onerror = () => {
+      if (eventSourceRef.current) {
+        cleanupLiveTransport();
+        startPolling(id);
+      }
+    };
+  }, [cleanupLiveTransport, startPolling]);
+
+  useEffect(() => () => cleanupLiveTransport(), [cleanupLiveTransport]);
+
+  const handleStartSimulation = useCallback(async () => {
+    setIsStarting(true);
+    setError(null);
+    try {
+      const session = await apiClient.startLiveSimulationSession({
+        seedData,
+        scenario: selectedScenario,
+        trafficType: selectedTrafficType,
+        simulateKms,
+        modelPreference,
+        keyMode,
+        virtualNodes,
+      });
+      setLiveSession(session);
+      setSessionId(session.session_id);
+      startEventStream(session.session_id);
+    } catch (err) {
+      setError(err.message || 'Failed to start live simulation');
+    } finally {
+      setIsStarting(false);
+    }
+  }, [keyMode, modelPreference, seedData, selectedScenario, selectedTrafficType, simulateKms, startEventStream, virtualNodes]);
+
+  const handleStopSimulation = useCallback(async () => {
+    if (!sessionId) return;
+    setIsStopping(true);
+    setError(null);
+    try {
+      const snapshot = await apiClient.stopLiveSimulationSession(sessionId);
+      setLiveSession(snapshot);
+      cleanupLiveTransport();
+    } catch (err) {
+      setError(err.message || 'Failed to stop live simulation');
+    } finally {
+      setIsStopping(false);
+    }
+  }, [cleanupLiveTransport, sessionId]);
+
+  const simulationStatus = liveSession?.status || 'not_started';
+  const componentStatus = liveSession?.component_status || {};
+  const model = liveSession?.model || {};
+  const traceRows = Array.isArray(liveSession?.trace) ? liveSession.trace : [];
+  const keyBreakdown = Array.isArray(liveSession?.key_breakdown) ? liveSession.key_breakdown : [];
+
+  const latencyChartData = useMemo(
+    () => traceRows.map((row) => ({ index: row.index, pskc: row.latency_ms, directKms: row.baseline_latency_ms })),
+    [traceRows],
+  );
+  const cachePathData = useMemo(
+    () => (Array.isArray(liveSession?.pskc_metrics?.path_breakdown) ? liveSession.pskc_metrics.path_breakdown : []),
+    [liveSession],
+  );
+  const latencyComparisonData = useMemo(
+    () => ([
+      { name: 'With PSKC', latency: liveSession?.pskc_metrics?.avg_latency_ms || 0 },
+      { name: 'Direct KMS', latency: liveSession?.baseline_metrics?.avg_latency_ms || 0 },
+    ]),
+    [liveSession],
+  );
+  const predictionSummaryData = useMemo(
+    () => ([
+      { name: 'Live Top-1', accuracy: liveSession?.live_accuracy?.top_1_accuracy || 0 },
+      { name: 'Live Top-10', accuracy: liveSession?.live_accuracy?.top_10_accuracy || 0 },
+      { name: 'Verified Prefetch', accuracy: liveSession?.prefetch?.verified_prefetch_hit_rate || 0 },
+    ]),
+    [liveSession],
+  );
+
+  const startDisabled = isStarting || simulationStatus === 'running' || simulationStatus === 'stopping';
+  const stopDisabled = !sessionId || isStopping || TERMINAL_STATUSES.has(simulationStatus) || simulationStatus === 'not_started';
 
   return (
     <div className="container mx-auto p-4 text-white">
-      <div className="flex justify-between items-center mb-6">
+      <div className="flex flex-col gap-4 xl:flex-row xl:items-end xl:justify-between mb-6">
         <div>
-          <h1 className="text-2xl font-bold">Live System Test</h1>
-          <p className="text-gray-400 text-sm mt-1">
-            Test your ML predictions, pre-caching, and prefetch-worker
+          <h1 className="text-2xl font-bold">PSKC Simulation Console</h1>
+          <p className="text-sm text-slate-400 mt-1 max-w-3xl">
+            <strong>Realtime:</strong> Backend hidup dengan komponen asli.{' '}
+            <strong>Scenario Lab:</strong> Menggunakan folder simulation/ untuk benchmark.{' '}
+            <strong>Live Dashboard:</strong> Simulasi real-time menggunakan Redis, prefetch worker, dan ML model untuk validasi akurasi.
           </p>
         </div>
-        <div className="flex items-center gap-4">
-          <span>
-            Status:{' '}
-            <span
-              className={`font-semibold ${
-                simulationStatus === 'Finished'
-                  ? 'text-green-400'
-                  : simulationStatus === 'Running'
-                  ? 'text-blue-400'
-                  : simulationStatus === 'Failed'
-                  ? 'text-red-400'
-                  : 'text-yellow-400'
+        <div className="flex flex-wrap items-center gap-3">
+          <div className="inline-flex rounded-xl border border-dark-border bg-dark-card p-1">
+            <button
+              onClick={() => setSimulationView('realtime')}
+              className={`rounded-lg px-4 py-2 text-sm font-semibold transition-colors ${
+                simulationView === 'realtime' ? 'bg-accent-blue text-white' : 'text-slate-300 hover:text-white'
               }`}
             >
-              {simulationStatus}
-            </span>
-          </span>
-          <button
-            onClick={handleStartSimulation}
-            disabled={isSimulating}
-            className="bg-accent-blue hover:bg-accent-blue/80 text-white font-bold py-2 px-4 rounded disabled:bg-gray-600 disabled:cursor-not-allowed transition-colors"
-          >
-            {isSimulating ? 'Testing...' : 'Run Live Test'}
-          </button>
+              Realtime
+            </button>
+            <button
+              onClick={() => setSimulationView('scenario_lab')}
+              className={`rounded-lg px-4 py-2 text-sm font-semibold transition-colors ${
+                simulationView === 'scenario_lab' ? 'bg-accent-blue text-white' : 'text-slate-300 hover:text-white'
+              }`}
+            >
+              Scenario Lab
+            </button>
+            <button
+              onClick={() => setSimulationView('live_dashboard')}
+              className={`rounded-lg px-4 py-2 text-sm font-semibold transition-colors ${
+                simulationView === 'live_dashboard' ? 'bg-accent-blue text-white' : 'text-slate-300 hover:text-white'
+              }`}
+            >
+              Live Dashboard
+            </button>
+          </div>
+          {simulationView === 'realtime' && (
+            <>
+              <div className="rounded-lg border border-dark-border bg-dark-card px-4 py-2">
+                <div className="text-xs uppercase tracking-wide text-slate-400">Status</div>
+                <div className={`font-semibold ${getStatusTone(simulationStatus)}`}>{simulationStatus}</div>
+              </div>
+              <button
+                onClick={handleStartSimulation}
+                disabled={startDisabled}
+                className="rounded-lg bg-accent-blue px-4 py-2 font-semibold text-white transition-colors hover:bg-accent-blue/80 disabled:cursor-not-allowed disabled:bg-slate-600"
+              >
+                {isStarting ? 'Starting...' : 'Start Realtime Simulation'}
+              </button>
+              <button
+                onClick={handleStopSimulation}
+                disabled={stopDisabled}
+                className="rounded-lg border border-slate-600 px-4 py-2 font-semibold text-slate-200 transition-colors hover:border-red-400 hover:text-red-300 disabled:cursor-not-allowed disabled:text-slate-500"
+              >
+                {isStopping ? 'Stopping...' : 'Stop'}
+              </button>
+            </>
+          )}
         </div>
       </div>
 
-      {/* Configuration Panel */}
-      <div className="bg-dark-card rounded-lg p-4 mb-6 border border-dark-border">
-        <h2 className="text-lg font-semibold mb-4">Test Configuration</h2>
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
-          {/* Scenario Selection */}
-          <div>
-            <label className="block text-sm text-gray-400 mb-1">Scenario</label>
-            <select
-              value={selectedScenario}
-              onChange={(e) => setSelectedScenario(e.target.value)}
-              className="w-full bg-dark-bg border border-dark-border rounded px-3 py-2 text-white focus:outline-none focus:border-accent-blue"
-            >
-              {scenarios.map((s) => (
-                <option key={s.value} value={s.value}>{s.label}</option>
-              ))}
-            </select>
+      {simulationView === 'scenario_lab' && <ScenarioSimulationLab />}
+
+      {simulationView === 'live_dashboard' && <LiveSimulationDashboard />}
+
+      {simulationView === 'realtime' && (
+        <>
+      <div className="grid grid-cols-1 gap-6 lg:grid-cols-3 mb-6">
+        <div className="lg:col-span-2 rounded-xl border border-dark-border bg-dark-card p-5">
+          <div className="flex items-center justify-between mb-4">
+            <h2 className="text-lg font-semibold">Simulation Controls</h2>
+            <div className="text-xs text-slate-400">
+              Mode: realtime, no fixed duration
+              {transportMode !== 'idle' ? ` · transport ${transportMode.toUpperCase()}` : ''}
+            </div>
           </div>
-          
-          {/* Traffic Type Selection */}
-          <div>
-            <label className="block text-sm text-gray-400 mb-1">Traffic Type</label>
-            <select
-              value={selectedTrafficType}
-              onChange={(e) => setSelectedTrafficType(e.target.value)}
-              className="w-full bg-dark-bg border border-dark-border rounded px-3 py-2 text-white focus:outline-none focus:border-accent-blue"
-            >
-              {trafficTypes.map((t) => (
-                <option key={t.value} value={t.value}>{t.label}</option>
-              ))}
-            </select>
-          </div>
-          
-          {/* Number of Requests */}
-          <div>
-            <label className="block text-sm text-gray-400 mb-1">Requests</label>
-            <input
-              type="number"
-              min="10"
-              max="200"
-              value={numRequests}
-              onChange={(e) => {
-                const val = e.target.value;
-                if (val === '') {
-                  setNumRequests(50);
-                } else {
-                  const parsed = parseInt(val, 10);
-                  if (!isNaN(parsed)) {
-                    setNumRequests(Math.min(200, Math.max(10, parsed)));
-                  }
-                }
-              }}
-              className="w-full bg-dark-bg border border-dark-border rounded px-3 py-2 text-white focus:outline-none focus:border-accent-blue"
-            />
-          </div>
-          
-          {/* Seed Data Toggle */}
-          <div>
-            <label className="block text-sm text-gray-400 mb-1">Options</label>
-            <label className="flex items-center gap-2 cursor-pointer">
+          <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-5">
+            <div>
+              <label className="block text-sm text-slate-400 mb-1">Scenario</label>
+              <select
+                value={selectedScenario}
+                onChange={(event) => setSelectedScenario(event.target.value)}
+                className="w-full rounded-lg border border-dark-border bg-dark-bg px-3 py-2 text-white focus:border-accent-blue focus:outline-none"
+              >
+                {scenarios.map((scenario) => (
+                  <option key={scenario.value} value={scenario.value}>{scenario.label}</option>
+                ))}
+              </select>
+            </div>
+            <div>
+              <label className="block text-sm text-slate-400 mb-1">Traffic Profile</label>
+              <select
+                value={selectedTrafficType}
+                onChange={(event) => setSelectedTrafficType(event.target.value)}
+                className="w-full rounded-lg border border-dark-border bg-dark-bg px-3 py-2 text-white focus:border-accent-blue focus:outline-none"
+              >
+                {trafficTypes.map((trafficType) => (
+                  <option key={trafficType.value} value={trafficType.value}>{trafficType.label}</option>
+                ))}
+              </select>
+            </div>
+            <div>
+              <label className="block text-sm text-slate-400 mb-1">Model Preference</label>
+              <select
+                value={modelPreference}
+                onChange={(event) => setModelPreference(event.target.value)}
+                className="w-full rounded-lg border border-dark-border bg-dark-bg px-3 py-2 text-white focus:border-accent-blue focus:outline-none"
+              >
+                <option value="best_available">Best Verified Model</option>
+                <option value="active_runtime">Active Runtime Model</option>
+              </select>
+            </div>
+            <div>
+              <label className="block text-sm text-slate-400 mb-1">Key Realism</label>
+              <select
+                value={keyMode}
+                onChange={(event) => setKeyMode(event.target.value)}
+                className="w-full rounded-lg border border-dark-border bg-dark-bg px-3 py-2 text-white focus:border-accent-blue focus:outline-none"
+              >
+                {keyModes.map((option) => (
+                  <option key={option.value} value={option.value}>{option.label}</option>
+                ))}
+              </select>
+            </div>
+            <div>
+              <label className="block text-sm text-slate-400 mb-1">Virtual API Nodes</label>
               <input
-                type="checkbox"
-                checked={seedData}
-                onChange={(e) => setSeedData(e.target.checked)}
-                className="w-4 h-4 accent-accent-blue"
+                type="number"
+                min="1"
+                max="12"
+                value={virtualNodes}
+                onChange={(event) => {
+                  const value = Number.parseInt(event.target.value, 10);
+                  setVirtualNodes(Number.isNaN(value) ? 1 : Math.min(12, Math.max(1, value)));
+                }}
+                className="w-full rounded-lg border border-dark-border bg-dark-bg px-3 py-2 text-white focus:border-accent-blue focus:outline-none"
               />
-              <span className="text-sm">Seed Training Data</span>
-            </label>
+            </div>
+            <div className="space-y-3">
+              <label className="flex items-center gap-2 text-sm text-slate-200">
+                <input
+                  type="checkbox"
+                  checked={seedData}
+                  onChange={(event) => setSeedData(event.target.checked)}
+                  className="h-4 w-4 accent-accent-blue"
+                />
+                Seed collector if model missing
+              </label>
+              <label className="flex items-center gap-2 text-sm text-slate-200">
+                <input
+                  type="checkbox"
+                  checked={simulateKms}
+                  onChange={(event) => setSimulateKms(event.target.checked)}
+                  className="h-4 w-4 accent-accent-blue"
+                />
+                Measure direct-KMS baseline
+              </label>
+            </div>
           </div>
+        </div>
+        <div className="lg:col-span-1">
+          <MLStatus />
         </div>
       </div>
 
       {error && (
-        <div className="bg-red-900/30 border border-red-600 rounded-lg p-4 mb-4">
-          <p className="text-red-400">Error: {error}</p>
+        <div className="mb-6 rounded-xl border border-red-500/40 bg-red-500/10 p-4 text-red-200">
+          {error}
         </div>
       )}
 
-      {/* Test Summary */}
-      {testSummary && (
-        <div className="bg-dark-card rounded-lg p-4 mb-6 border border-dark-border">
-          <h2 className="text-xl font-semibold mb-4">Test Summary</h2>
-          <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
-            <div className={`p-3 rounded-lg ${testSummary.overallSuccess ? 'bg-green-900/30' : 'bg-red-900/30'}`}>
-              <p className="text-sm text-gray-400">Overall</p>
-              <p className={`text-2xl font-bold ${testSummary.overallSuccess ? 'text-green-400' : 'text-red-400'}`}>
-                {testSummary.overallSuccess ? 'PASS' : 'FAIL'}
-              </p>
+      {liveSession && (
+        <div className="space-y-6">
+          <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
+            <div className="rounded-xl border border-dark-border bg-dark-card p-4">
+              <div className="text-sm text-slate-400 mb-1">Requests Processed</div>
+              <div className="text-3xl font-bold">{liveSession.requests_processed || 0}</div>
+              <div className="text-xs text-slate-500 mt-2">Session ID: {liveSession.session_id?.slice(0, 8) || 'N/A'}</div>
             </div>
-            <div className="p-3 rounded-lg bg-dark-bg">
-              <p className="text-sm text-gray-400">Data Seeding</p>
-              <p className={`text-2xl font-bold ${testSummary.dataSeeding === '✓' ? 'text-green-400' : 'text-red-400'}`}>
-                {testSummary.dataSeeding}
-              </p>
+            <div className="rounded-xl border border-dark-border bg-dark-card p-4">
+              <div className="text-sm text-slate-400 mb-1">Live Top-1</div>
+              <div className="text-3xl font-bold">{formatPercent(liveSession.live_accuracy?.top_1_accuracy, 2)}</div>
+              <div className="text-xs text-slate-500 mt-2">
+                {liveSession.live_accuracy?.prediction_samples || 0} grounded samples
+              </div>
             </div>
-            <div className="p-3 rounded-lg bg-dark-bg">
-              <p className="text-sm text-gray-400">ML Predictions</p>
-              <p className={`text-2xl font-bold ${testSummary.mlPredictions === '✓' ? 'text-green-400' : 'text-red-400'}`}>
-                {testSummary.mlPredictions}
-              </p>
+            <div className="rounded-xl border border-dark-border bg-dark-card p-4">
+              <div className="text-sm text-slate-400 mb-1">Live Top-10</div>
+              <div className="text-3xl font-bold">{formatPercent(liveSession.live_accuracy?.top_10_accuracy, 2)}</div>
+              <div className="text-xs text-slate-500 mt-2">Compared to the next request in the same stream</div>
             </div>
-            <div className="p-3 rounded-lg bg-dark-bg">
-              <p className="text-sm text-gray-400">Cache Test</p>
-              <p className={`text-2xl font-bold ${testSummary.cacheTest === '✓' ? 'text-green-400' : 'text-red-400'}`}>
-                {testSummary.cacheTest}
-              </p>
-            </div>
-            <div className="p-3 rounded-lg bg-dark-bg">
-              <p className="text-sm text-gray-400">Prefetch Test</p>
-              <p className={`text-2xl font-bold ${testSummary.prefetchTest === '✓' ? 'text-green-400' : 'text-red-400'}`}>
-                {testSummary.prefetchTest}
-              </p>
+            <div className="rounded-xl border border-dark-border bg-dark-card p-4">
+              <div className="text-sm text-slate-400 mb-1">Avg Latency Saved</div>
+              <div className="text-3xl font-bold">{formatMs(liveSession.comparison?.avg_latency_saved_ms)}</div>
+              <div className="text-xs text-slate-500 mt-2">
+                {formatPercent(liveSession.comparison?.latency_improvement_percent, 2)} vs direct KMS
+              </div>
             </div>
           </div>
-        </div>
-      )}
 
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
-        {/* Cache Performance */}
-        <div className="bg-dark-card p-4 rounded-lg border border-dark-border">
-          <h2 className="text-xl font-semibold mb-2">Cache Performance</h2>
-          {cacheData.length > 0 ? (
-            <ResponsiveContainer width="100%" height={250}>
-              <PieChart>
-                <Pie
-                  data={cacheData}
-                  cx="50%"
-                  cy="50%"
-                  innerRadius={60}
-                  outerRadius={80}
-                  paddingAngle={5}
-                  dataKey="value"
-                  label={({ name, value }) => `${name}: ${value}`}
-                >
-                  {cacheData.map((entry, index) => (
-                    <Cell key={`cell-${index}`} fill={entry.color} />
-                  ))}
-                </Pie>
-                <Tooltip contentStyle={{ backgroundColor: '#222', border: '1px solid #444' }} />
-                <Legend />
-              </PieChart>
-            </ResponsiveContainer>
-          ) : (
-            <div className="h-64 flex items-center justify-center text-gray-500">
-              Run test to see cache results
+          <div className="rounded-xl border border-dark-border bg-dark-card p-5">
+            <div className="flex flex-col gap-3 xl:flex-row xl:items-start xl:justify-between">
+              <div>
+                <h2 className="text-lg font-semibold">Model Used by Simulation</h2>
+                <p className="text-sm text-slate-400 mt-1">
+                  Simulation memakai model terbaik menurut preference yang dipilih, lalu performanya diuji lagi lewat live trace.
+                </p>
+              </div>
+              <div className={`text-sm font-semibold ${model.is_active_runtime ? 'text-emerald-300' : 'text-amber-300'}`}>
+                {model.is_active_runtime ? 'Using active runtime model' : 'Using better verified shadow model'}
+              </div>
             </div>
-          )}
-          {liveTestResult?.steps?.find(s => s.step === 'cache_test') && (
-            <div className="mt-4 text-sm">
-              <p>Hit Rate: <span className="text-green-400 font-semibold">
-                {liveTestResult.steps.find(s => s.step === 'cache_test').hit_rate}%
-              </span></p>
-              <p>Redis Available: <span className={liveTestResult.steps.find(s => s.step === 'cache_test').redis_available ? 'text-green-400' : 'text-gray-400'}>
-                {liveTestResult.steps.find(s => s.step === 'cache_test').redis_available ? 'Yes' : 'No'}
-              </span></p>
+            <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4 mt-4">
+              <div className="rounded-lg border border-dark-border/70 bg-dark-bg p-4">
+                <div className="text-xs uppercase tracking-wide text-slate-400 mb-1">Selected Version</div>
+                <div className="font-mono text-white">{model.version || 'N/A'}</div>
+              </div>
+              <div className="rounded-lg border border-dark-border/70 bg-dark-bg p-4">
+                <div className="text-xs uppercase tracking-wide text-slate-400 mb-1">Source</div>
+                <div className="text-white">{model.source || 'N/A'}</div>
+              </div>
+              <div className="rounded-lg border border-dark-border/70 bg-dark-bg p-4">
+                <div className="text-xs uppercase tracking-wide text-slate-400 mb-1">Metric Basis</div>
+                <div className="text-white">
+                  {model.metric_name || 'N/A'}
+                  {model.metric_value != null ? ` (${formatFractionPercent(model.metric_value, 1)})` : ''}
+                </div>
+              </div>
+              <div className="rounded-lg border border-dark-border/70 bg-dark-bg p-4">
+                <div className="text-xs uppercase tracking-wide text-slate-400 mb-1">Active Runtime</div>
+                <div className="font-mono text-white">{componentStatus.active_model_version || 'N/A'}</div>
+              </div>
             </div>
-          )}
-        </div>
+          </div>
+          <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
+            <div className="rounded-xl border border-dark-border bg-dark-card p-5">
+              <h2 className="text-lg font-semibold mb-4">Component Proof</h2>
+              <div className="space-y-3 text-sm">
+                <div className="flex justify-between">
+                  <span className="text-slate-400">Redis / L2 Cache</span>
+                  <span className={componentStatus.redis_available ? 'text-emerald-300' : 'text-red-300'}>
+                    {componentStatus.redis_available ? 'Verified' : 'Unavailable'}
+                  </span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-slate-400">Prefetch Queue</span>
+                  <span className={componentStatus.prefetch_queue_available ? 'text-emerald-300' : 'text-red-300'}>
+                    {componentStatus.prefetch_queue_available ? 'Verified' : 'Unavailable'}
+                  </span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-slate-400">Prefetch Worker</span>
+                  <span className={componentStatus.prefetch_worker_active ? 'text-emerald-300' : 'text-amber-300'}>
+                    {componentStatus.prefetch_worker_active ? 'Active' : 'Not verified'}
+                  </span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-slate-400">KMS Provider</span>
+                  <span className="text-white">{componentStatus.kms_provider || 'generic'}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-slate-400">Virtual API Nodes</span>
+                  <span className="text-white">{componentStatus.virtual_node_count ?? virtualNodes}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-slate-400">Model Loaded</span>
+                  <span className={componentStatus.model_loaded ? 'text-emerald-300' : 'text-red-300'}>
+                    {componentStatus.model_loaded ? 'Yes' : 'No'}
+                  </span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-slate-400">L1 Cache Size</span>
+                  <span className="text-white">{componentStatus.l1_cache_size ?? 0}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-slate-400">Virtual L1 Total</span>
+                  <span className="text-white">{componentStatus.virtual_l1_cache_size ?? 0}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-slate-400">L2 Cache Size</span>
+                  <span className="text-white">{componentStatus.l2_cache_size ?? 0}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-slate-400">Worker Completed Delta</span>
+                  <span className="text-white">{liveSession.prefetch?.worker_completed_delta ?? 0}</span>
+                </div>
+              </div>
+            </div>
 
-        {/* Latency Performance */}
-        <div className="bg-dark-card p-4 rounded-lg border border-dark-border">
-          <h2 className="text-xl font-semibold mb-2">Latency Performance</h2>
-          {latencyData.length > 0 ? (
-            <ResponsiveContainer width="100%" height={250}>
-              <BarChart data={latencyData}>
-                <CartesianGrid strokeDasharray="3 3" stroke="#444" />
-                <XAxis dataKey="name" stroke="#888" />
-                <YAxis stroke="#888" />
-                <Tooltip contentStyle={{ backgroundColor: '#222', border: '1px solid #444' }} />
-                <Bar dataKey="latency" fill="#0088FE" radius={[4, 4, 0, 0]} />
-              </BarChart>
-            </ResponsiveContainer>
-          ) : (
-            <div className="h-64 flex items-center justify-center text-gray-500">
-              Run test to see latency results
+            <div className="rounded-xl border border-dark-border bg-dark-card p-5">
+              <h2 className="text-lg font-semibold mb-4">Honesty Checks</h2>
+              <div className="space-y-3 text-sm">
+                <div className="flex justify-between">
+                  <span className="text-slate-400">Ground Truth Next Request</span>
+                  <span className="text-emerald-300">
+                    {liveSession.honesty_checks?.uses_ground_truth_next_request ? 'Enabled' : 'No'}
+                  </span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-slate-400">Explicit Cache Path Tracking</span>
+                  <span className="text-emerald-300">
+                    {liveSession.honesty_checks?.cache_path_tracked_explicitly ? 'Enabled' : 'No'}
+                  </span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-slate-400">Prediction Samples</span>
+                  <span className="text-white">{liveSession.honesty_checks?.prediction_sample_count ?? 0}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-slate-400">Same Stream for Baseline</span>
+                  <span className="text-white">
+                    {liveSession.honesty_checks?.uses_same_request_stream_for_baseline ? 'Yes' : 'No'}
+                  </span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-slate-400">Stable Simulation Keys</span>
+                  <span className="text-white">
+                    {liveSession.honesty_checks?.stable_simulation_keys ? 'Yes' : 'No'}
+                  </span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-slate-400">Key Mode</span>
+                  <span className="text-white">{liveSession.honesty_checks?.key_mode || keyMode}</span>
+                </div>
+                <p className="pt-2 text-slate-400">
+                  Nilai live hanya dihitung jika prediksi memang dibandingkan dengan request berikutnya pada stream yang sama.
+                </p>
+              </div>
             </div>
-          )}
-          {liveTestResult?.steps?.find(s => s.step === 'latency_test') && (
-            <div className="mt-4 text-sm grid grid-cols-2 gap-2">
-              <p>Average: <span className="text-blue-400">{liveTestResult.steps.find(s => s.step === 'latency_test').avg_latency_ms}ms</span></p>
-              <p>P50: <span className="text-green-400">{liveTestResult.steps.find(s => s.step === 'latency_test').p50_ms}ms</span></p>
-              <p>P99: <span className="text-yellow-400">{liveTestResult.steps.find(s => s.step === 'latency_test').p99_ms}ms</span></p>
-              <p>Min: <span className="text-gray-400">{liveTestResult.steps.find(s => s.step === 'latency_test').min_ms}ms</span></p>
-            </div>
-          )}
-        </div>
-      </div>
+          </div>
 
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
-        {/* Prefetch Worker Activity */}
-        <div className="bg-dark-card p-4 rounded-lg border border-dark-border">
-          <h2 className="text-xl font-semibold mb-2">Prefetch Worker Activity</h2>
-          {prefetchData.length > 0 ? (
-            <ResponsiveContainer width="100%" height={250}>
-              <BarChart data={prefetchData}>
-                <CartesianGrid strokeDasharray="3 3" stroke="#444" />
-                <XAxis dataKey="name" stroke="#888" />
-                <YAxis stroke="#888" />
-                <Tooltip contentStyle={{ backgroundColor: '#222', border: '1px solid #444' }} />
-                <Bar dataKey="jobs" fill="#8884d8" radius={[4, 4, 0, 0]} />
-              </BarChart>
-            </ResponsiveContainer>
-          ) : (
-            <div className="h-64 flex items-center justify-center text-gray-500">
-              Run test to see prefetch results
+          <div className="grid grid-cols-1 gap-6 xl:grid-cols-2">
+            <div className="rounded-xl border border-dark-border bg-dark-card p-5">
+              <h2 className="text-lg font-semibold mb-4">Latency: PSKC vs Direct KMS</h2>
+              <div className="h-80">
+                <ResponsiveContainer width="100%" height="100%">
+                  <LineChart data={latencyChartData}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="#334155" />
+                    <XAxis dataKey="index" stroke="#94a3b8" />
+                    <YAxis stroke="#94a3b8" />
+                    <Tooltip />
+                    <Legend />
+                    <Line type="monotone" dataKey="pskc" stroke="#14b8a6" dot={false} name="With PSKC" />
+                    <Line type="monotone" dataKey="directKms" stroke="#f59e0b" dot={false} name="Direct KMS" />
+                  </LineChart>
+                </ResponsiveContainer>
+              </div>
             </div>
-          )}
-          {liveTestResult?.steps?.find(s => s.step === 'prefetch_test') && (
-            <div className="mt-4 text-sm">
-              <p>Queue Before: <span className="text-gray-400">{liveTestResult.steps.find(s => s.step === 'prefetch_test').queue_before}</span></p>
-              <p>Queue After: <span className="text-gray-400">{liveTestResult.steps.find(s => s.step === 'prefetch_test').queue_after}</span></p>
-              <p>Jobs Enqueued: <span className="text-purple-400">{liveTestResult.steps.find(s => s.step === 'prefetch_test').jobs_enqueued}</span></p>
-            </div>
-          )}
-        </div>
 
-        {/* ML Predictions */}
-        <div className="bg-dark-card p-4 rounded-lg border border-dark-border">
-          <h2 className="text-xl font-semibold mb-2">ML Predictions</h2>
-          {mlPredictions.length > 0 ? (
-            <div className="overflow-y-auto max-h-64">
+            <div className="rounded-xl border border-dark-border bg-dark-card p-5">
+              <h2 className="text-lg font-semibold mb-4">Cache Path Breakdown</h2>
+              <div className="h-80">
+                <ResponsiveContainer width="100%" height="100%">
+                  <PieChart>
+                    <Pie data={cachePathData} dataKey="value" nameKey="name" cx="50%" cy="50%" outerRadius={100}>
+                      {cachePathData.map((entry, index) => (
+                        <Cell key={`${entry.name}-${index}`} fill={entry.color || PIE_COLORS[index % PIE_COLORS.length]} />
+                      ))}
+                    </Pie>
+                    <Tooltip />
+                    <Legend />
+                  </PieChart>
+                </ResponsiveContainer>
+              </div>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 gap-6 xl:grid-cols-2">
+            <div className="rounded-xl border border-dark-border bg-dark-card p-5">
+              <h2 className="text-lg font-semibold mb-4">Accuracy and Prefetch Evidence</h2>
+              <div className="h-80">
+                <ResponsiveContainer width="100%" height="100%">
+                  <BarChart data={predictionSummaryData}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="#334155" />
+                    <XAxis dataKey="name" stroke="#94a3b8" />
+                    <YAxis stroke="#94a3b8" />
+                    <Tooltip />
+                    <Legend />
+                    <Bar dataKey="accuracy" fill="#38bdf8" radius={[6, 6, 0, 0]} name="Percent" />
+                  </BarChart>
+                </ResponsiveContainer>
+              </div>
+              <div className="mt-4 grid grid-cols-1 gap-3 md:grid-cols-3">
+                <div className="rounded-lg border border-dark-border/70 bg-dark-bg p-4">
+                  <div className="text-xs uppercase tracking-wide text-slate-400 mb-1">Worker-prefetched Hits</div>
+                  <div className="text-lg font-semibold text-emerald-300">
+                    {liveSession.prefetch?.worker_prefetched_hits ?? 0}
+                  </div>
+                </div>
+                <div className="rounded-lg border border-dark-border/70 bg-dark-bg p-4">
+                  <div className="text-xs uppercase tracking-wide text-slate-400 mb-1">Request-cached Hits</div>
+                  <div className="text-lg font-semibold text-sky-300">
+                    {liveSession.prefetch?.request_cached_hits ?? 0}
+                  </div>
+                </div>
+                <div className="rounded-lg border border-dark-border/70 bg-dark-bg p-4">
+                  <div className="text-xs uppercase tracking-wide text-slate-400 mb-1">Unknown Origin Hits</div>
+                  <div className="text-lg font-semibold text-slate-300">
+                    {liveSession.prefetch?.cache_hits_without_origin ?? 0}
+                  </div>
+                </div>
+              </div>
+              <p className="mt-3 text-xs text-slate-500">
+                `Verified Prefetch` adalah metrik ketat: hanya dihitung bila key yang diminta memang diprediksi
+                sebelumnya, worker menyelesaikan prefetch-nya, lalu request berikutnya benar-benar memanfaatkan cache hangat itu.
+              </p>
+            </div>
+
+            <div className="rounded-xl border border-dark-border bg-dark-card p-5">
+              <h2 className="text-lg font-semibold mb-4">Average Latency Comparison</h2>
+              <div className="h-80">
+                <ResponsiveContainer width="100%" height="100%">
+                  <BarChart data={latencyComparisonData}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="#334155" />
+                    <XAxis dataKey="name" stroke="#94a3b8" />
+                    <YAxis stroke="#94a3b8" />
+                    <Tooltip />
+                    <Legend />
+                    <Bar dataKey="latency" fill="#34d399" radius={[6, 6, 0, 0]} name="Avg Latency (ms)" />
+                  </BarChart>
+                </ResponsiveContainer>
+              </div>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 gap-6 xl:grid-cols-2">
+            <div className="rounded-xl border border-dark-border bg-dark-card p-5">
+              <h2 className="text-lg font-semibold mb-4">PSKC vs No-PSKC Summary</h2>
+              <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+                <div className="rounded-lg border border-dark-border/70 bg-dark-bg p-4">
+                  <div className="text-sm text-slate-400 mb-2">With PSKC</div>
+                  <div className="space-y-2 text-sm">
+                    <div className="flex justify-between">
+                      <span className="text-slate-400">Avg Latency</span>
+                      <span className="text-white">{formatMs(liveSession.pskc_metrics?.avg_latency_ms)}</span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-slate-400">P95 Latency</span>
+                      <span className="text-white">{formatMs(liveSession.pskc_metrics?.p95_latency_ms)}</span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-slate-400">Cache Hit Rate</span>
+                      <span className="text-white">{formatPercent(liveSession.pskc_metrics?.cache_hit_rate, 2)}</span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-slate-400">L1 / L2 / KMS</span>
+                      <span className="text-white">
+                        {liveSession.pskc_metrics?.l1_hits ?? 0} / {liveSession.pskc_metrics?.l2_hits ?? 0} / {liveSession.pskc_metrics?.kms_fetches ?? 0}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+                <div className="rounded-lg border border-dark-border/70 bg-dark-bg p-4">
+                  <div className="text-sm text-slate-400 mb-2">Without PSKC</div>
+                  <div className="space-y-2 text-sm">
+                    <div className="flex justify-between">
+                      <span className="text-slate-400">Avg Latency</span>
+                      <span className="text-white">{formatMs(liveSession.baseline_metrics?.avg_latency_ms)}</span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-slate-400">P95 Latency</span>
+                      <span className="text-white">{formatMs(liveSession.baseline_metrics?.p95_latency_ms)}</span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-slate-400">Direct KMS Requests</span>
+                      <span className="text-white">{liveSession.baseline_metrics?.direct_kms_requests ?? 0}</span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-slate-400">Simulation Mode</span>
+                      <span className="text-white">{liveSession.simulate_kms ? 'Measured live' : 'Disabled'}</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div className="rounded-xl border border-dark-border bg-dark-card p-5">
+              <h2 className="text-lg font-semibold mb-4">Most Active Keys</h2>
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead className="border-b border-dark-border text-left text-slate-400">
+                    <tr>
+                      <th className="py-2 pr-4">Key</th>
+                      <th className="py-2 pr-4">Total</th>
+                      <th className="py-2 pr-4">L1</th>
+                      <th className="py-2 pr-4">L2</th>
+                      <th className="py-2 pr-4">KMS</th>
+                      <th className="py-2 pr-4">Miss</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {keyBreakdown.map((row) => (
+                      <tr key={row.key_id} className="border-b border-dark-border/50">
+                        <td className="py-2 pr-4 font-mono text-xs text-slate-200">{row.key_id}</td>
+                        <td className="py-2 pr-4">{row.total}</td>
+                        <td className="py-2 pr-4 text-emerald-300">{row.l1_hits}</td>
+                        <td className="py-2 pr-4 text-sky-300">{row.l2_hits}</td>
+                        <td className="py-2 pr-4 text-amber-300">{row.kms_fetches}</td>
+                        <td className="py-2 pr-4 text-red-300">{row.kms_misses}</td>
+                      </tr>
+                    ))}
+                    {keyBreakdown.length === 0 && (
+                      <tr>
+                        <td className="py-4 text-slate-500" colSpan={6}>Belum ada trace key untuk session ini.</td>
+                      </tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+
+          <div className="rounded-xl border border-dark-border bg-dark-card p-5">
+            <h2 className="text-lg font-semibold mb-4">Request Trace</h2>
+            <div className="overflow-x-auto">
               <table className="w-full text-sm">
-                <thead className="text-xs text-gray-300 uppercase bg-dark-bg sticky top-0">
+                <thead className="border-b border-dark-border text-left text-slate-400">
                   <tr>
-                    <th className="py-2 px-3 text-left">Key ID</th>
-                    <th className="py-2 px-3 text-right">Confidence</th>
+                    <th className="py-2 pr-4">#</th>
+                    <th className="py-2 pr-4">Node</th>
+                    <th className="py-2 pr-4">Service</th>
+                    <th className="py-2 pr-4">Key</th>
+                    <th className="py-2 pr-4">Path</th>
+                    <th className="py-2 pr-4">Prev Prediction Top-1</th>
+                    <th className="py-2 pr-4">Prev Prediction Top-10</th>
+                    <th className="py-2 pr-4">Cache Origin</th>
+                    <th className="py-2 pr-4">PSKC Latency</th>
+                    <th className="py-2 pr-4">Direct KMS</th>
+                    <th className="py-2 pr-4">Saved</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {mlPredictions.map((pred) => (
-                    <tr key={pred.key} className="border-b border-dark-border">
-                      <td className="py-2 px-3 font-mono text-blue-300">{pred.keyId}</td>
-                      <td className="py-2 px-3 text-right">
-                        <span className={`font-semibold ${
-                          pred.confidence > 70 ? 'text-green-400' :
-                          pred.confidence > 40 ? 'text-yellow-400' : 'text-red-400'
-                        }`}>
-                          {pred.confidence}%
-                        </span>
+                  {traceRows.slice().reverse().map((row) => (
+                    <tr key={`${row.index}-${row.key_id}`} className="border-b border-dark-border/50">
+                      <td className="py-2 pr-4">{row.index}</td>
+                      <td className="py-2 pr-4">{row.node_id || 'N/A'}</td>
+                      <td className="py-2 pr-4">{row.service_id}</td>
+                      <td className="py-2 pr-4 font-mono text-xs text-slate-200">{row.key_id}</td>
+                      <td className={`py-2 pr-4 font-semibold ${getPathTone(row.path)}`}>{formatPathLabel(row.path)}</td>
+                      <td className={`py-2 pr-4 ${row.top1_correct ? 'text-emerald-300' : 'text-slate-400'}`}>
+                        {row.predicted_on_previous ? (row.top1_correct ? 'Correct' : 'Wrong') : 'N/A'}
+                      </td>
+                      <td className={`py-2 pr-4 ${row.top10_correct ? 'text-emerald-300' : 'text-slate-400'}`}>
+                        {row.predicted_on_previous ? (row.top10_correct ? 'Found' : 'Missed') : 'N/A'}
+                      </td>
+                      <td className={`py-2 pr-4 ${
+                        row.prefetched_by_worker
+                          ? 'text-emerald-300'
+                          : row.prefetched_before_request
+                            ? 'text-sky-300'
+                            : 'text-slate-400'
+                      }`}>
+                        {formatCacheOriginLabel(row)}
+                      </td>
+                      <td className="py-2 pr-4">{formatMs(row.latency_ms)}</td>
+                      <td className="py-2 pr-4">{formatMs(row.baseline_latency_ms)}</td>
+                      <td className={row.latency_saved_ms > 0 ? 'py-2 pr-4 text-emerald-300' : 'py-2 pr-4 text-slate-400'}>
+                        {formatMs(row.latency_saved_ms)}
                       </td>
                     </tr>
                   ))}
+                  {traceRows.length === 0 && (
+                    <tr>
+                      <td className="py-4 text-slate-500" colSpan={11}>
+                        Session belum menghasilkan trace. Start simulation untuk mulai melihat request hidup.
+                      </td>
+                    </tr>
+                  )}
                 </tbody>
               </table>
             </div>
-          ) : (
-            <div className="h-64 flex items-center justify-center text-gray-500">
-              Run test to see ML predictions
-            </div>
-          )}
-          {liveTestResult?.steps?.find(s => s.step === 'ml_predictions') && (
-            <div className="mt-4 text-sm">
-              <p>Predictions Count: <span className="text-blue-400">{liveTestResult.steps.find(s => s.step === 'ml_predictions').predictions_count}</span></p>
-            </div>
-          )}
-        </div>
-      </div>
-
-      {/* Test Details */}
-      {liveTestResult && (
-        <div className="bg-dark-card p-4 rounded-lg border border-dark-border">
-          <h2 className="text-xl font-semibold mb-2">Test Details</h2>
-          <div className="text-sm text-gray-400">
-            <p>Test ID: <span className="text-gray-300 font-mono">{liveTestResult.test_id}</span></p>
-            <p>Started: <span className="text-gray-300">{new Date(liveTestResult.started_at).toLocaleString()}</span></p>
-            <p>Completed: <span className="text-gray-300">{new Date(liveTestResult.completed_at).toLocaleString()}</span></p>
-            <p>Requests: <span className="text-gray-300">{liveTestResult.num_requests}</span></p>
-            <p>Scenario: <span className="text-blue-400">{liveTestResult.scenario || 'test'}</span></p>
-            <p>Traffic Type: <span className="text-purple-400">{liveTestResult.traffic_type || 'normal'}</span></p>
-          </div>
-          
-          <h3 className="font-semibold mt-4 mb-2">Step Results:</h3>
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-2">
-            {liveTestResult.steps?.map((step, idx) => (
-              <div key={idx} className={`p-2 rounded border ${
-                step.success ? 'border-green-600 bg-green-900/20' : 'border-red-600 bg-red-900/20'
-              }`}>
-                <p className="font-semibold">{step.step}</p>
-                <p className={step.success ? 'text-green-400' : 'text-red-400'}>
-                  {step.success ? 'Success' : 'Failed'}
-                </p>
-                {step.error && (
-                  <p className="text-red-400 text-xs mt-1">{step.error}</p>
-                )}
-              </div>
-            ))}
+            <p className="mt-3 text-xs text-slate-500">
+              Kolom previous prediction membandingkan request saat ini dengan tebakan yang dibuat pada request sebelumnya
+              di stream service yang sama. `Cache Origin = Worker-prefetched` berarti worker benar-benar memanaskan key
+              itu sebelum request masuk. `Request-cached` berarti key sudah ada di cache karena request sebelumnya pernah
+              fallback ke KMS lalu menyimpannya ke cache. Jadi `L2 hit` tidak selalu berarti worker prefetch berhasil.
+              `KMS fallback` sendiri berarti cache miss lalu request mengambil key dari KMS; ini tidak otomatis berarti
+              model salah, karena bisa juga worker belum sempat selesai atau key sudah berotasi terlalu cepat.
+            </p>
           </div>
         </div>
+      )}
+        </>
       )}
     </div>
   );

@@ -246,33 +246,45 @@ class MetricsResponse(BaseModel):
 
 
 class SimulationRequest(BaseModel):
-    """Request to run simulation"""
-    scenario: str = Field(default="spotify", description="Simulation scenario name")
-    profile_id: Optional[str] = Field(default=None, description="Simulation profile identifier")
+    """Request to run a batch-based simulation"""
+    scenario: str = Field(..., description="Simulation scenario name")
+    profile_id: Optional[str] = Field(default=None, description="Simulation profile identifier for the chosen scenario")
     request_count: int = Field(default=1000, ge=50, le=10000, description="Number of requests to simulate")
     seed: Optional[int] = Field(default=None, description="Optional seed for deterministic simulation runs")
-    duration_seconds: int = Field(default=60, ge=10, le=3600, description="Simulation duration")
-    traffic_rate: float = Field(default=100.0, description="Requests per second")
+
+
+class OrganicSimulationRequest(BaseModel):
+    """Request to run a time-based organic simulation"""
+    scenario_id: str = Field(..., description="Simulation scenario name (e.g., 'siakad', 'pddikti')")
+    traffic_profile: str = Field(default="normal", description="Organic traffic profile (e.g., 'normal', 'heavy', 'prime_time')")
+    duration_seconds: int = Field(default=60, ge=10, le=300, description="Simulation duration in seconds")
 
 
 class SimulationResponse(BaseModel):
-    """Response for simulation"""
+    """Generic response for acknowledging a simulation run has started."""
     simulation_id: str
     status: str
     scenario: str
-    profile_id: Optional[str] = None
-    request_count: Optional[int] = None
-    duration_seconds: int
     timestamp: str = Field(default_factory=lambda: datetime.utcnow().isoformat())
 
+
+class OrganicSimulationResponse(BaseModel):
+    """Response model for the result of an organic simulation."""
+    status: str
+    scenario: str
+    profile_id: str
+    duration_seconds: int
+    request_count: int
+    avg_rps: float
+    generated_at: str
+    metadata: Dict[str, Any]
+    results: Dict[str, Any]
+    comparison: Dict[str, Any]
+    charts: Dict[str, Any]
 
 class SimulationResultResponse(BaseModel):
     """Response for simulation results"""
     simulation_id: str
-    status: str
-    results: Dict[str, Any]
-    metrics: Dict[str, Any]
-    timestamp: str = Field(default_factory=lambda: datetime.utcnow().isoformat())
 
 
 class SecurityAuditResponse(BaseModel):

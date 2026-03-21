@@ -1,11 +1,14 @@
 import json
 import os
 import time
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
 
+from src.api import ml_service
 from src.ml.data_collector import DataCollector
+from src.ml.incremental_model import IncrementalModelPersistence
 from src.ml.model import EnsembleModel, SKLEARN_AVAILABLE
 from src.ml.predictor import KeyPredictor
 from src.ml.model_registry import ModelRegistry, SecurityError
@@ -297,14 +300,27 @@ def test_trainer_retraining_persists_new_active_secure_artifact(tmp_path):
     assert result["success"] is True
     assert result["registry_version"] != "bootstrap_v1"
     assert result["artifact_path"].endswith(".pskc.json")
+    assert result["active_version"] == result["registry_version"]
 
     active_version = registry.get_active_version("pskc_model")
     assert active_version is not None
-    assert active_version.version == result["registry_version"]
+    assert active_version.version == "bootstrap_v1"
 
-    reloaded_model = registry.load_model("pskc_model")
-    assert reloaded_model is not None
-    assert reloaded_model.is_trained is True
+    reloaded_model = trainer.load_active_model()
+    assert reloaded_model["success"] is True
+    assert reloaded_model["version"] == result["registry_version"]
+
+    loaded_model = trainer.model
+    assert loaded_model is not None
+    assert loaded_model.is_trained is True
+
+    persisted_info = trainer.get_stats()["incremental_info"]
+    assert persisted_info["current_version"] == result["registry_version"]
+    assert persisted_info["has_model_data"] is True
+
+    reloaded_registry_model = registry.load_model("pskc_model")
+    assert reloaded_registry_model is not None
+    assert reloaded_registry_model.is_trained is True
 
 
 def test_predictor_bootstraps_from_registry_active_model(tmp_path, monkeypatch):
@@ -337,3 +353,177 @@ def test_predictor_bootstraps_from_registry_active_model(tmp_path, monkeypatch):
     assert stats["model_source"] == "registry"
     assert stats["model_version"] == "predictor_v1"
     assert stats["artifact_path"].endswith(".pskc.json")
+
+
+def test_incremental_persistence_rejects_version_bump_without_meaningful_improvement(tmp_path):
+    incremental = IncrementalModelPersistence(model_dir=str(tmp_path), model_name="pskc_model")
+
+    first = incremental.update(
+        model_data={"checkpoint": 1},
+        reason="manual",
+        metrics={"accuracy": 0.62, "top_10_accuracy": 0.91},
+        training_info={"sample_count": 240, "train_samples": 168, "val_samples": 72},
+    )
+    second = incremental.update(
+        model_data={"checkpoint": 2},
+        reason="scheduled",
+        metrics={"accuracy": 0.625, "top_10_accuracy": 0.915},
+        training_info={"sample_count": 260, "train_samples": 182, "val_samples": 78},
+    )
+
+    assert first["accepted"] is True
+    assert first["version"] == "v1"
+    assert second["accepted"] is False
+    assert second["version"] == "v1"
+
+    info = incremental.get_info()
+    assert info["current_version"] == "v1"
+    assert info["attempt_count"] == 2
+
+    history = incremental.get_history(limit=5)
+    assert history[-1]["accepted"] is False
+    assert history[-1]["decision_reason"] == "no_meaningful_improvement"
+
+
+def test_trainer_retains_active_version_when_retrain_does_not_improve(tmp_path, monkeypatch):
+    registry = ModelRegistry(model_dir=str(tmp_path / "registry"))
+    incremental = IncrementalModelPersistence(model_dir=str(tmp_path / "incremental"), model_name="pskc_model")
+    bootstrap_model = _build_trained_ensemble_model()
+
+    incremental.update(
+        model_data=registry.serialize_model_checkpoint(bootstrap_model),
+        reason="manual",
+        metrics={"accuracy": 0.63, "top_10_accuracy": 0.94},
+        training_info={"sample_count": 300, "train_samples": 210, "val_samples": 90},
+    )
+
+    trainer = ModelTrainer(
+        model_name="pskc_model",
+        registry=registry,
+        incremental_persistence=incremental,
+        min_samples=10,
+    )
+    load_result = trainer.load_active_model()
+    assert load_result["success"] is True
+    assert trainer.get_active_model_metadata()["version"] == "v1"
+
+    trainer._collector = _FakeCollector(_build_access_events())
+    monkeypatch.setattr(
+        trainer,
+        "_quick_eval",
+        lambda model, X_val, y_val, access_data, validation_offset: {
+            "accuracy": 0.631,
+            "top_10_accuracy": 0.941,
+            "n_samples": len(y_val),
+        },
+    )
+
+    result = trainer.train(force=True, reason="scheduled")
+
+    assert result["success"] is True
+    assert result["model_accepted"] is False
+    assert result["version_bumped"] is False
+    assert result["active_version"] == "v1"
+    assert result["registry_version"] == "v1"
+
+
+def test_ml_status_payload_uses_persisted_incremental_accuracy_when_runtime_history_is_empty(tmp_path, monkeypatch):
+    registry = ModelRegistry(model_dir=str(tmp_path / "registry"))
+    incremental = IncrementalModelPersistence(model_dir=str(tmp_path / "incremental"), model_name="pskc_model")
+    model = _build_trained_ensemble_model()
+
+    incremental.update(
+        model_data=registry.serialize_model_checkpoint(model),
+        reason="manual",
+        metrics={"accuracy": 0.67, "top_10_accuracy": 0.96},
+        training_info={"sample_count": 320, "train_samples": 224, "val_samples": 96},
+    )
+
+    trainer = ModelTrainer(
+        model_name="pskc_model",
+        registry=registry,
+        incremental_persistence=incremental,
+        min_samples=10,
+    )
+    trainer.load_active_model()
+    trainer._training_history = []
+
+    fake_collector = SimpleNamespace(get_stats=lambda: {"total_events": 320})
+    fake_predictor = SimpleNamespace(model=trainer.model, attach_model=lambda *args, **kwargs: None)
+
+    monkeypatch.setattr(
+        ml_service,
+        "_bind_runtime_components",
+        lambda: {
+            "collector": fake_collector,
+            "trainer": trainer,
+            "predictor": fake_predictor,
+        },
+    )
+    monkeypatch.setattr(
+        ml_service,
+        "get_model_registry",
+        lambda: SimpleNamespace(
+            get_model_summary=lambda model_name: {"active_stage": "production"},
+        ),
+    )
+
+    payload = ml_service.get_ml_status_payload()
+
+    assert payload["model_version"] == "v1"
+    assert payload["model_accuracy"] == pytest.approx(0.67)
+    assert payload["model_top_10_accuracy"] == pytest.approx(0.96)
+    assert payload["best_accuracy"] == pytest.approx(0.67)
+    assert payload["model_loaded"] is True
+    assert payload["last_attempt_accuracy"] == pytest.approx(0.67)
+    assert payload["last_attempt_top_10_accuracy"] == pytest.approx(0.96)
+    assert payload["accuracy_confidence"] == "medium"
+
+
+def test_ml_status_payload_marks_small_validation_sets_as_low_confidence(tmp_path, monkeypatch):
+    registry = ModelRegistry(model_dir=str(tmp_path / "registry"))
+    incremental = IncrementalModelPersistence(model_dir=str(tmp_path / "incremental"), model_name="pskc_model")
+    model = _build_trained_ensemble_model()
+
+    incremental.update(
+        model_data=registry.serialize_model_checkpoint(model),
+        reason="manual",
+        metrics={"accuracy": 1.0, "top_10_accuracy": 1.0},
+        training_info={"sample_count": 60, "train_samples": 42, "val_samples": 18},
+    )
+
+    trainer = ModelTrainer(
+        model_name="pskc_model",
+        registry=registry,
+        incremental_persistence=incremental,
+        min_samples=10,
+    )
+    trainer.load_active_model()
+    trainer._training_history = []
+
+    fake_collector = SimpleNamespace(get_stats=lambda: {"total_events": 60})
+    fake_predictor = SimpleNamespace(model=trainer.model, attach_model=lambda *args, **kwargs: None)
+
+    monkeypatch.setattr(
+        ml_service,
+        "_bind_runtime_components",
+        lambda: {
+            "collector": fake_collector,
+            "trainer": trainer,
+            "predictor": fake_predictor,
+        },
+    )
+    monkeypatch.setattr(
+        ml_service,
+        "get_model_registry",
+        lambda: SimpleNamespace(
+            get_model_summary=lambda model_name: {"active_stage": "development"},
+        ),
+    )
+
+    payload = ml_service.get_ml_status_payload()
+
+    assert payload["model_accuracy"] == pytest.approx(1.0)
+    assert payload["accepted_validation_samples"] == 18
+    assert payload["accuracy_confidence"] == "low"
+    assert "Validation sample count is still small" in payload["accuracy_warning"]

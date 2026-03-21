@@ -16,9 +16,82 @@ logger = logging.getLogger(__name__)
 
 
 def _isoformat_timestamp(timestamp: float) -> Optional[str]:
-    if not timestamp:
+    if not timestamp or timestamp <= 0:
         return None
     return datetime.fromtimestamp(timestamp, tz=timezone.utc).isoformat()
+
+
+def _extract_accuracy_from_history_item(item: Dict[str, Any]) -> Optional[float]:
+    for key in ("val_accuracy", "accuracy", "top_1_accuracy"):
+        value = item.get(key)
+        if value is not None:
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                return None
+
+    metrics = item.get("metrics", {})
+    for key in ("accuracy", "top_1_accuracy", "val_accuracy"):
+        value = metrics.get(key)
+        if value is not None:
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                return None
+    return None
+
+
+def _extract_top10_from_history_item(item: Dict[str, Any]) -> Optional[float]:
+    for key in ("val_top_10_accuracy", "top_10_accuracy"):
+        value = item.get(key)
+        if value is not None:
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                return None
+
+    metrics = item.get("metrics", {})
+    value = metrics.get("top_10_accuracy")
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _extract_attempt_accuracy(last_training_attempt: Dict[str, Any]) -> Optional[float]:
+    if not last_training_attempt:
+        return None
+    return _extract_accuracy_from_history_item({"metrics": last_training_attempt.get("metrics", {})})
+
+
+def _extract_attempt_top10(last_training_attempt: Dict[str, Any]) -> Optional[float]:
+    if not last_training_attempt:
+        return None
+    return _extract_top10_from_history_item({"metrics": last_training_attempt.get("metrics", {})})
+
+
+def _accuracy_confidence(val_samples: Optional[int]) -> str:
+    try:
+        sample_count = int(val_samples or 0)
+    except (TypeError, ValueError):
+        sample_count = 0
+
+    if sample_count >= 200:
+        return "high"
+    if sample_count >= 50:
+        return "medium"
+    return "low"
+
+
+def _accuracy_warning(val_samples: Optional[int]) -> Optional[str]:
+    confidence = _accuracy_confidence(val_samples)
+    if confidence == "low":
+        return "Validation sample count is still small, so the displayed accuracy can move a lot under new traffic."
+    if confidence == "medium":
+        return "Validation coverage is moderate. Treat the metric as directional, not final."
+    return None
 
 
 def _bind_runtime_components() -> Dict[str, Any]:
@@ -113,13 +186,12 @@ def get_ml_status_payload() -> Dict[str, Any]:
     runtime = _bind_runtime_components()
     collector = runtime["collector"]
     trainer = runtime["trainer"]
-    predictor = runtime["predictor"]
     registry = get_model_registry()
-    queue_stats = get_prefetch_queue().get_stats()
 
     collector_stats = collector.get_stats()
     trainer_stats = trainer.get_stats()
     model_stats = trainer_stats.get("model_stats", {})
+    drift_stats = trainer_stats.get("drift_stats", {})
     sample_count = int(collector_stats.get("total_events", 0))
     min_samples = int(trainer_stats.get("min_samples", 0))
     model_loaded = bool(getattr(trainer.model, "is_trained", False))
@@ -127,43 +199,117 @@ def get_ml_status_payload() -> Dict[str, Any]:
     artifact_exists = bool(artifact_path and os.path.exists(artifact_path))
     model_name = trainer_stats.get("model_name")
     model_summary = registry.get_model_summary(model_name) if model_name else {}
-    lifecycle_stats = registry.get_lifecycle_stats(model_name=model_name) if model_name else {}
-    last_training = _isoformat_timestamp(float(trainer_stats.get("last_train_time") or 0))
+    last_training_ts = float(trainer_stats.get("last_train_time") or 0)
+    incremental_info = trainer_stats.get("incremental_info", {})
+    incremental_metadata = incremental_info.get("metadata", {}) if isinstance(incremental_info, dict) else {}
 
-    if not last_training and artifact_exists:
-        last_training = datetime.fromtimestamp(os.path.getmtime(artifact_path), tz=timezone.utc).isoformat()
+    last_trained_at = _isoformat_timestamp(last_training_ts)
+    if not last_trained_at and incremental_metadata.get("last_accepted_at"):
+        last_trained_at = incremental_metadata.get("last_accepted_at")
+    if not last_trained_at and artifact_exists:
+        last_trained_at = datetime.fromtimestamp(os.path.getmtime(artifact_path), tz=timezone.utc).isoformat()
 
+    status = "not_trained"
     if model_loaded:
         status = "trained"
     elif artifact_exists:
         status = "artifact_present"
-    elif sample_count == 0:
-        status = "not_trained"
     elif sample_count < min_samples:
         status = "collecting_data"
     else:
         status = "ready_for_training"
 
+    # Get accuracy from recent training history (validation accuracy from last training)
+    accuracy = None
+    top_10_accuracy = None
+    training_history = trainer.get_training_history()
+    accepted_history = [item for item in training_history if item.get("accepted", True)]
+    if accepted_history:
+        latest_training = accepted_history[-1]
+        accuracy = _extract_accuracy_from_history_item(latest_training)
+        top_10_accuracy = _extract_top10_from_history_item(latest_training)
+        logger.info(f"Latest accepted training accuracy from history: {accuracy}")
+
+    if accuracy is None:
+        accuracy = _extract_accuracy_from_history_item({
+            "metrics": incremental_metadata.get("last_accepted_metrics", {})
+        })
+    if top_10_accuracy is None:
+        top_10_accuracy = _extract_top10_from_history_item({
+            "metrics": incremental_metadata.get("last_accepted_metrics", {})
+        })
+    
+    # If still None, try to get from model stats (e.g., if we have evaluation metrics stored there)
+    if accuracy is None:
+        # Try to get from model stats per-model accuracy (this is from weight tracker, not ideal)
+        per_model_acc = model_stats.get("per_model_accuracy", {})
+        accuracies = [v for v in per_model_acc.values() if v is not None]
+        if accuracies:
+            accuracy = max(accuracies)
+            logger.info(f"Accuracy from model stats: {accuracy}")
+    
+    # If still None, use 0.0 (model not trained yet)
+    if accuracy is None:
+        accuracy = 0.0
+        logger.info("Accuracy is None, setting to 0.0")
+    if top_10_accuracy is None:
+        top_10_accuracy = 0.0
+
+    best_accuracy = incremental_metadata.get("best_accuracy")
+    try:
+        best_accuracy = float(best_accuracy) if best_accuracy is not None else float(accuracy)
+    except (TypeError, ValueError):
+        best_accuracy = float(accuracy)
+
+    last_training_attempt = incremental_metadata.get("last_training_attempt", {})
+    last_accepted_training_info = incremental_metadata.get("last_accepted_training_info", {})
+    last_attempt_training_info = last_training_attempt.get("training_info", {}) if last_training_attempt else {}
+    last_attempt_accuracy = _extract_attempt_accuracy(last_training_attempt)
+    last_attempt_top_10_accuracy = _extract_attempt_top10(last_training_attempt)
+    last_attempt_accepted = last_training_attempt.get("accepted")
+    status_detail = "active_model"
+    if last_attempt_accepted is False:
+        status_detail = "active_model_retained_after_rejected_attempt"
+    elif last_attempt_accepted is True:
+        status_detail = "active_model_updated"
+
+    accuracy_confidence = _accuracy_confidence(last_accepted_training_info.get("val_samples"))
+    accuracy_warning = _accuracy_warning(last_accepted_training_info.get("val_samples"))
+
+    # Determine learning status - show Learning if actively training, collecting data, not trained, or ready for training
+    # Show Trained/Mature when model is actually trained and ready
+    is_learning = (
+        status in ["collecting_data", "ready_for_training", "not_trained"] or 
+        trainer_stats.get("is_training", False)
+    )
+
+    # This payload now matches the frontend component's expectations
     return {
-        "status": status,
-        "model_loaded": model_loaded,
-        "last_training": last_training,
-        "sample_count": sample_count,
-        "required_samples": min_samples,
-        "auto_training": bool(trainer_stats.get("auto_training")),
-        "prediction_cache_size": predictor.get_prediction_stats().get("cache_size", 0),
-        "prefetch_queue": queue_stats,
-        "collector_stats": collector_stats,
-        "model_stats": model_stats,
-        "drift_stats": trainer_stats.get("drift_stats", {}),
         "model_name": model_name,
-        "active_version": trainer_stats.get("active_version"),
-        "active_stage": model_summary.get("active_stage"),
-        "artifact_path": artifact_path,
-        "model_source": trainer_stats.get("model_source"),
-        "model_registry": model_summary,
-        "registry": registry.get_registry_stats(),
-        "lifecycle": lifecycle_stats,
+        "model_version": trainer_stats.get("active_version"),
+        "model_stage": model_summary.get("active_stage", "production"),
+        "model_accuracy": float(accuracy),
+        "model_top_10_accuracy": float(top_10_accuracy),
+        "best_accuracy": best_accuracy,
+        "is_learning": is_learning,
+        "model_loaded": model_loaded,
+        "last_trained_at": last_trained_at,
+        "status_code": status,
+        "status_detail": status_detail,
+        "sample_count": sample_count,
+        "accepted_sample_count": last_accepted_training_info.get("sample_count"),
+        "accepted_train_samples": last_accepted_training_info.get("train_samples"),
+        "accepted_validation_samples": last_accepted_training_info.get("val_samples"),
+        "accuracy_confidence": accuracy_confidence,
+        "accuracy_warning": accuracy_warning,
+        "last_training_attempt": last_training_attempt,
+        "last_attempt_accuracy": last_attempt_accuracy,
+        "last_attempt_top_10_accuracy": last_attempt_top_10_accuracy,
+        "last_attempt_accepted": last_attempt_accepted,
+        "last_attempt_sample_count": last_attempt_training_info.get("sample_count"),
+        "last_attempt_train_samples": last_attempt_training_info.get("train_samples"),
+        "last_attempt_validation_samples": last_attempt_training_info.get("val_samples"),
+        "last_attempt_accuracy_confidence": _accuracy_confidence(last_attempt_training_info.get("val_samples")),
     }
 
 
@@ -220,6 +366,14 @@ def get_prediction_payload(service_id: str = "default", n: int = 10) -> Dict[str
     }
 
 
+def get_model_evaluation_payload() -> Dict[str, Any]:
+    trainer = get_model_trainer()
+    evaluation = trainer.evaluate()
+    evaluation["active_version"] = trainer.get_stats().get("active_version")
+    evaluation["artifact_path"] = trainer.get_stats().get("artifact_path")
+    return evaluation
+
+
 def trigger_runtime_retraining(force: bool = True) -> Dict[str, Any]:
     runtime = _bind_runtime_components()
     trainer = runtime["trainer"]
@@ -237,10 +391,15 @@ def trigger_runtime_retraining(force: bool = True) -> Dict[str, Any]:
     success = bool(result.get("success"))
     sample_count = int(result.get("sample_count") or trainer.get_stats().get("collector_stats", {}).get("total_events", 0))
     training_time = result.get("training_time_s")
+    model_accepted = bool(result.get("model_accepted", success))
+    decision_reason = result.get("decision_reason")
 
     if success:
         evaluation = trainer.evaluate()
-        message = "Runtime retraining completed"
+        if model_accepted:
+            message = "Runtime retraining completed and active model updated"
+        else:
+            message = "Runtime retraining completed, but active model version was retained"
     else:
         evaluation = {}
         reason = str(result.get("reason") or "unknown")
@@ -254,6 +413,9 @@ def trigger_runtime_retraining(force: bool = True) -> Dict[str, Any]:
         "last_training": _isoformat_timestamp(float(trainer.get_stats().get("last_train_time") or 0)),
         "active_version": trainer.get_stats().get("active_version"),
         "artifact_path": trainer.get_stats().get("artifact_path"),
+        "model_accepted": model_accepted,
+        "version_bumped": bool(result.get("version_bumped", model_accepted)),
+        "decision_reason": decision_reason,
     }
 
     if evaluation:
@@ -404,9 +566,10 @@ def _build_prefetch_candidates(
     secure_manager: Any,
     service_id: str,
     source_key_id: str,
+    predictor_override: Optional[Any] = None,
 ) -> List[Dict[str, Any]]:
     runtime = _bind_runtime_components()
-    predictor = runtime["predictor"]
+    predictor = predictor_override or runtime["predictor"]
     predictions = predictor.predict(
         service_id=service_id,
         n=max(settings.ml_top_n_predictions, 5),
@@ -437,8 +600,14 @@ def schedule_request_path_prefetch(
     service_id: str,
     source_key_id: str,
     ip_address: str = "",
+    predictor_override: Optional[Any] = None,
 ) -> Dict[str, Any]:
-    candidates = _build_prefetch_candidates(secure_manager, service_id, source_key_id)
+    candidates = _build_prefetch_candidates(
+        secure_manager,
+        service_id,
+        source_key_id,
+        predictor_override=predictor_override,
+    )
 
     if not candidates:
         return {"mode": "noop", "prefetched_count": 0, "predictions_considered": 0}
@@ -467,6 +636,27 @@ def schedule_request_path_prefetch(
         }
 
     import asyncio
+
+    try:
+        running_loop = asyncio.get_running_loop()
+    except RuntimeError:
+        running_loop = None
+
+    if running_loop and running_loop.is_running():
+        running_loop.create_task(
+            run_request_path_prefetch(
+                secure_manager=secure_manager,
+                service_id=service_id,
+                source_key_id=source_key_id,
+                candidates=candidates,
+                ip_address=ip_address,
+            )
+        )
+        return {
+            "mode": "direct_async_task",
+            "prefetched_count": 0,
+            "predictions_considered": len(candidates),
+        }
 
     result = asyncio.run(
         run_request_path_prefetch(
@@ -500,11 +690,11 @@ def get_accuracy_history_payload(limit: int = 12) -> Dict[str, List[Dict[str, An
     data: List[Dict[str, Any]] = []
 
     for index, item in enumerate(history, start=1):
-        accuracy = item.get("val_accuracy")
+        accuracy = _extract_accuracy_from_history_item(item)
         if accuracy is None:
             continue
 
-        completed_at = item.get("completed_at")
+        completed_at = item.get("completed_at") or item.get("timestamp")
         if completed_at:
             try:
                 label = datetime.fromisoformat(completed_at).astimezone(timezone.utc).strftime("%H:%M:%S")
@@ -517,7 +707,200 @@ def get_accuracy_history_payload(limit: int = 12) -> Dict[str, List[Dict[str, An
             {
                 "time": label,
                 "accuracy": round(float(accuracy) * 100, 1),
+                "accepted": bool(item.get("accepted", item.get("model_accepted", True))),
+                "top_10_accuracy": round(float(_extract_top10_from_history_item(item) or 0.0) * 100, 1),
             }
         )
 
     return {"data": data}
+
+
+def generate_training_data(
+    num_events: int = 1000,
+    num_keys: int = 100,
+    num_services: int = 5,
+    scenario: str = "dynamic",
+    traffic_profile: str = "normal",
+    duration_hours: int = 24,
+    include_drift: bool = True,
+) -> Dict[str, Any]:
+    """
+    Generate synthetic training data based on scenario and traffic profile.
+    This simulates organic traffic patterns for ML training.
+    """
+    import random
+    from datetime import datetime, timedelta
+    
+    collector = get_data_collector()
+    
+    # Key patterns based on scenario
+    scenario_patterns = {
+        "siakad": {"services": ["siakad", "akademik", "keuangan"], "keys": ["mahasiswa-", "dosen-", "nilai-"]},
+        "sevima": {"services": ["sevima", "elearning", "conference"], "keys": ["user-", "meeting-", "course-"]},
+        "pddikti": {"services": ["pddikti", "pt", "mahasiswa"], "keys": ["pt-", "mhs-", "prodi-"]},
+        "dynamic": {"services": ["default", "auth-service", "payment-service"], "keys": ["api-key-", "token-", "secret-"]},
+    }
+    
+    config = scenario_patterns.get(scenario, scenario_patterns["dynamic"])
+    services = config["services"]
+    key_patterns = config["keys"]
+    
+    # Traffic profiles determine access patterns
+    traffic_configs = {
+        "normal": {"hot_key_ratio": 0.2, "burst_probability": 0.05, "sequential_probability": 0.3},
+        "heavy": {"hot_key_ratio": 0.3, "burst_probability": 0.15, "sequential_probability": 0.4},
+        "prime_time": {"hot_key_ratio": 0.25, "burst_probability": 0.1, "sequential_probability": 0.35},
+        "overload": {"hot_key_ratio": 0.4, "burst_probability": 0.25, "sequential_probability": 0.5},
+    }
+    
+    traffic_config = traffic_configs.get(traffic_profile, traffic_configs["normal"])
+    
+    # Generate events
+    events = []
+    now = datetime.now(timezone.utc)
+    base_time = now - timedelta(minutes=30)  # Use recent 30 minutes for training data
+    
+    # Create hot keys (frequently accessed)
+    hot_keys = [f"{random.choice(key_patterns)}{random.randint(1, num_keys // 5)}" for _ in range(int(num_keys * traffic_config["hot_key_ratio"]))]
+    
+    # Track sequential access patterns
+    last_key = None
+    
+    for i in range(num_events):
+        # Determine timestamp (spread over the recent window for training)
+        # Use last 30 minutes to ensure events are within training window
+        time_offset = random.uniform(0, 30 * 60)  # 30 minutes in seconds
+        timestamp = (base_time + timedelta(seconds=time_offset)).timestamp()
+        
+        # Determine if this is a sequential access (pattern learning)
+        if last_key and random.random() < traffic_config["sequential_probability"]:
+            # Sequential pattern - access related key
+            key_base = last_key.split("-")[0] if "-" in last_key else last_key
+            key_id = f"{key_base}-{random.randint(1, num_keys)}"
+        elif random.random() < traffic_config["hot_key_ratio"]:
+            # Access hot key
+            key_id = random.choice(hot_keys)
+        else:
+            # Random key access
+            key_id = f"{random.choice(key_patterns)}{random.randint(1, num_keys)}"
+        
+        service_id = random.choice(services)
+        
+        # Determine if cache hit (based on key popularity and recent access)
+        is_hot = key_id in hot_keys
+        cache_hit = is_hot or random.random() < 0.7
+        
+        # Latency varies by cache hit/miss
+        if cache_hit:
+            latency_ms = random.uniform(1, 10)
+        else:
+            latency_ms = random.uniform(50, 200)
+        
+        # Add some burst patterns for drift detection
+        if random.random() < traffic_config["burst_probability"]:
+            # Burst of accesses - simulate traffic spike
+            burst_count = random.randint(3, 10)
+            for _ in range(burst_count):
+                time_offset += random.uniform(0.1, 2)  # Close together
+                events.append({
+                    "key_id": random.choice(hot_keys),
+                    "service_id": service_id,
+                    "timestamp": (base_time + timedelta(seconds=time_offset)).timestamp(),
+                    "latency_ms": random.uniform(1, 10),
+                    "cache_hit": True,
+                })
+        
+        events.append({
+            "key_id": key_id,
+            "service_id": service_id,
+            "timestamp": timestamp,
+            "latency_ms": latency_ms,
+            "cache_hit": cache_hit,
+        })
+        
+        last_key = key_id
+    
+    # Sort by timestamp
+    events.sort(key=lambda x: x["timestamp"])
+    
+    # Import events into collector
+    imported = collector.import_events(events)
+    
+    stats = collector.get_stats()
+    
+    return {
+        "success": True,
+        "scenario": scenario,
+        "traffic_profile": traffic_profile,
+        "events_generated": len(events),
+        "events_imported": imported,
+        "num_keys": num_keys,
+        "num_services": num_services,
+        "duration_hours": duration_hours,
+        "include_drift": include_drift,
+        "collector_stats": stats,
+    }
+
+
+def train_model(
+    force: bool = True,
+    reason: str = "manual",
+) -> Dict[str, Any]:
+    """
+    Train the model using collected data.
+    Returns training results with model version.
+    """
+    trainer = get_model_trainer()
+    predictor = get_key_predictor()
+    
+    # Get current stats before training
+    stats_before = trainer.get_stats()
+    sample_count = stats_before.get("collector_stats", {}).get("total_events", 0)
+    
+    if sample_count < stats_before.get("min_samples", 100):
+        return {
+            "success": False,
+            "reason": "insufficient_samples",
+            "sample_count": sample_count,
+            "required": stats_before.get("min_samples", 100),
+            "message": f"Need at least {stats_before.get('min_samples', 100)} samples to train. Currently have {sample_count}."
+        }
+    
+    # Run training
+    result = trainer.train(force=force, reason=reason)
+    
+    if result.get("success"):
+        # Update predictor with new model
+        predictor.attach_model(
+            trainer.model,
+            source=trainer.get_active_model_metadata().get("source", "runtime"),
+            version=trainer.get_active_model_metadata().get("version"),
+            artifact_path=trainer.get_active_model_metadata().get("artifact_path"),
+        )
+        predictor.clear_cache()
+        
+        # Get updated stats
+        stats_after = trainer.get_stats()
+        model_accepted = bool(result.get("model_accepted", True))
+        
+        return {
+            "success": True,
+            "message": "Training completed successfully" if model_accepted else "Training evaluated successfully, active model version retained",
+            "model_version": result.get("version") or result.get("registry_version"),
+            "sample_count": result.get("sample_count"),
+            "val_accuracy": result.get("val_accuracy"),
+            "val_top_10_accuracy": result.get("val_top_10_accuracy"),
+            "training_time_s": result.get("training_time_s"),
+            "completed_at": result.get("completed_at"),
+            "active_version": stats_after.get("active_version"),
+            "model_source": stats_after.get("model_source"),
+            "model_accepted": model_accepted,
+            "version_bumped": bool(result.get("version_bumped", model_accepted)),
+            "decision_reason": result.get("decision_reason"),
+        }
+    else:
+        return {
+            "success": False,
+            "reason": result.get("reason", "unknown"),
+            "message": f"Training failed: {result.get('reason', 'Unknown error')}",
+        }

@@ -42,17 +42,48 @@ class ModelVersion:
 
 
 class PortableLabelEncoder:
-    """Minimal label-encoder compatible object for safe checkpoint restores."""
+    """
+    Minimal label-encoder compatible object for safe checkpoint restores.
+    
+    Improvements (Issue #20):
+    - Handles unseen labels gracefully with a special OOV (out-of-vocabulary) index
+    - Supports encoding/decoding without crashing on new keys
+    """
 
-    def __init__(self, classes: List[str]):
+    def __init__(self, classes: List[str], oov_index: int = -1):
         self.classes_ = np.array(classes, dtype=object)
         self._index = {label: idx for idx, label in enumerate(classes)}
+        self.oov_index = oov_index  # Out-of-vocabulary index for unseen keys
 
     def transform(self, labels: List[str]) -> np.ndarray:
-        return np.array([self._index[label] for label in labels], dtype=np.int64)
+        """
+        Transform labels to indices, using oov_index for unseen entries.
+        """
+        return np.array(
+            [self._index.get(label, self.oov_index) for label in labels],
+            dtype=np.int64
+        )
 
     def inverse_transform(self, indices: List[int]) -> np.ndarray:
-        return np.array([self.classes_[idx] for idx in indices], dtype=object)
+        """
+        Transform indices back to labels, handling oov_index gracefully.
+        """
+        result = []
+        for idx in indices:
+            if 0 <= idx < len(self.classes_):
+                result.append(self.classes_[idx])
+            else:
+                # Return special marker for OOV
+                result.append("<OOV>")
+        return np.array(result, dtype=object)
+    
+    def get_classes(self) -> np.ndarray:
+        """Return the list of known classes."""
+        return self.classes_.copy()
+    
+    def get_num_classes(self) -> int:
+        """Return the number of known classes."""
+        return len(self.classes_)
 
 
 class PortableRandomForestModel:
@@ -226,8 +257,46 @@ class ModelRegistry:
 
         self._load_checksums()
         self._load_versions()
+        
+        # Clean up any old temp files on startup (Issue #17)
+        self._cleanup_temp_files()
 
         logger.info("ModelRegistry initialized: dir=%s", model_dir)
+
+    @property
+    def model_dir(self) -> str:
+        return self._model_dir
+    
+    def _cleanup_temp_files(self) -> None:
+        """
+        Clean up temporary files older than 1 hour (Issue #17).
+        Called on registry initialization to prevent disk space leaks.
+        """
+        try:
+            import glob
+            now = time.time()
+            max_age_seconds = 3600  # 1 hour
+            
+            # Find all .tmp files
+            tmp_files = glob.glob(os.path.join(self._model_dir, "*.tmp"))
+            removed = 0
+            
+            for tmp_path in tmp_files:
+                try:
+                    # Check file age
+                    file_age = now - os.path.getmtime(tmp_path)
+                    if file_age > max_age_seconds:
+                        os.remove(tmp_path)
+                        removed += 1
+                        logger.debug(f"Removed orphaned temp file: {tmp_path}")
+                except OSError as e:
+                    logger.warning(f"Failed to clean up temp file {tmp_path}: {e}")
+            
+            if removed > 0:
+                logger.info(f"Cleaned up {removed} orphaned temp files from {self._model_dir}")
+        
+        except Exception as e:
+            logger.warning(f"Temp file cleanup failed: {e}")
 
     @property
     def model_dir(self) -> str:
@@ -662,7 +731,7 @@ class ModelRegistry:
             "lifecycle": self.get_lifecycle_stats(model_name=model_name),
         }
 
-    def _serialize_model_checkpoint(self, model: Any) -> Dict[str, Any]:
+    def serialize_model_checkpoint(self, model: Any) -> Dict[str, Any]:
         if isinstance(model, EnsembleModel):
             portable_rf = None
             if getattr(model, "rf", None) is not None and getattr(model.rf, "is_trained", False):
@@ -712,6 +781,14 @@ class ModelRegistry:
             logger.warning("No version available for %s", model_name)
             return None
 
+        # Cross-environment path resolution (Docker absolute path vs Windows local)
+        if not os.path.exists(resolved_version.file_path):
+            basename = os.path.basename(resolved_version.file_path)
+            local_path = os.path.join(self._model_dir, basename)
+            if os.path.exists(local_path):
+                resolved_version.file_path = local_path
+                self._save_registry()
+
         self._ensure_version_security_metadata(model_name, resolved_version)
         self._verify_artifact_integrity(model_name, resolved_version)
 
@@ -738,7 +815,15 @@ class ModelRegistry:
         except SecurityError:
             raise
         except Exception as exc:
-            logger.error("Failed to load model '%s': %s", resolved_version.file_path, exc)
+            logger.error(
+                f"Failed to load model '{model_name}' version '{resolved_version.version}': {exc}",
+                exc_info=True,
+                extra={
+                    "model_file": resolved_version.file_path,
+                    "artifact_type": resolved_version.artifact_type,
+                    "error_type": type(exc).__name__
+                }
+            )
             return None
 
         self._append_lifecycle_event(
@@ -766,7 +851,7 @@ class ModelRegistry:
         try:
             checkpoint_payload: Optional[Dict[str, Any]] = None
             if isinstance(model, EnsembleModel):
-                checkpoint_payload = self._serialize_model_checkpoint(model)
+                checkpoint_payload = self.serialize_model_checkpoint(model)
                 file_path = os.path.join(self._model_dir, f"{model_name}_{version}.pskc.json")
                 with open(file_path, "w", encoding="utf-8") as f:
                     json.dump(checkpoint_payload, f, indent=2, sort_keys=True)

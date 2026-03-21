@@ -43,6 +43,10 @@ function DashboardPage() {
     modelLoaded: false,
     mlSampleCount: 0,
     modelStatus: 'not_trained',
+    modelAccuracy: 0,
+    modelTop10Accuracy: 0,
+    modelVersion: 'N/A',
+    lastTrainingOutcome: 'unknown',
   })
   const [latencyData, setLatencyData] = useState([])
   const [cacheDistribution, setCacheDistribution] = useState([])
@@ -70,9 +74,13 @@ function DashboardPage() {
           keysCached: cacheStats.size || 0,
           cacheHits: metricsData.cache_hits || 0,
           cacheMisses: metricsData.cache_misses || 0,
-          modelLoaded: Boolean(modelStatus.model_loaded),
+          modelLoaded: modelStatus.status_code === 'trained',
           mlSampleCount: modelStatus.sample_count || 0,
-          modelStatus: modelStatus.status || 'unknown',
+          modelStatus: modelStatus.status_code || 'unknown',
+          modelAccuracy: (modelStatus.model_accuracy || 0) * 100,
+          modelTop10Accuracy: (modelStatus.model_top_10_accuracy || 0) * 100,
+          modelVersion: modelStatus.model_version || 'N/A',
+          lastTrainingOutcome: modelStatus?.last_training_attempt?.accepted ? 'accepted' : 'retained',
         })
 
         setLatencyData(Array.isArray(latency.data) ? latency.data : [])
@@ -93,6 +101,10 @@ function DashboardPage() {
           modelLoaded: false,
           mlSampleCount: 0,
           modelStatus: 'unavailable',
+          modelAccuracy: 0,
+          modelTop10Accuracy: 0,
+          modelVersion: 'N/A',
+          lastTrainingOutcome: 'unknown',
         })
         setLatencyData([])
         setCacheDistribution([])
@@ -152,6 +164,11 @@ function DashboardPage() {
 
   const connectionLabel = error ? 'Backend unavailable' : loading ? 'Loading' : 'Connected'
   const connectionDotClass = error ? 'bg-danger-red' : 'bg-accent-green animate-pulse'
+  const accuracyValues = accuracyData.flatMap((item) => [item.accuracy, item.top_10_accuracy]).filter((value) => typeof value === 'number')
+  const accuracyDomain = accuracyValues.length > 0
+    ? [Math.max(0, Math.floor(Math.min(...accuracyValues) - 5)), Math.min(100, Math.ceil(Math.max(...accuracyValues) + 5))]
+    : [0, 100]
+  const modelVersionLabel = metrics.modelVersion && metrics.modelVersion !== 'N/A' ? metrics.modelVersion : 'N/A'
 
   return (
     <div className="min-h-screen py-8">
@@ -244,7 +261,9 @@ function DashboardPage() {
           <div className="gradient-card rounded-lg p-4 border border-dark-border">
             <div className="text-slate-400 text-sm mb-1">Model Status</div>
             <div className="text-xl font-bold text-white font-mono">{modelStatusLabel}</div>
-            <div className="text-xs text-slate-500 mt-1">Samples: {metrics.mlSampleCount}</div>
+            <div className="text-xs text-slate-500 mt-1">
+              {modelVersionLabel} · Top-1 {metrics.modelAccuracy.toFixed(1)}% · Top-10 {metrics.modelTop10Accuracy.toFixed(1)}%
+            </div>
           </div>
         </motion.div>
 
@@ -336,7 +355,7 @@ function DashboardPage() {
         >
           <div className="flex items-center justify-between mb-4">
             <h3 className="text-lg font-semibold text-white">ML Accuracy Over Time</h3>
-            <span className="text-sm text-slate-400">Last 24 hours</span>
+            <span className="text-sm text-slate-400">Persisted training history</span>
           </div>
           {accuracyData.length > 0 ? (
             <div className="h-64">
@@ -344,14 +363,14 @@ function DashboardPage() {
                 <LineChart data={accuracyData}>
                   <CartesianGrid strokeDasharray="3 3" stroke="#334155" />
                   <XAxis dataKey="time" stroke="#94a3b8" fontSize={12} />
-                  <YAxis domain={[85, 95]} stroke="#94a3b8" fontSize={12} />
+                  <YAxis domain={accuracyDomain} stroke="#94a3b8" fontSize={12} />
                   <Tooltip
                     contentStyle={{
                       backgroundColor: '#1e293b',
                       border: '1px solid #334155',
                       borderRadius: '8px',
                     }}
-                    formatter={(value) => [`${value.toFixed(1)}%`, 'Accuracy']}
+                    formatter={(value, name) => [`${Number(value).toFixed(1)}%`, name === 'accuracy' ? 'Top-1 Accuracy' : 'Top-10 Accuracy']}
                   />
                   <Line
                     type="monotone"
@@ -360,6 +379,16 @@ function DashboardPage() {
                     strokeWidth={3}
                     dot={{ fill: '#2563eb', strokeWidth: 2, r: 4 }}
                     activeDot={{ r: 6, fill: '#2563eb' }}
+                    name="Top-1 Accuracy"
+                  />
+                  <Line
+                    type="monotone"
+                    dataKey="top_10_accuracy"
+                    stroke="#22c55e"
+                    strokeWidth={2}
+                    dot={{ fill: '#22c55e', strokeWidth: 2, r: 3 }}
+                    activeDot={{ r: 5, fill: '#22c55e' }}
+                    name="Top-10 Accuracy"
                   />
                 </LineChart>
               </ResponsiveContainer>

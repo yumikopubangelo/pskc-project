@@ -31,6 +31,7 @@ Dokumentasi di repository ini sekarang mengikuti implementasi yang benar-benar a
 - [docs/api_reference.md](docs/api_reference.md) - referensi endpoint FastAPI yang tersedia saat ini
 - [docs/security_model.md](docs/security_model.md) - model keamanan, kontrol aktif, dan gap yang masih ada
 - [docs/simulation_and_ml.md](docs/simulation_and_ml.md) - engine simulasi, training data, dan pipeline ML
+- [docs/realtime_simulation.md](docs/realtime_simulation.md) - cara membaca realtime simulation, cache origin, verified prefetch, dan baseline KMS
 - [docs/development.md](docs/development.md) - panduan contributor, struktur kode, dan status test suite
 - [docs/operations.md](docs/operations.md) - konfigurasi, Docker, observability, dan catatan deployment
 - [docs/security_analysis_report.md](docs/security_analysis_report.md) - status terkini dari temuan keamanan historis

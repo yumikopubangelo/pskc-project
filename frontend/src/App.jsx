@@ -5,6 +5,7 @@ import DashboardPage from './pages/DashboardPage'
 import Simulation from './pages/Simulation'
 import MLPipeline from './pages/MLPipeline'
 import MLEvaluation from './pages/MLEvaluation'
+import MLTraining from './pages/MLTraining'
 import SecurityTesting from './pages/SecurityTesting'
 import MLPipelineBuilder from './pages/MLPipelineBuilder'
 import Icon from './components/Icon'
@@ -17,7 +18,8 @@ function App() {
     { path: '/node-graph', label: 'Pipeline', icon: 'layers' },
     { path: '/dashboard', label: 'Dashboard', icon: 'trend' },
     { path: '/simulation', label: 'Simulation', icon: 'play' },
-    { path: '/ml-evaluation', label: 'ML Eval', icon: 'cpu' },
+    { path: '/ml-training', label: 'ML Training', icon: 'cpu' },
+    { path: '/ml-evaluation', label: 'ML Eval', icon: 'chart' },
     { path: '/security-testing', label: 'Security', icon: 'shield' },
   ]
 
@@ -96,6 +98,7 @@ function App() {
           <Route path="/simulation" element={<Simulation />} />
           <Route path="/dashboard" element={<DashboardPage />} />
           <Route path="/ml-pipeline" element={<MLPipeline />} />
+          <Route path="/ml-training" element={<MLTraining />} />
           <Route path="/ml-evaluation" element={<MLEvaluation />} />
           <Route path="/security-testing" element={<SecurityTesting />} />
         </Routes>

@@ -5,7 +5,6 @@
 # ============================================================
 import json
 import os
-import time
 import logging
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
@@ -79,6 +78,7 @@ class IncrementalModelPersistence:
         try:
             with open(self._file_path, 'r', encoding='utf-8') as f:
                 self._cache = json.load(f)
+            self._ensure_cache_defaults()
             logger.info(
                 f"Loaded incremental model: update_count={self._cache.get('update_count', 0)}, "
                 f"current_version={self._cache.get('current_version', 'N/A')}"
@@ -97,23 +97,237 @@ class IncrementalModelPersistence:
             os.makedirs(os.path.dirname(self._file_path), exist_ok=True)
             
             # Write to temp file first, then rename (atomic operation)
-            temp_path = self._file_path + ".tmp"
-            with open(temp_path, 'w', encoding='utf-8') as f:
-                json.dump(self._cache, f, indent=2, sort_keys=True)
-            
-            # Atomic rename
-            os.replace(temp_path, self._file_path)
-            
-            self._dirty = False
-            logger.debug(f"Saved incremental model to {self._file_path}")
-            return True
+            # Use process ID and timestamp to make temp file name unique
+            import tempfile
+            import uuid
+            temp_fd, temp_path = tempfile.mkstemp(
+                suffix=".tmp", 
+                prefix=f"{os.path.basename(self._file_path)}.",
+                dir=os.path.dirname(self._file_path)
+            )
+            try:
+                with os.fdopen(temp_fd, 'w', encoding='utf-8') as f:
+                    json.dump(self._cache, f, indent=2, sort_keys=True)
+                
+                # Atomic rename
+                os.replace(temp_path, self._file_path)
+                
+                self._dirty = False
+                logger.debug(f"Saved incremental model to {self._file_path}")
+                return True
+            except Exception:
+                # Clean up temp file on error
+                try:
+                    os.unlink(temp_path)
+                except OSError:
+                    pass
+                raise
         except Exception as e:
             logger.error(f"Failed to persist incremental model: {e}")
             return False
 
     def exists(self) -> bool:
         """Check if incremental model exists"""
-        return self._cache is not None
+        return self._cache is not None and self._cache.get("model_data") is not None
+
+    def _ensure_cache_defaults(self) -> None:
+        """Backfill defaults for legacy incremental artifacts."""
+        if self._cache is None:
+            return
+
+        history = self._cache.setdefault("history", [])
+        update_count = int(self._cache.get("update_count", 0) or 0)
+        self._cache.setdefault("attempt_count", update_count)
+        self._cache.setdefault("current_version", f"v{update_count}")
+        self._cache.setdefault("model_name", self._model_name)
+        self._cache.setdefault("created_at", datetime.now(timezone.utc).isoformat())
+        self._cache.setdefault("updated_at", self._cache.get("created_at"))
+
+        metadata = self._cache.setdefault("metadata", {})
+        metadata.setdefault("total_training_samples", 0)
+        metadata.setdefault("total_retrains", update_count)
+        metadata.setdefault("last_retrain_reason", None)
+        metadata.setdefault("last_training_attempt", {})
+
+        last_accepted = None
+        for entry in reversed(history):
+            if entry.get("accepted", True):
+                last_accepted = entry
+                break
+
+        if last_accepted is not None:
+            metadata.setdefault("last_accepted_metrics", last_accepted.get("metrics", {}))
+            metadata.setdefault("last_accepted_training_info", last_accepted.get("training_info", {}))
+            metadata.setdefault("last_accepted_reason", last_accepted.get("reason"))
+            metadata.setdefault("last_accepted_at", last_accepted.get("completed_at") or last_accepted.get("timestamp"))
+            last_accuracy = self._extract_accuracy(last_accepted.get("metrics"))
+            if last_accuracy is not None:
+                metadata.setdefault("best_accuracy", last_accuracy)
+        else:
+            metadata.setdefault("last_accepted_metrics", {})
+            metadata.setdefault("last_accepted_training_info", {})
+            metadata.setdefault("last_accepted_reason", None)
+            metadata.setdefault("last_accepted_at", None)
+            metadata.setdefault("best_accuracy", None)
+
+    def _extract_accuracy(self, metrics: Optional[Dict[str, Any]]) -> Optional[float]:
+        if not metrics:
+            return None
+
+        for key in ("accuracy", "top_1_accuracy", "val_accuracy"):
+            value = metrics.get(key)
+            if value is None:
+                continue
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                return None
+        return None
+
+    def _build_empty_cache(self) -> Dict[str, Any]:
+        return {
+            "model_name": self._model_name,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+            "attempt_count": 0,
+            "update_count": 0,
+            "current_version": "v0",
+            "metadata": {
+                "total_training_samples": 0,
+                "total_retrains": 0,
+                "last_retrain_reason": None,
+                "last_training_attempt": {},
+                "last_accepted_metrics": {},
+                "last_accepted_training_info": {},
+                "last_accepted_reason": None,
+                "last_accepted_at": None,
+                "best_accuracy": None,
+            },
+            "model_data": None,
+            "history": [],
+        }
+
+    def _evaluate_acceptance(
+        self,
+        metrics: Optional[Dict[str, Any]],
+        training_info: Optional[Dict[str, Any]],
+        reason: str,
+    ) -> Dict[str, Any]:
+        if self._cache is None or self._cache.get("model_data") is None:
+            return {"accepted": True, "reason": "initial_model"}
+
+        metadata = self._cache.get("metadata", {})
+        current_accuracy = self._extract_accuracy(metrics)
+        previous_accuracy = self._extract_accuracy(metadata.get("last_accepted_metrics"))
+        if current_accuracy is None:
+            return {"accepted": False, "reason": "missing_accuracy"}
+        if previous_accuracy is None:
+            return {"accepted": True, "reason": "no_previous_accuracy"}
+
+        sample_count = int((training_info or {}).get("sample_count", 0) or 0)
+        previous_sample_count = int((metadata.get("last_accepted_training_info") or {}).get("sample_count", 0) or 0)
+        sample_delta = max(0, sample_count - previous_sample_count)
+
+        min_improvement = float(getattr(settings, "ml_min_accuracy_for_version_bump", 0.01) or 0.01)
+        min_sample_delta = int(getattr(settings, "ml_min_sample_delta_for_version_bump", 250) or 250)
+
+        if current_accuracy >= previous_accuracy + min_improvement:
+            return {
+                "accepted": True,
+                "reason": "meaningful_accuracy_improvement",
+                "previous_accuracy": previous_accuracy,
+                "current_accuracy": current_accuracy,
+                "sample_delta": sample_delta,
+            }
+
+        if (
+            reason in {"manual", "drift", "incremental"}
+            and sample_delta >= min_sample_delta
+            and current_accuracy > previous_accuracy
+        ):
+            return {
+                "accepted": True,
+                "reason": "manual_improvement_with_new_data",
+                "previous_accuracy": previous_accuracy,
+                "current_accuracy": current_accuracy,
+                "sample_delta": sample_delta,
+            }
+
+        return {
+            "accepted": False,
+            "reason": "no_meaningful_improvement",
+            "previous_accuracy": previous_accuracy,
+            "current_accuracy": current_accuracy,
+            "sample_delta": sample_delta,
+            "required_improvement": min_improvement,
+            "required_sample_delta": min_sample_delta,
+        }
+
+    def record_training_attempt(
+        self,
+        reason: str = "manual",
+        metrics: Optional[Dict[str, float]] = None,
+        training_info: Optional[Dict[str, Any]] = None,
+        status: str = "rejected",
+        detail: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Persist a training attempt without replacing the active model."""
+        if self._cache is None:
+            self._cache = self._build_empty_cache()
+        else:
+            self._ensure_cache_defaults()
+
+        metadata = self._cache["metadata"]
+        attempt_count = int(self._cache.get("attempt_count", 0) or 0) + 1
+        self._cache["attempt_count"] = attempt_count
+        now_iso = datetime.now(timezone.utc).isoformat()
+        self._cache["updated_at"] = now_iso
+
+        attempt_entry = {
+            "attempt": attempt_count,
+            "timestamp": now_iso,
+            "completed_at": now_iso,
+            "version": self._cache.get("current_version", "v0"),
+            "resulting_version": self._cache.get("current_version", "v0"),
+            "accepted": False,
+            "status": status,
+            "decision_reason": detail or status,
+            "reason": reason,
+            "metrics": metrics or {},
+            "training_info": training_info or {},
+        }
+
+        metadata["last_training_attempt"] = {
+            "attempt": attempt_count,
+            "accepted": False,
+            "status": status,
+            "reason": reason,
+            "detail": detail,
+            "metrics": metrics or {},
+            "training_info": training_info or {},
+            "timestamp": now_iso,
+            "resulting_version": self._cache.get("current_version", "v0"),
+        }
+        metadata["last_rejected_reason"] = detail or status
+        metadata["last_rejected_at"] = now_iso
+
+        history = self._cache.get("history", [])
+        history.append(attempt_entry)
+        if len(history) > 100:
+            history = history[-100:]
+        self._cache["history"] = history
+
+        if not self._persist():
+            return {"success": False, "reason": "persist_failed"}
+
+        return {
+            "success": True,
+            "accepted": False,
+            "version": self._cache.get("current_version", "v0"),
+            "attempt_count": attempt_count,
+            "decision_reason": detail or status,
+            "status": status,
+        }
 
     def get_model_data(self) -> Optional[Dict[str, Any]]:
         """Get the actual model data"""
@@ -124,21 +338,9 @@ class IncrementalModelPersistence:
     def set_model_data(self, model_data: Dict[str, Any]) -> bool:
         """Set/update the model data"""
         if self._cache is None:
-            # Create new model structure
-            self._cache = {
-                "model_name": self._model_name,
-                "created_at": datetime.now(timezone.utc).isoformat(),
-                "updated_at": datetime.now(timezone.utc).isoformat(),
-                "update_count": 0,
-                "current_version": "v0",
-                "metadata": {
-                    "total_training_samples": 0,
-                    "total_retrains": 0,
-                },
-                "model_data": model_data,
-                "history": []
-            }
+            self._cache = self._build_empty_cache()
         else:
+            self._ensure_cache_defaults()
             self._cache["model_data"] = model_data
             
         self._dirty = True
@@ -163,72 +365,103 @@ class IncrementalModelPersistence:
         Returns:
             Update result dict
         """
-        current_count = self._cache.get("update_count", 0) if self._cache else 0
-        new_count = current_count + 1
-        
-        # Create history entry
+        if self._cache is None:
+            self._cache = self._build_empty_cache()
+        else:
+            self._ensure_cache_defaults()
+
+        metadata = self._cache["metadata"]
+        current_count = int(self._cache.get("update_count", 0) or 0)
+        attempt_count = int(self._cache.get("attempt_count", current_count) or current_count) + 1
+        decision = self._evaluate_acceptance(metrics=metrics, training_info=training_info, reason=reason)
+        accepted = bool(decision.get("accepted"))
+        new_count = current_count + 1 if accepted else current_count
+        new_version = f"v{new_count}"
+        now_iso = datetime.now(timezone.utc).isoformat()
+
         history_entry = {
-            "version": f"v{new_count}",
-            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "attempt": attempt_count,
+            "version": new_version if accepted else self._cache.get("current_version", "v0"),
+            "resulting_version": new_version if accepted else self._cache.get("current_version", "v0"),
+            "timestamp": now_iso,
+            "completed_at": now_iso,
+            "accepted": accepted,
+            "status": "accepted" if accepted else "rejected",
+            "decision_reason": decision.get("reason"),
             "reason": reason,
             "metrics": metrics or {},
             "training_info": training_info or {},
         }
-        
-        if self._cache is None:
-            # First time - create new model
-            self._cache = {
-                "model_name": self._model_name,
-                "created_at": datetime.now(timezone.utc).isoformat(),
-                "updated_at": datetime.now(timezone.utc).isoformat(),
-                "update_count": new_count,
-                "current_version": f"v{new_count}",
-                "metadata": {
-                    "total_training_samples": training_info.get("sample_count", 0) if training_info else 0,
-                    "total_retrains": 1,
-                    "last_retrain_reason": reason,
-                },
-                "model_data": model_data,
-                "history": [history_entry]
-            }
-        else:
-            # Update existing
-            self._cache["updated_at"] = datetime.now(timezone.utc).isoformat()
+
+        self._cache["updated_at"] = now_iso
+        self._cache["attempt_count"] = attempt_count
+        metadata["last_training_attempt"] = {
+            "attempt": attempt_count,
+            "accepted": accepted,
+            "status": history_entry["status"],
+            "reason": reason,
+            "detail": decision.get("reason"),
+            "metrics": metrics or {},
+            "training_info": training_info or {},
+            "timestamp": now_iso,
+            "resulting_version": history_entry["resulting_version"],
+        }
+
+        if accepted:
             self._cache["update_count"] = new_count
-            self._cache["current_version"] = f"v{new_count}"
+            self._cache["current_version"] = new_version
             self._cache["model_data"] = model_data
-            
-            # Update metadata
-            self._cache["metadata"]["total_training_samples"] = (
-                self._cache["metadata"].get("total_training_samples", 0) + 
-                (training_info.get("sample_count", 0) if training_info else 0)
+            metadata["total_training_samples"] = (
+                int(metadata.get("total_training_samples", 0) or 0) +
+                int((training_info or {}).get("sample_count", 0) or 0)
             )
-            self._cache["metadata"]["total_retrains"] = (
-                self._cache["metadata"].get("total_retrains", 0) + 1
-            )
-            self._cache["metadata"]["last_retrain_reason"] = reason
-            
-            # Add to history (keep last 100 entries to prevent file bloat)
-            history = self._cache.get("history", [])
-            history.append(history_entry)
-            if len(history) > 100:
-                history = history[-100:]
-            self._cache["history"] = history
+            metadata["total_retrains"] = int(metadata.get("total_retrains", 0) or 0) + 1
+            metadata["last_retrain_reason"] = reason
+            metadata["last_accepted_metrics"] = metrics or {}
+            metadata["last_accepted_training_info"] = training_info or {}
+            metadata["last_accepted_reason"] = reason
+            metadata["last_accepted_at"] = now_iso
+            current_accuracy = self._extract_accuracy(metrics)
+            best_accuracy = metadata.get("best_accuracy")
+            if current_accuracy is not None and (best_accuracy is None or current_accuracy > float(best_accuracy)):
+                metadata["best_accuracy"] = current_accuracy
+        else:
+            metadata["last_rejected_reason"] = decision.get("reason")
+            metadata["last_rejected_at"] = now_iso
+
+        history = self._cache.get("history", [])
+        history.append(history_entry)
+        if len(history) > 100:
+            history = history[-100:]
+        self._cache["history"] = history
         
         # Persist to file
         if not self._persist():
             return {"success": False, "reason": "persist_failed"}
         
-        logger.info(
-            f"Incremental model updated: version={self._cache['current_version']}, "
-            f"reason={reason}, total_updates={new_count}"
-        )
+        if accepted:
+            logger.info(
+                "Incremental model updated: version=%s reason=%s total_updates=%s",
+                self._cache["current_version"],
+                reason,
+                new_count,
+            )
+        else:
+            logger.info(
+                "Incremental model kept current version=%s after %s attempt (%s)",
+                self._cache.get("current_version", "v0"),
+                reason,
+                decision.get("reason"),
+            )
         
         return {
             "success": True,
+            "accepted": accepted,
             "version": self._cache["current_version"],
-            "update_count": new_count,
+            "update_count": self._cache["update_count"],
+            "attempt_count": attempt_count,
             "total_retrains": self._cache["metadata"]["total_retrains"],
+            "decision_reason": decision.get("reason"),
         }
 
     def get_info(self) -> Dict[str, Any]:
@@ -241,11 +474,13 @@ class IncrementalModelPersistence:
             }
         
         return {
-            "exists": True,
+            "exists": self.exists(),
+            "has_model_data": self._cache.get("model_data") is not None,
             "model_name": self._cache.get("model_name"),
             "file_path": self._file_path,
             "current_version": self._cache.get("current_version"),
             "update_count": self._cache.get("update_count", 0),
+            "attempt_count": self._cache.get("attempt_count", self._cache.get("update_count", 0)),
             "created_at": self._cache.get("created_at"),
             "updated_at": self._cache.get("updated_at"),
             "metadata": self._cache.get("metadata", {}),

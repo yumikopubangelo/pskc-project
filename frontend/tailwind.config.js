@@ -9,6 +9,7 @@ export default {
       colors: {
         'accent-blue': '#2563eb',
         'accent-green': '#059669',
+        'accent-purple': '#7c3aed',
         'danger-red': '#dc2626',
         'warning-orange': '#d97706',
         'dark-bg': '#0f172a',

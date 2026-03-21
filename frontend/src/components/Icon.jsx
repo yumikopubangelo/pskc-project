@@ -15,6 +15,13 @@ function Icon({ name, className = 'w-5 h-5', strokeWidth = 1.8, ...restProps }) 
         <path d="M3 12h4l2-5 4 10 2-5h6" />
       </>
     ),
+    alert: (
+      <>
+        <path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z" />
+        <path d="M12 9v4" />
+        <path d="M12 17h.01" />
+      </>
+    ),
     brain: (
       <>
         <path d="M8.5 8.5a2.5 2.5 0 0 1 4.3-1.7A2.5 2.5 0 0 1 16.5 9a2.5 2.5 0 0 1-1.2 4.7A2.5 2.5 0 0 1 13 17h-2a2.5 2.5 0 0 1-2.4-1.8A2.5 2.5 0 0 1 6.5 13a2.5 2.5 0 0 1 2-4.5Z" />
@@ -42,6 +49,13 @@ function Icon({ name, className = 'w-5 h-5', strokeWidth = 1.8, ...restProps }) 
       <>
         <circle cx="12" cy="12" r="9" />
         <path d="M12 7v6l4 2" />
+      </>
+    ),
+    cpu: (
+      <>
+        <rect x="4" y="4" width="16" height="16" rx="2" ry="2" />
+        <rect x="9" y="9" width="6" height="6" />
+        <path d="M9 1v3M15 1v3M9 20v3M15 20v3M20 9h3M20 14h3M1 9h3M1 14h3" />
       </>
     ),
     cube: (
@@ -88,6 +102,18 @@ function Icon({ name, className = 'w-5 h-5', strokeWidth = 1.8, ...restProps }) 
         <path d="m4 16 8 4 8-4" />
       </>
     ),
+    loader: (
+      <>
+        <path d="M12 2v4" />
+        <path d="m16.2 7.8 2.9-2.9" />
+        <path d="M18 12h4" />
+        <path d="m16.2 16.2 2.9 2.9" />
+        <path d="M12 18v4" />
+        <path d="m4.9 19.1 2.9-2.9" />
+        <path d="M2 12h4" />
+        <path d="m4.9 4.9 2.9 2.9" />
+      </>
+    ),
     lightning: (
       <>
         <path d="M13 2 5 13h5l-1 9 8-11h-5l1-9Z" />
@@ -106,6 +132,13 @@ function Icon({ name, className = 'w-5 h-5', strokeWidth = 1.8, ...restProps }) 
         <circle cx="12" cy="20.5" r="1.5" />
         <circle cx="4.5" cy="12" r="1.5" />
         <circle cx="19.5" cy="12" r="1.5" />
+      </>
+    ),
+    info: (
+      <>
+        <circle cx="12" cy="12" r="10" />
+        <path d="M12 16v-4" />
+        <path d="M12 8h.01" />
       </>
     ),
     pause: (

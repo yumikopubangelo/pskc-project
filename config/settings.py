@@ -85,6 +85,76 @@ class AppSettings(BaseSettings):
     ml_prediction_threshold: float = Field(default=0.75, alias="ML_PREDICTION_THRESHOLD")
     ml_update_interval_seconds: int = Field(default=30, alias="ML_UPDATE_INTERVAL_SECONDS")
     ml_top_n_predictions: int = Field(default=10, alias="ML_TOP_N_PREDICTIONS")
+    ml_min_accuracy_for_version_bump: float = Field(
+        default=0.01,
+        alias="ML_MIN_ACCURACY_FOR_VERSION_BUMP",
+    )
+    ml_min_sample_delta_for_version_bump: int = Field(
+        default=250,
+        alias="ML_MIN_SAMPLE_DELTA_FOR_VERSION_BUMP",
+    )
+    
+    # ============================================================
+    # ML Hyperparameter Configuration (LSTM, RF, Markov, Ensemble)
+    # ============================================================
+    
+    # LSTM Settings
+    ml_lstm_input_size: int = Field(default=30, alias="ML_LSTM_INPUT_SIZE")
+    ml_lstm_hidden_size: int = Field(default=64, alias="ML_LSTM_HIDDEN_SIZE")
+    ml_lstm_num_layers: int = Field(default=2, alias="ML_LSTM_NUM_LAYERS")
+    ml_lstm_dropout: float = Field(default=0.2, alias="ML_LSTM_DROPOUT")
+    ml_lstm_learning_rate: float = Field(default=0.001, alias="ML_LSTM_LEARNING_RATE")
+    ml_lstm_batch_size: int = Field(default=32, alias="ML_LSTM_BATCH_SIZE")
+    ml_lstm_max_epochs: int = Field(default=50, alias="ML_LSTM_MAX_EPOCHS")
+    ml_lstm_early_stopping_patience: int = Field(default=5, alias="ML_LSTM_EARLY_STOPPING_PATIENCE")
+    ml_lstm_early_stopping_min_delta: float = Field(default=0.001, alias="ML_LSTM_EARLY_STOPPING_MIN_DELTA")
+    ml_lstm_use_lr_scheduler: bool = Field(default=True, alias="ML_LSTM_USE_LR_SCHEDULER")
+    ml_lstm_lr_scheduler_factor: float = Field(default=0.5, alias="ML_LSTM_LR_SCHEDULER_FACTOR")
+    ml_lstm_lr_scheduler_patience: int = Field(default=3, alias="ML_LSTM_LR_SCHEDULER_PATIENCE")
+    
+    # Random Forest Settings
+    ml_rf_n_estimators: int = Field(default=100, alias="ML_RF_N_ESTIMATORS")
+    ml_rf_max_depth: int = Field(default=10, alias="ML_RF_MAX_DEPTH")
+    ml_rf_min_samples_split: int = Field(default=2, alias="ML_RF_MIN_SAMPLES_SPLIT")
+    ml_rf_min_samples_leaf: int = Field(default=1, alias="ML_RF_MIN_SAMPLES_LEAF")
+    ml_rf_use_class_weight: bool = Field(default=True, alias="ML_RF_USE_CLASS_WEIGHT")
+    ml_rf_random_state: int = Field(default=42, alias="ML_RF_RANDOM_STATE")
+    ml_rf_n_jobs: int = Field(default=-1, alias="ML_RF_N_JOBS")
+    
+    # Markov Chain Settings
+    ml_markov_max_history: int = Field(default=10000, alias="ML_MARKOV_MAX_HISTORY")
+    ml_markov_smoothing: float = Field(default=0.1, alias="ML_MARKOV_SMOOTHING")
+    ml_markov_max_transitions: int = Field(default=100000, alias="ML_MARKOV_MAX_TRANSITIONS")
+    
+    # Ensemble Settings
+    ml_ensemble_lstm_weight: float = Field(default=0.5, alias="ML_ENSEMBLE_LSTM_WEIGHT")
+    ml_ensemble_rf_weight: float = Field(default=0.35, alias="ML_ENSEMBLE_RF_WEIGHT")
+    ml_ensemble_markov_weight: float = Field(default=0.15, alias="ML_ENSEMBLE_MARKOV_WEIGHT")
+    ml_ensemble_dynamic_weights: bool = Field(default=True, alias="ML_ENSEMBLE_DYNAMIC_WEIGHTS")
+    ml_ensemble_window_size: int = Field(default=200, alias="ML_ENSEMBLE_WINDOW_SIZE")
+    ml_ensemble_update_every: int = Field(default=50, alias="ML_ENSEMBLE_UPDATE_EVERY")
+    ml_ensemble_temperature: float = Field(default=3.0, alias="ML_ENSEMBLE_TEMPERATURE")
+    ml_ensemble_min_weight: float = Field(default=0.05, alias="ML_ENSEMBLE_MIN_WEIGHT")
+    
+    # Data Collector Settings
+    ml_collector_max_events: int = Field(default=100000, alias="ML_COLLECTOR_MAX_EVENTS")
+    ml_collector_window_seconds: int = Field(default=3600, alias="ML_COLLECTOR_WINDOW_SECONDS")
+    ml_collector_historical_stats_ttl_hours: int = Field(default=168, alias="ML_COLLECTOR_HISTORICAL_STATS_TTL_HOURS")
+    ml_collector_historical_stats_max_entries: int = Field(default=100000, alias="ML_COLLECTOR_HISTORICAL_STATS_MAX_ENTRIES")
+    
+    # Feature Engineering Settings
+    ml_feature_context_window: int = Field(default=10, alias="ML_FEATURE_CONTEXT_WINDOW")
+    ml_feature_burst_threshold_seconds: float = Field(default=1.0, alias="ML_FEATURE_BURST_THRESHOLD_SECONDS")
+    ml_feature_regular_min_seconds: float = Field(default=10.0, alias="ML_FEATURE_REGULAR_MIN_SECONDS")
+    ml_feature_regular_max_seconds: float = Field(default=60.0, alias="ML_FEATURE_REGULAR_MAX_SECONDS")
+    ml_feature_recent_window_seconds: int = Field(default=3600, alias="ML_FEATURE_RECENT_WINDOW_SECONDS")
+    ml_feature_expected_size: int = Field(default=30, alias="ML_FEATURE_EXPECTED_SIZE")
+    
+    # Predictor Settings
+    ml_predictor_cache_ttl_seconds: int = Field(default=10, alias="ML_PREDICTOR_CACHE_TTL_SECONDS")
+    ml_predictor_cache_max_size: int = Field(default=10000, alias="ML_PREDICTOR_CACHE_MAX_SIZE")
+    ml_predictor_top_n: int = Field(default=10, alias="ML_PREDICTOR_TOP_N")
+    ml_predictor_confidence_threshold: float = Field(default=0.75, alias="ML_PREDICTOR_CONFIDENCE_THRESHOLD")
     
     # Simulation Mode
     simulation_mode: bool = Field(default=False, alias="SIMULATION_MODE")

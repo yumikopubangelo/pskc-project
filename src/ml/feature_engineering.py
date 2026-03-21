@@ -34,29 +34,41 @@ class FeatureEngineer:
             key_id: Optional key ID for specific feature extraction
             
         Returns:
-            Feature vector as numpy array
+            Feature vector as numpy array of shape (feature_expected_size,)
+            
+        Raises:
+            AssertionError: If feature vector shape is inconsistent
         """
         if not access_data:
             return self._get_default_features()
         
         features = []
         
-        # 1. Temporal features
+        # 1. Temporal features (8 features)
         features.extend(self._extract_temporal_features(access_data))
         
-        # 2. Access pattern features
+        # 2. Access pattern features (6 features)
         features.extend(self._extract_pattern_features(access_data))
         
-        # 3. Service-related features
+        # 3. Service-related features (4 features)
         features.extend(self._extract_service_features(access_data))
         
-        # 4. Latency features
+        # 4. Latency features (6 features)
         features.extend(self._extract_latency_features(access_data))
         
-        # 5. Frequency features
+        # 5. Frequency features (6 features)
         features.extend(self._extract_frequency_features(access_data))
         
-        return np.array(features, dtype=np.float32)
+        result = np.array(features, dtype=np.float32)
+        
+        # Validate feature shape consistency (Issue #13)
+        expected_size = 30  # 8+6+4+6+6 = 30
+        assert result.shape[0] == expected_size, (
+            f"Feature vector shape mismatch: expected {expected_size}, "
+            f"got {result.shape[0]}"
+        )
+        
+        return result
     
     def _get_default_features(self) -> np.ndarray:
         """Return default features when no data available"""

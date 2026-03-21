@@ -39,9 +39,9 @@ function MLPipeline() {
       ])
 
       setMlStatus({
-        status: statusData.status || 'unknown',
+        status: statusData.status_code || 'unknown',
         model_loaded: statusData.model_loaded || false,
-        last_training: statusData.last_training,
+        last_training: statusData.last_trained_at,
         sample_count: statusData.sample_count || 0,
       })
       setPredictions(Array.isArray(predictionData.predictions) ? predictionData.predictions : [])

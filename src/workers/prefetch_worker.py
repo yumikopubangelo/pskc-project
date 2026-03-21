@@ -1,5 +1,7 @@
 import asyncio
 import logging
+import os
+import socket
 import time
 from typing import Any, Dict, List
 
@@ -11,6 +13,9 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name
 logger = logging.getLogger(__name__)
 
 
+WORKER_ID = f"{socket.gethostname()}-{os.getpid()}"
+
+
 def _filter_candidates(candidates: List[Dict[str, Any]], key_ids: List[str]) -> List[Dict[str, Any]]:
     target_keys = set(key_ids)
     return [candidate for candidate in candidates if candidate.get("key_id") in target_keys]
@@ -20,7 +25,9 @@ def process_prefetch_job(queue, secure_manager, job: Dict[str, Any]) -> Dict[str
     candidates = job.get("candidates") or []
     if not candidates:
         queue.mark_completed(job)
-        return {"status": "skipped", "prefetched_count": 0, "predictions_considered": 0}
+        result = {"status": "skipped", "prefetched_count": 0, "predictions_considered": 0}
+        queue.record_worker_event(WORKER_ID, job, result)
+        return result
 
     try:
         result = asyncio.run(
@@ -35,13 +42,17 @@ def process_prefetch_job(queue, secure_manager, job: Dict[str, Any]) -> Dict[str
     except Exception as exc:
         logger.exception("Prefetch worker job failed: %s", exc)
         retry_state = queue.retry(job, error=str(exc))
-        return {"status": retry_state["status"], "error": str(exc), **retry_state}
+        result = {"status": retry_state["status"], "error": str(exc), **retry_state}
+        queue.record_worker_event(WORKER_ID, job, result)
+        return result
 
     failed_store_keys = result.get("failed_store_keys", [])
     if failed_store_keys:
         dlq_error = f"secure_set_failed:{','.join(failed_store_keys)}"
         queue.move_to_dlq(job, error=dlq_error)
-        return {"status": "dlq", **result}
+        final_result = {"status": "dlq", **result}
+        queue.record_worker_event(WORKER_ID, job, final_result)
+        return final_result
 
     missing_keys = result.get("missing_keys", [])
     if missing_keys:
@@ -50,10 +61,14 @@ def process_prefetch_job(queue, secure_manager, job: Dict[str, Any]) -> Dict[str
             error=f"fetch_failed:{','.join(missing_keys)}",
             candidates=_filter_candidates(candidates, missing_keys),
         )
-        return {"status": retry_state["status"], **result, **retry_state}
+        final_result = {"status": retry_state["status"], **result, **retry_state}
+        queue.record_worker_event(WORKER_ID, job, final_result)
+        return final_result
 
     queue.mark_completed(job)
-    return {"status": "completed", **result}
+    final_result = {"status": "completed", **result}
+    queue.record_worker_event(WORKER_ID, job, final_result)
+    return final_result
 
 
 def main() -> None:
@@ -62,14 +77,37 @@ def main() -> None:
     secure_manager = services["secure_cache_manager"]
 
     logger.info("Prefetch worker started")
+    queue.record_worker_heartbeat(WORKER_ID, status="starting", details={"pid": os.getpid()})
 
     try:
         while True:
+            queue.record_worker_heartbeat(WORKER_ID, status="idle", details={"pid": os.getpid()})
             job = queue.dequeue()
             if job is None:
                 continue
 
+            queue.record_worker_heartbeat(
+                WORKER_ID,
+                status="processing",
+                details={
+                    "pid": os.getpid(),
+                    "job_id": job.get("job_id"),
+                    "service_id": job.get("service_id"),
+                    "source_key_id": job.get("source_key_id"),
+                },
+            )
             result = process_prefetch_job(queue, secure_manager, job)
+            queue.record_worker_heartbeat(
+                WORKER_ID,
+                status=result.get("status", "idle"),
+                details={
+                    "pid": os.getpid(),
+                    "job_id": job.get("job_id"),
+                    "service_id": job.get("service_id"),
+                    "source_key_id": job.get("source_key_id"),
+                    "prefetched_count": result.get("prefetched_count", 0),
+                },
+            )
 
             logger.info(
                 "Prefetch worker processed service=%s source_key=%s status=%s prefetched=%s considered=%s",

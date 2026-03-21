@@ -10,8 +10,27 @@ class ApiClient {
     };
   }
 
+  buildUrl(endpoint, params = null) {
+    let url = `${this.baseURL}${endpoint}`;
+    if (params) {
+      const searchParams = new URLSearchParams();
+      Object.entries(params).forEach(([key, value]) => {
+        if (value !== undefined && value !== null) {
+          searchParams.append(key, value);
+        }
+      });
+      const queryString = searchParams.toString();
+      if (queryString) {
+        url += `?${queryString}`;
+      }
+    }
+    return url;
+  }
+
   async request(endpoint, options = {}) {
-    const url = `${this.baseURL}${endpoint}`;
+    console.log(`[API] Requesting: ${options.method || 'GET'} ${endpoint}`, options);
+    let url = this.buildUrl(endpoint, options.params);
+    
     const config = {
       ...options,
       headers: {
@@ -19,6 +38,9 @@ class ApiClient {
         ...options.headers,
       },
     };
+    
+    // Remove params from config as it's now part of the URL
+    delete config.params;
 
     try {
       const response = await fetch(url, config);
@@ -81,6 +103,43 @@ class ApiClient {
     });
   }
 
+  async evaluateModel() {
+    return this.request('/ml/evaluate');
+  }
+
+  // ML Training - Generate Data
+  async generateTrainingData(params) {
+    return this.request('/ml/training/generate', {
+      method: 'POST',
+      params: params,
+    });
+  }
+
+  // ML Training - Train Model
+  async trainModel(params = {}) {
+    return this.request('/ml/training/train', {
+      method: 'POST',
+      params: params,
+    });
+  }
+
+  // ML Data Import
+  async importTrainingData() {
+    return this.request('/ml/data/import', {
+      method: 'POST',
+    });
+  }
+
+  // ML Data Stats
+  async getDataStats() {
+    return this.request('/ml/data/stats');
+  }
+
+  // ML Diagnostics
+  async getMLDiagnostics() {
+    return this.request('/ml/diagnostics');
+  }
+
   // Simulation
   async getSimulationScenarios() {
     return this.request('/simulation/scenarios');
@@ -98,14 +157,64 @@ class ApiClient {
   }
 
   // Live System Test - Tests real ML, cache, and prefetch
-  async runLiveTest(numRequests = 50, seedData = true, scenario = 'test', trafficType = 'normal') {
-    return this.request(`/simulation/live-test?num_requests=${numRequests}&seed_data=${seedData}&scenario=${scenario}&traffic_type=${trafficType}`, {
+  async runLiveTest(options) {
+    const { duration, seedData, scenario, trafficType } = options;
+    const params = new URLSearchParams({
+      seed_data: seedData,
+      scenario: scenario,
+      traffic_type: trafficType,
+    });
+    
+    if (duration) {
+      params.append('duration_seconds', duration);
+    } else {
+      // Fallback to a default number of requests if duration is not provided
+      params.append('num_requests', 100);
+    }
+
+    return this.request(`/simulation/live-test?${params.toString()}`, {
       method: 'POST',
     });
   }
 
   async getLiveTestStatus() {
     return this.request('/simulation/live-test');
+  }
+
+  async startLiveSimulationSession(options) {
+    const pick = (...values) => values.find((value) => value !== undefined && value !== null);
+    const params = {
+      seed_data: pick(options.seedData, options.seed_data),
+      scenario: options.scenario,
+      traffic_type: pick(options.trafficType, options.traffic_type),
+      simulate_kms: pick(options.simulateKms, options.simulate_kms),
+      model_preference: pick(options.modelPreference, options.model_preference) || 'best_available',
+      key_mode: pick(options.keyMode, options.key_mode) || 'auto',
+      virtual_nodes: pick(options.virtualNodes, options.virtual_nodes) || 3,
+    };
+    const maxRequests = pick(options.maxRequests, options.max_requests);
+    if (maxRequests) {
+      params.max_requests = maxRequests;
+    }
+    return this.request('/simulation/live-session/start', {
+      method: 'POST',
+      params,
+    });
+  }
+
+  async getLiveSimulationSession(sessionId) {
+    return this.request(`/simulation/live-session/${sessionId}`);
+  }
+
+  async stopLiveSimulationSession(sessionId) {
+    return this.request(`/simulation/live-session/${sessionId}/stop`, {
+      method: 'POST',
+    });
+  }
+
+  getLiveSimulationStreamUrl(sessionId) {
+    const relativeUrl = this.buildUrl(`/simulation/live-session/${sessionId}/stream`);
+    return new URL(relativeUrl, window.location.origin).toString();
   }
 
   // Security
@@ -287,4 +396,18 @@ class ApiClient {
 }
 
 export const apiClient = new ApiClient();
+
+// Convenience methods
+apiClient.get = function(endpoint, options = {}) {
+  return this.request(endpoint, { method: 'GET', ...options });
+};
+
+apiClient.post = function(endpoint, data = null, options = {}) {
+  return this.request(endpoint, {
+    method: 'POST',
+    body: data !== null ? JSON.stringify(data) : null,
+    ...options
+  });
+};
+
 export default apiClient;

@@ -122,7 +122,7 @@ services:
     environment:
       - VITE_API_MODE=auto
       - VITE_API_URL=/api
-      - VITE_API_PROXY_TARGET=http://api:8000
+      - VITE_API_PROXY_TARGET=http://host.docker.internal:8000
     volumes:
       - ./frontend/src:/app/src
       - ./frontend/public:/app/public
@@ -203,6 +203,67 @@ services:
       - pskc-net
     profiles:
       - monitoring             # jalankan hanya jika: docker compose --profile monitoring up
+
+  # ----------------------------------------------------------
+  # ML Worker — Dedicated ML Service
+  # Handles: Auto-training, Drift Detection, River Online Learning
+  # ----------------------------------------------------------
+  ml-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runtime
+    container_name: pskc-ml-worker
+    restart: unless-stopped
+    environment:
+      APP_ENV: development
+      LOG_LEVEL: info
+      FIPS_SELF_TEST_ENABLED: "true"
+      AUDIT_LOG_DIRECTORY: /app/logs/ml-worker
+
+      # Redis connection
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_DB: 0
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-pskc_redis_secret}
+      REDIS_CACHE_PREFIX: pskc:cache
+      PREFETCH_QUEUE_KEY: pskc:prefetch:jobs
+
+      # ML model settings
+      ML_MODEL_NAME: pskc_model
+      ML_MODEL_REGISTRY_DIR: /app/data/models
+      ML_MODEL_STAGE: development
+      ML_MODEL_SIGNING_KEY: ${ML_MODEL_SIGNING_KEY:-}
+      ML_MODEL_PATH: /app/data/models/pskc_model.pskc.json
+      ML_PREDICTION_THRESHOLD: 0.75
+      ML_UPDATE_INTERVAL_SECONDS: 30
+      ML_MIN_SAMPLES: 100
+      ML_DRIFT_THRESHOLD: 0.12
+      ML_ENABLE_RIVER: "true"
+      ML_TOP_N_PREDICTIONS: 10
+
+      # API URL for communication
+      API_URL: http://api:8000
+    volumes:
+      - ./src:/app/src
+      - ./config:/app/config
+      - ./data:/app/data
+      - ./simulation:/app/simulation
+      - ./logs:/app/logs
+    command: >
+      python -m src.workers.ml_worker
+    depends_on:
+      redis:
+        condition: service_healthy
+      api:
+        condition: service_healthy
+    networks:
+      - pskc-net
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:-pskc_redis_secret}", "-h", "redis", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
 
   # ----------------------------------------------------------
   # Grafana — Dashboard visualisasi metrik

@@ -200,6 +200,8 @@ class PrefetchQueue:
         self._dlq_key = f"{self._queue_key}:dlq"
         self._stats_key = f"{self._queue_key}:stats"
         self._replay_key = f"{self._queue_key}:replay"  # Track replay history
+        self._worker_key = f"{self._queue_key}:workers"
+        self._worker_events_key = f"{self._queue_key}:worker_events"
         self._client = redis.Redis.from_url(
             effective_redis_url,
             decode_responses=True,
@@ -484,6 +486,95 @@ class PrefetchQueue:
             return [self._deserialize(item) for item in items if self._deserialize(item)]
         except RedisError:
             return []
+
+    # ----------------------------------------------------------
+    # Worker Heartbeat / Evidence
+    # ----------------------------------------------------------
+
+    def record_worker_heartbeat(
+        self,
+        worker_id: str,
+        status: str = "idle",
+        details: Optional[Dict[str, Any]] = None,
+    ) -> bool:
+        if not self._is_available():
+            return False
+        heartbeat = {
+            "worker_id": worker_id,
+            "status": status,
+            "last_seen": time.time(),
+            "details": details or {},
+        }
+        try:
+            self._client.hset(self._worker_key, worker_id, self._serialize(heartbeat))
+            return True
+        except RedisError as exc:
+            self._record_failure("worker_heartbeat", exc)
+            return False
+
+    def get_worker_status(self, stale_after_seconds: int = 30) -> List[Dict[str, Any]]:
+        if not self._is_available():
+            return []
+        try:
+            raw_workers = self._client.hgetall(self._worker_key)
+        except RedisError as exc:
+            self._record_failure("worker_status", exc)
+            return []
+
+        now = time.time()
+        workers: List[Dict[str, Any]] = []
+        for worker_id, raw_payload in raw_workers.items():
+            payload = self._deserialize(raw_payload)
+            if payload is None:
+                continue
+            last_seen = float(payload.get("last_seen", 0) or 0)
+            payload["worker_id"] = worker_id
+            payload["active"] = (now - last_seen) <= stale_after_seconds if last_seen else False
+            workers.append(payload)
+
+        workers.sort(key=lambda item: item.get("last_seen", 0), reverse=True)
+        return workers
+
+    def record_worker_event(
+        self,
+        worker_id: str,
+        job: Dict[str, Any],
+        result: Dict[str, Any],
+    ) -> None:
+        if not self._is_available():
+            return
+        event = {
+            "worker_id": worker_id,
+            "timestamp": time.time(),
+            "job_id": job.get("job_id"),
+            "service_id": job.get("service_id"),
+            "source_key_id": job.get("source_key_id"),
+            "status": result.get("status"),
+            "prefetched_count": result.get("prefetched_count", 0),
+            "predictions_considered": result.get("predictions_considered", 0),
+            "prefetched_keys": list(result.get("prefetched_keys", [])[:10]),
+        }
+        try:
+            self._client.lpush(self._worker_events_key, self._serialize(event))
+            self._client.ltrim(self._worker_events_key, 0, 99)
+        except RedisError as exc:
+            self._record_failure("worker_event", exc)
+
+    def get_recent_worker_events(self, limit: int = 20) -> List[Dict[str, Any]]:
+        if not self._is_available():
+            return []
+        try:
+            items = self._client.lrange(self._worker_events_key, 0, max(0, limit - 1))
+        except RedisError as exc:
+            self._record_failure("worker_events", exc)
+            return []
+
+        events: List[Dict[str, Any]] = []
+        for item in items:
+            payload = self._deserialize(item)
+            if payload is not None:
+                events.append(payload)
+        return events
     
     def replay_from_retry(self, limit: int = 50) -> int:
         """
@@ -569,6 +660,8 @@ class PrefetchQueue:
             "retry_backoff_seconds": int(_get_setting("prefetch_retry_backoff_seconds", 5)),
             "stats": stats,
             "rate_limiter": self._rate_limiter.get_stats(),
+            "workers": self.get_worker_status(),
+            "recent_worker_events": self.get_recent_worker_events(limit=10),
         }
 
     def ping(self) -> bool:

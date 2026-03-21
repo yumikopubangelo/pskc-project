@@ -26,12 +26,18 @@ class KeyPredictor:
     def __init__(
         self,
         model: EnsembleModel = None,
-        top_n: int = 10,
-        threshold: float = 0.75
+        top_n: int = None,
+        threshold: float = None
     ):
+        from config.settings import settings
+        
         self._model = model
-        self._top_n = top_n
-        self._threshold = threshold
+        self._top_n = top_n if top_n is not None else settings.ml_predictor_top_n
+        self._threshold = threshold if threshold is not None else settings.ml_predictor_confidence_threshold
+        
+        # Cache configuration
+        self._cache_ttl = settings.ml_predictor_cache_ttl_seconds
+        self._cache_max_size = settings.ml_predictor_cache_max_size
         
         # Components
         self._collector = get_data_collector()
@@ -40,16 +46,18 @@ class KeyPredictor:
         # For getting key data
         self._key_fetcher = get_key_fetcher()
         
-        # Prediction cache
+        # Prediction cache with eviction support (Issue #15)
         self._prediction_cache = {}
-        self._cache_ttl = 10  # seconds
         self._model_source = "uninitialized"
         self._model_version: Optional[str] = None
         self._artifact_path: Optional[str] = None
         if model is not None:
             self.attach_model(model, source="runtime")
         
-        logger.info(f"KeyPredictor initialized: top_n={top_n}, threshold={threshold}")
+        logger.info(
+            f"KeyPredictor initialized: top_n={self._top_n}, "
+            f"threshold={self._threshold}, cache_ttl={self._cache_ttl}s"
+        )
     
     @property
     def model(self) -> EnsembleModel:
@@ -63,6 +71,36 @@ class KeyPredictor:
             self._model_source = "uninitialized"
             self._model_version = None
             self._artifact_path = None
+    
+    def _evict_old_cache_entries(self):
+        """
+        Evict expired cache entries (Issue #15).
+        Called periodically to prevent unbounded cache growth.
+        """
+        now = time.time()
+        keys_to_delete = []
+        
+        # Find expired entries
+        for cache_key, (cached_time, _) in self._prediction_cache.items():
+            if now - cached_time > self._cache_ttl:
+                keys_to_delete.append(cache_key)
+        
+        # Delete expired entries
+        for key in keys_to_delete:
+            del self._prediction_cache[key]
+        
+        # If still over max size, remove oldest entries
+        if len(self._prediction_cache) > self._cache_max_size:
+            num_to_remove = len(self._prediction_cache) - int(self._cache_max_size * 0.8)
+            # Sort by timestamp and remove oldest
+            sorted_items = sorted(
+                self._prediction_cache.items(),
+                key=lambda x: x[1][0]  # Sort by cache time
+            )
+            for cache_key, _ in sorted_items[:num_to_remove]:
+                del self._prediction_cache[cache_key]
+            
+            logger.debug(f"Predictor: Evicted {num_to_remove} cache entries, now at {len(self._prediction_cache)}")
 
     def attach_model(
         self,
@@ -164,8 +202,10 @@ class KeyPredictor:
         min_confidence = self._threshold if min_confidence is None else min_confidence
         self.ensure_model_loaded()
         
-        # Check cache
+        # Check cache with eviction
         cache_key = f"{service_id}:{n}"
+        self._evict_old_cache_entries()  # Periodic cleanup
+        
         if cache_key in self._prediction_cache:
             cached_time, cached_predictions = self._prediction_cache[cache_key]
             if time.time() - cached_time < self._cache_ttl:

@@ -20,14 +20,17 @@
 #
 # ============================================================
 
+import asyncio
 import base64
 import binascii
+import json
 import ipaddress
 import logging
 import time
 from contextlib import asynccontextmanager
 from fastapi import APIRouter, BackgroundTasks, HTTPException, status, Request, Depends, FastAPI, Query
-from fastapi.responses import Response
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import Response, StreamingResponse
 from typing import Optional
 
 # --- Impor Modul FIPS dan Logger Baru ---
@@ -42,7 +45,7 @@ from src.api.schemas import (
     KeyStoreRequest, KeyStoreResponse, 
     HealthResponse, ReadinessResponse, StartupResponse, MetricsResponse,
     CacheStatsResponse, PredictionResponse,
-    SimulationRequest, SimulationResponse,
+    SimulationRequest, SimulationResponse, OrganicSimulationRequest, OrganicSimulationResponse,
     SimulationResultResponse, SecurityAuditResponse,
     IntrusionLogResponse,
     ModelPromotionRequest,
@@ -58,7 +61,13 @@ from src.security.security_headers import (
     SlidingWindowRateLimiter,
     configure_trusted_proxies,
 )
-from src.api.simulation_service import list_simulation_scenarios, run_simulation_job
+from src.api.simulation_service import list_simulation_scenarios, run_simulation_job, list_traffic_profiles, run_organic_simulation
+from src.api.live_validation_service import run_live_validation
+from src.api.live_simulation_service import (
+    get_live_simulation_session,
+    start_live_simulation_session,
+    stop_live_simulation_session,
+)
 from src.api.ml_service import (
     get_accuracy_history_payload,
     get_model_lifecycle_payload,
@@ -66,6 +75,7 @@ from src.api.ml_service import (
     get_prefetch_dlq_payload,
     get_prefetch_metrics_payload,
     get_ml_status_payload,
+    get_model_evaluation_payload,
     get_prediction_payload,
     initialize_ml_runtime,
     promote_runtime_model_version,
@@ -74,6 +84,8 @@ from src.api.ml_service import (
     schedule_request_path_prefetch,
     shutdown_ml_runtime,
     trigger_runtime_retraining,
+    generate_training_data,
+    train_model,
 )
 from src.observability.prometheus_exporter import (
     build_prometheus_metrics_payload,
@@ -246,6 +258,20 @@ def _register_http_security_middleware(app: FastAPI) -> None:
 
 app = FastAPI(lifespan=lifespan)
 _register_http_security_middleware(app)
+
+# Add CORS middleware to allow frontend requests
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        "http://localhost:4173"
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 router = APIRouter()
 
 
@@ -867,7 +893,11 @@ async def get_predictions(n: int = 10):
 @router.get("/ml/status")
 async def get_ml_status():
     """Get ML model status"""
-    return get_ml_status_payload()
+    try:
+        return get_ml_status_payload()
+    except Exception as e:
+        logger.exception("Error getting ML status: %s", e)
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
 
 
 @router.get("/ml/drift")
@@ -916,6 +946,18 @@ async def trigger_retraining():
     return trigger_runtime_retraining(force=True)
 
 
+@router.get("/ml/evaluate")
+async def evaluate_ml_model():
+    """Evaluate the currently active model using recent collected traffic."""
+    result = get_model_evaluation_payload()
+    if not result.get("success"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=result.get("reason") or "evaluation_failed",
+        )
+    return result
+
+
 @router.post("/ml/promote")
 async def promote_ml_model(req: ModelPromotionRequest):
     """Promote a registered model version to a target stage and optionally activate it."""
@@ -946,6 +988,62 @@ async def rollback_ml_model(req: ModelRollbackRequest):
     return result
 
 
+@router.post("/ml/training/generate")
+async def generate_training_data_endpoint(
+    num_events: Optional[int] = Query(default=None, ge=100, le=10000),
+    num_keys: Optional[int] = Query(default=None, ge=10, le=1000),
+    num_services: Optional[int] = Query(default=None, ge=1, le=20),
+    scenario: str = Query(default="dynamic", description="Scenario: siakad, sevima, pddikti, dynamic"),
+    traffic_profile: str = Query(default="normal", description="Traffic profile: normal, heavy, prime_time, overload"),
+    duration_hours: Optional[int] = Query(default=None, ge=1, le=168),
+):
+    """
+    Generate synthetic training data based on scenario and traffic profile.
+    
+    This creates realistic access patterns for ML model training with
+    organic traffic simulation including hot keys, sequential patterns, and bursts.
+    """
+    # Validate required parameters
+    if num_events is None or num_keys is None or num_services is None or duration_hours is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="All numeric fields are required"
+        )
+    
+    try:
+        result = generate_training_data(
+            num_events=num_events,
+            num_keys=num_keys,
+            num_services=num_services,
+            scenario=scenario,
+            traffic_profile=traffic_profile,
+            duration_hours=duration_hours,
+        )
+        return result
+    except Exception as e:
+        logger.exception("Error generating training data: %s", e)
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
+
+
+@router.post("/ml/training/train")
+async def train_model_endpoint(
+    force: bool = Query(default=True),
+    reason: str = Query(default="manual", description="Reason for training: manual, drift_detected, scheduled"),
+):
+    """
+    Train the ML model using collected data.
+    
+    Returns training results including model version, accuracy, and training time.
+    """
+    result = train_model(force=force, reason=reason)
+    if not result.get("success"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=result.get("message") or result.get("reason")
+        )
+    return result
+
+
 # ============================================================
 # Simulation Endpoints
 # ============================================================
@@ -972,14 +1070,11 @@ async def get_simulation_scenarios():
 
 @router.post("/simulation/run", response_model=SimulationResponse)
 async def run_simulation(req: SimulationRequest):
-    """Run a simulation using the backend Python scenario engines."""
-    scenario_catalog = list_simulation_scenarios()
-    default_scenario = scenario_catalog["default_scenario"]
-    scenario_id = req.scenario or default_scenario
+    """Run a batch-based simulation using the backend Python scenario engines."""
     sim_id = str(uuid.uuid4())
     try:
         simulation_payload = run_simulation_job(
-            scenario_id=scenario_id,
+            scenario_id=req.scenario,
             profile_id=req.profile_id,
             request_count=req.request_count,
             seed=req.seed,
@@ -995,17 +1090,41 @@ async def run_simulation(req: SimulationRequest):
     return SimulationResponse(
         simulation_id=sim_id,
         status=simulation_payload["status"],
-        scenario=scenario_id,
-        profile_id=simulation_payload["profile_id"],
-        request_count=req.request_count,
-        duration_seconds=req.duration_seconds
+        scenario=req.scenario,
     )
+
+@router.get("/simulation/traffic-profiles")
+async def get_traffic_profiles():
+    """List available organic traffic profiles for time-based simulations."""
+    return list_traffic_profiles()
+
+
+@router.post("/simulation/run-organic", response_model=OrganicSimulationResponse)
+async def run_organic_simulation_endpoint(req: OrganicSimulationRequest):
+    """Run a time-based, organic simulation."""
+    try:
+        result = run_organic_simulation(
+            scenario_id=req.scenario_id,
+            traffic_profile=req.traffic_profile,
+            duration_seconds=req.duration_seconds,
+        )
+        return result
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        logger.exception(f"Organic simulation failed for scenario {req.scenario_id}")
+        raise HTTPException(status_code=500, detail=f"An unexpected error occurred during simulation: {exc}")
 
 
 @router.get("/simulation/results/{simulation_id}")
 async def get_simulation_results(simulation_id: str):
     """Get simulation results"""
     if simulation_id not in _simulation_results:
+        # Also check for organic results if not in standard results
+        # This part is simplified; a real system might have a unified result store
+        latest = _get_latest_simulation_result()
+        if latest and latest.get("simulation_id") == simulation_id:
+            return latest
         raise HTTPException(status_code=404, detail="Simulation not found")
     return _simulation_results[simulation_id]
 
@@ -1017,290 +1136,38 @@ async def get_simulation_results(simulation_id: str):
 @router.post("/simulation/live-test")
 async def run_live_system_test(
     request: Request,
-    num_requests: int = Query(default=50, ge=10, le=200),
+    num_requests: Optional[int] = Query(default=None, ge=10, le=500),
+    duration_seconds: Optional[int] = Query(default=None, ge=10, le=300),
     seed_data: bool = Query(default=True),
     scenario: str = Query(default="test", description="Scenario: siakad, sevima, pddikti, dynamic, test"),
-    traffic_type: str = Query(default="normal", description="Traffic type: normal, heavy_load, prime_time, degraded")
+    traffic_type: str = Query(default="normal", description="Traffic type: normal, heavy_load, prime_time, degraded, overload")
 ):
     """
-    Run a live system test that exercises:
-    1. ML predictions
-    2. Cache layer (Redis + local)
-    3. Prefetch worker queue
-    4. End-to-end latency measurement
+    Run a live system test that exercises the full system stack.
+
+    Supports two modes:
+    1. `num_requests`: Runs a fixed number of requests.
+    2. `duration_seconds`: Runs an organic, time-based simulation for a specific duration.
     
     Parameters:
-    - scenario: siakad, sevima, pddikti, dynamic, test (default: test)
-    - traffic_type: normal (80% hit), heavy_load (60% hit), prime_time (50% hit), degraded (30% hit)
-    
-    This provides real metrics unlike the mathematical simulation.
+    - scenario: siakad, sevima, pddikti, dynamic, test
+    - traffic_type: normal, heavy_load, prime_time, degraded, overload
     """
-    import random
-    import string
-    from datetime import datetime, timezone
-    
-    # Traffic type configurations (cache hit rates)
-    traffic_config = {
-        "normal": {"cache_hit_rate": 0.8, "cache_miss_rate": 0.1, "throttled_rate": 0.1},
-        "heavy_load": {"cache_hit_rate": 0.6, "cache_miss_rate": 0.2, "throttled_rate": 0.2},
-        "prime_time": {"cache_hit_rate": 0.5, "cache_miss_rate": 0.3, "throttled_rate": 0.2},
-        "degraded": {"cache_hit_rate": 0.3, "cache_miss_rate": 0.3, "throttled_rate": 0.4},
-    }
-    
-    # Scenario key patterns
-    scenario_patterns = {
-        "siakad": {"services": ["siakad", "akademik", "keuangan"], "keys": ["mahasiswa-", "dosen-", "nilai-"]},
-        "sevima": {"services": ["sevima", "elearning", "conference"], "keys": ["user-", "meeting-", "course-"]},
-        "pddikti": {"services": ["pddikti", "PT", "mahasiswa"], "keys": ["pt-", "mhs-", "prodi-"]},
-        "dynamic": {"services": ["default", "auth-service", "payment-service"], "keys": ["api-key-", "token-", "secret-"]},
-        "test": {"services": ["default", "auth-service", "payment-service", "user-service"], "keys": ["api-key-", "token-", "secret-", "credential-"]},
-    }
-    
-    config = traffic_config.get(traffic_type, traffic_config["normal"])
-    scenario_config = scenario_patterns.get(scenario, scenario_patterns["test"])
-    
-    result = {
-        "test_id": str(uuid.uuid4()),
-        "started_at": datetime.now(timezone.utc).isoformat(),
-        "num_requests": num_requests,
-        "scenario": scenario,
-        "traffic_type": traffic_type,
-        "steps": []
-    }
-    
-    # DEBUG: Log the num_requests to verify it's being received
-    logger.info(f"[LIVE_TEST] Starting live test with num_requests={num_requests}, scenario={scenario}, traffic_type={traffic_type}")
-    
-    # Step 1: Seed data if requested
-    if seed_data:
-        try:
-            collector = get_data_collector()
-            # Generate seed events based on scenario
-            test_events = []
-            services = scenario_config["services"]
-            key_patterns = scenario_config["keys"]
-            
-            for i in range(500):
-                service = random.choice(services)
-                key_pattern = random.choice(key_patterns)
-                key_id = f"{key_pattern}{random.randint(1, 100)}"
-                # Use random IP to avoid brute force detection
-                ip = f"10.0.{random.randint(0, 255)}.{random.randint(1, 254)}"
-                test_events.append({
-                    "key_id": key_id,
-                    "service_id": service,
-                    "timestamp": datetime.now(timezone.utc).timestamp() - random.randint(0, 3600),
-                    "latency_ms": random.uniform(5, 50),
-                    "cache_hit": random.choice([True, True, True, False]),
-                })
-            
-            imported = collector.import_events(test_events)
-            result["steps"].append({
-                "step": "data_seeding",
-                "success": True,
-                "events_imported": imported,
-                "scenario": scenario,
-                "traffic_type": traffic_type
-            })
-        except Exception as e:
-            result["steps"].append({
-                "step": "data_seeding",
-                "success": False,
-                "error": str(e)
-            })
-    
-    # Step 2: Test ML predictions
     try:
-        from src.ml.predictor import get_key_predictor
-        predictor = get_key_predictor()
-        predictions = predictor.predict(service_id="default", n=10)
-        
-        result["steps"].append({
-            "step": "ml_predictions",
-            "success": True,
-            "predictions_count": len(predictions),
-            "predictions": [
-                {"key_id": k, "confidence": round(float(c), 4)} 
-                for k, c in predictions[:5]
-            ]
-        })
-    except Exception as e:
-        result["steps"].append({
-            "step": "ml_predictions",
-            "success": False,
-            "error": str(e)
-        })
-        predictions = []
-    
-    # Step 3: Test cache operations with scenario-based traffic
-    try:
-        secure_manager = request.app.state.secure_cache_manager
-        redis_cache = request.app.state.runtime_services.get("redis_cache")
-        
-        # Generate test keys based on scenario - scale with num_requests
-        services = scenario_config["services"]
-        key_patterns = scenario_config["keys"]
-        # Scale key count based on num_requests (at least 20, up to num_requests/10)
-        num_test_keys = max(20, min(num_requests // 5, 100))
-        second_pass_count = max(10, min(num_requests // 10, 50))
-        
-        # DEBUG: Log the scaling values
-        logger.info(f"[CACHE_TEST] num_requests={num_requests}, num_test_keys={num_test_keys}, second_pass_count={second_pass_count}")
-        
-        test_keys = [f"{random.choice(key_patterns)}{random.randint(1, 50)}" for _ in range(num_test_keys)]
-        cache_hits = 0
-        cache_misses = 0
-        
-        for key_id in test_keys:
-            # Use random IP to avoid brute force detection
-            ip_address = f"10.0.{random.randint(0, 255)}.{random.randint(1, 254)}"
-            service_id = random.choice(services)
-            
-            # First pass - determine if this should be a cache hit based on traffic type
-            rand_val = random.random()
-            should_cache_hit = rand_val < config["cache_hit_rate"]
-            
-            if not should_cache_hit:
-                # Store the key first (cache miss scenario)
-                test_data = ''.join(random.choices(string.ascii_letters, k=32)).encode('utf-8')
-                secure_manager.secure_set(key_id, test_data, service_id, ip_address)
-                cache_misses += 1
-            else:
-                # Try to access (should hit cache if already exists)
-                data, hit, _, _ = secure_manager.secure_get(key_id, service_id, ip_address)
-                if hit:
-                    cache_hits += 1
-                else:
-                    # Key not in cache, store it
-                    test_data = ''.join(random.choices(string.ascii_letters, k=32)).encode('utf-8')
-                    secure_manager.secure_set(key_id, test_data, service_id, ip_address)
-                    cache_misses += 1
-        
-        # Second pass - should mostly hit cache - scale with num_requests
-        second_pass_count = max(10, min(num_requests // 10, 50))
-        for key_id in test_keys[:second_pass_count]:
-            ip_address = f"10.0.{random.randint(0, 255)}.{random.randint(1, 254)}"
-            service_id = random.choice(services)
-            data, hit, _, _ = secure_manager.secure_get(key_id, service_id, ip_address)
-            if hit:
-                cache_hits += 1
-            else:
-                cache_misses += 1
-        
-        # Get Redis stats if available
-        redis_available = False
-        redis_keys_count = 0
-        if redis_cache:
-            try:
-                redis_available = redis_cache.ping()
-                redis_keys_count = len(redis_cache.get_keys())
-            except:
-                pass
-        
-        result["steps"].append({
-            "step": "cache_test",
-            "success": True,
-            "cache_hits": cache_hits,
-            "cache_misses": cache_misses,
-            "hit_rate": round(cache_hits / (cache_hits + cache_misses) * 100, 1) if (cache_hits + cache_misses) > 0 else 0,
-            "traffic_type": traffic_type,
-            "target_hit_rate": config["cache_hit_rate"] * 100,
-            "redis_available": redis_available,
-            "redis_keys_count": redis_keys_count
-        })
-    except Exception as e:
-        result["steps"].append({
-            "step": "cache_test",
-            "success": False,
-            "error": str(e)
-        })
-    
-    # Step 4: Test prefetch queue
-    try:
-        prefetch_queue = get_prefetch_queue()
-        queue_stats_before = prefetch_queue.get_stats()
-        
-        # Add test prefetch jobs based on scenario
-        test_candidates = [
-            {"key_id": f"{random.choice(key_patterns)}{random.randint(1, 100)}", "priority": random.uniform(0.5, 1.0)}
-            for i in range(5)
-        ]
-        
-        if predictions:
-            job_payload = {
-                "job_id": str(uuid.uuid4()),
-                "service_id": random.choice(services),
-                "source_key_id": predictions[0][0] if predictions else f"{random.choice(key_patterns)}0",
-                "ip_address": f"10.0.{random.randint(0, 255)}.{random.randint(1, 254)}",
-                "candidates": test_candidates,
-                "enqueued_at": datetime.now(timezone.utc).isoformat(),
-            }
-            prefetch_queue.enqueue(job_payload)
-        
-        queue_stats_after = prefetch_queue.get_stats()
-        
-        result["steps"].append({
-            "step": "prefetch_test",
-            "success": True,
-            "queue_before": queue_stats_before.get("queue_length", 0),
-            "queue_after": queue_stats_after.get("queue_length", 0),
-            "jobs_enqueued": len(test_candidates)
-        })
-    except Exception as e:
-        result["steps"].append({
-            "step": "prefetch_test",
-            "success": False,
-            "error": str(e)
-        })
-    
-    # Step 5: End-to-end latency test with scenario-based traffic
-    try:
-        latencies = []
-        services = scenario_config["services"]
-        key_patterns = scenario_config["keys"]
-        
-        # Scale latency test with num_requests (no artificial cap, but limit for performance)
-        latency_iterations = min(num_requests, 200)  # Max 200 for performance
-        
-        # DEBUG: Log latency iterations
-        logger.info(f"[LATENCY_TEST] Running {latency_iterations} iterations")
-        
-        for i in range(latency_iterations):
-            # Use scenario-based key patterns
-            key_id = f"{random.choice(key_patterns)}{random.randint(1, 20)}"
-            service_id = random.choice(services)
-            # Use random IP to avoid brute force detection
-            ip_address = f"10.0.{random.randint(0, 255)}.{random.randint(1, 254)}"
-            
-            start = time.perf_counter()
-            data, hit, _, _ = secure_manager.secure_get(key_id, service_id, ip_address)
-            elapsed = (time.perf_counter() - start) * 1000
-            latencies.append(round(elapsed, 2))
-        
-        latencies.sort()
-        result["steps"].append({
-            "step": "latency_test",
-            "success": True,
-            "avg_latency_ms": round(sum(latencies) / len(latencies), 2) if latencies else 0,
-            "p50_ms": latencies[len(latencies)//2] if latencies else 0,
-            "p99_ms": latencies[int(len(latencies)*0.99)] if latencies else 0,
-            "min_ms": min(latencies) if latencies else 0,
-            "max_ms": max(latencies) if latencies else 0,
-            "traffic_type": traffic_type
-        })
-    except Exception as e:
-        result["steps"].append({
-            "step": "latency_test",
-            "success": False,
-            "error": str(e)
-        })
-    
-    result["completed_at"] = datetime.now(timezone.utc).isoformat()
-    result["overall_success"] = all(
-        s.get("success", False) for s in result["steps"]
-    )
-    
-    return result
+        return await run_live_validation(
+            app_state=request.app.state,
+            num_requests=num_requests,
+            duration_seconds=duration_seconds,
+            seed_data=seed_data,
+            scenario=scenario,
+            traffic_type=traffic_type,
+        )
+    except Exception as exc:
+        logger.exception("Live validation failed")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Live validation failed: {exc}",
+        )
 
 
 @router.get("/simulation/live-test")
@@ -1324,6 +1191,94 @@ async def get_live_test_status():
         "prefetch_stats": prefetch_stats,
         "timestamp": datetime.now(timezone.utc).isoformat()
     }
+
+
+@router.post("/simulation/live-session/start")
+async def start_live_simulation(
+    request: Request,
+    seed_data: bool = Query(default=True),
+    scenario: str = Query(default="test", description="Scenario: siakad, sevima, pddikti, dynamic, test"),
+    traffic_type: str = Query(default="normal", description="Traffic type: normal, heavy_load, prime_time, degraded, overload"),
+    simulate_kms: bool = Query(default=True, description="Also measure direct KMS latency as a baseline"),
+    model_preference: str = Query(default="best_available", description="best_available or active_runtime"),
+    key_mode: str = Query(default="auto", description="auto, stable, mixed, or high_churn"),
+    virtual_nodes: int = Query(default=3, ge=1, le=12, description="Number of virtual API nodes with isolated L1 caches"),
+    max_requests: Optional[int] = Query(default=None, ge=10, le=5000, description="Optional finite request budget for automation"),
+):
+    """Start a realtime simulation session that keeps running until stopped."""
+    try:
+        return await start_live_simulation_session(
+            app_state=request.app.state,
+            scenario=scenario,
+            traffic_type=traffic_type,
+            seed_data=seed_data,
+            simulate_kms=simulate_kms,
+            model_preference=model_preference,
+            key_mode=key_mode,
+            virtual_nodes=virtual_nodes,
+            max_requests=max_requests,
+        )
+    except Exception as exc:
+        logger.exception("Failed to start live simulation session")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to start live simulation session: {exc}",
+        )
+
+
+@router.get("/simulation/live-session/{session_id}")
+async def get_live_simulation_snapshot(session_id: str):
+    """Get the latest snapshot for a realtime simulation session."""
+    session = get_live_simulation_session(session_id)
+    if session is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Live simulation session not found")
+    return session
+
+
+@router.get("/simulation/live-session/{session_id}/stream")
+async def stream_live_simulation_snapshot(session_id: str, request: Request):
+    """Stream live simulation snapshots over SSE."""
+    session = get_live_simulation_session(session_id)
+    if session is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Live simulation session not found")
+
+    async def event_stream():
+        while True:
+            if await request.is_disconnected():
+                break
+
+            snapshot = get_live_simulation_session(session_id)
+            if snapshot is None:
+                yield "event: end\ndata: {}\n\n"
+                break
+
+            payload = json.dumps(snapshot, sort_keys=True, ensure_ascii=False)
+            yield f"event: snapshot\ndata: {payload}\n\n"
+
+            if snapshot.get("status") in {"completed", "stopped", "failed"}:
+                break
+
+            yield ": keep-alive\n\n"
+            await asyncio.sleep(1.0)
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@router.post("/simulation/live-session/{session_id}/stop")
+async def stop_live_simulation(session_id: str):
+    """Request a running realtime simulation session to stop."""
+    session = stop_live_simulation_session(session_id)
+    if session is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Live simulation session not found")
+    return session
 
 
 # ============================================================

@@ -27,6 +27,8 @@ from src.ml.data_collector import get_data_collector
 from src.ml.feature_engineering import get_feature_engineer
 from src.ml.model import EnsembleModel, ModelFactory
 from src.ml.model_registry import SecurityError, get_model_registry
+from src.ml.incremental_model import IncrementalModelPersistence
+from src.observability.metrics_persistence import get_metrics_persistence
 
 logger = logging.getLogger(__name__)
 
@@ -416,6 +418,7 @@ class ModelTrainer:
         context_window: int = 10,     # events of context per training sample
         model_name: Optional[str] = None,
         registry = None,
+        incremental_persistence: Optional[IncrementalModelPersistence] = None,
     ):
         self._model = model
         self._update_interval = update_interval
@@ -424,6 +427,13 @@ class ModelTrainer:
         self._context_window = context_window
         self._model_name = model_name or settings.ml_model_name
         self._registry = registry or get_model_registry()
+        if incremental_persistence is not None:
+            self._incremental_persistence = incremental_persistence
+        else:
+            self._incremental_persistence = IncrementalModelPersistence(
+                model_dir=getattr(self._registry, "model_dir", settings.effective_ml_model_registry_dir),
+                model_name=self._model_name,
+            )
         self._active_model_version: Optional[str] = None
         self._active_artifact_path: Optional[str] = None
         self._model_source = "runtime"
@@ -431,6 +441,8 @@ class ModelTrainer:
         # Components
         self._collector = get_data_collector()
         self._engineer = get_feature_engineer()
+        # Minimum accuracy to consider a model as active
+        self._min_accuracy_for_active = 0.05  # 5%
 
         # Drift detection
         self._drift_detector = DriftDetector(drift_threshold=drift_threshold)
@@ -443,6 +455,7 @@ class ModelTrainer:
 
         # Metrics history
         self._training_history: List[Dict] = []
+        self._last_evaluation: Dict[str, Any] = {}
 
         # Background thread
         self._train_thread: Optional[threading.Thread] = None
@@ -476,15 +489,78 @@ class ModelTrainer:
             "source": self._model_source,
         }
 
+    def _timestamp_from_iso(self, value: Optional[str]) -> float:
+        if not value:
+            return 0.0
+        try:
+            return datetime.fromisoformat(value).timestamp()
+        except ValueError:
+            return 0.0
+
+    def _record_training_metrics(
+        self,
+        *,
+        accuracy: float,
+        loss: float,
+        samples: int,
+        duration_seconds: float,
+        status: str,
+    ) -> None:
+        metrics_persistence = get_metrics_persistence()
+        if metrics_persistence is None or not metrics_persistence.ping():
+            return
+        metrics_persistence.record_ml_training(
+            model_name=self._model_name,
+            accuracy=accuracy,
+            loss=loss,
+            samples=samples,
+            duration_seconds=duration_seconds,
+            status=status,
+        )
+
     def load_active_model(self) -> Dict[str, Any]:
+        # Try to load from incremental model first
+        incremental_persistence = self._incremental_persistence
+        if incremental_persistence.exists():
+            model_data = incremental_persistence.get_model_data()
+            if model_data is not None:
+                try:
+                    loaded_model = self._registry._deserialize_model_checkpoint(model_data)
+                    if loaded_model is not None:
+                        model_info = incremental_persistence.get_info()
+                        metadata = model_info.get("metadata", {})
+                        self._model = loaded_model
+                        self._active_model_version = model_info.get("current_version", "unknown")
+                        self._active_artifact_path = model_info.get("file_path")
+                        self._model_source = "incremental"
+                        self._last_train_time = self._timestamp_from_iso(
+                            metadata.get("last_accepted_at") or model_info.get("updated_at")
+                        )
+                        logger.info(
+                            "Loaded active incremental model %s:%s from %s",
+                            self._model_name,
+                            self._active_model_version,
+                            self._active_artifact_path,
+                        )
+                        return {
+                            "success": True,
+                            "version": self._active_model_version,
+                            "artifact_path": self._active_artifact_path,
+                            "source": self._model_source,
+                        }
+                except Exception as e:
+                    logger.error(f"Failed to load incremental model: {e}")
+        
+        # Fallback to registry
         active_version = self._registry.get_active_version(self._model_name)
         if active_version is None:
             return {"success": False, "reason": "no_active_version"}
 
         try:
             loaded_model = self._registry.load_model(self._model_name, actor="trainer")
-        except SecurityError:
-            raise
+        except SecurityError as e:
+            logger.error("Security error loading active model: %s", e)
+            return {"success": False, "reason": "security_error", "detail": str(e)}
 
         if loaded_model is None:
             return {"success": False, "reason": "load_failed"}
@@ -531,45 +607,55 @@ class ModelTrainer:
         val_samples: int,
         reason: str,
     ) -> Dict[str, Any]:
-        version = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-        saved_at = datetime.now(timezone.utc).isoformat()
-        description = (
-            f"runtime training reason={reason} "
-            f"samples={sample_count} train={train_samples} val={val_samples} "
-            f"val_accuracy={metrics.get('accuracy', 0.0):.4f}"
-        )
-        provenance = {
-            "source": "trainer.runtime",
-            "saved_at": saved_at,
-            "reason": reason,
+        incremental_persistence = self._incremental_persistence
+        
+        # Serialize the model using the registry's serialization method
+        model_data = self._registry.serialize_model_checkpoint(model)
+        
+        # Prepare training info
+        training_info = {
             "sample_count": sample_count,
             "train_samples": train_samples,
             "val_samples": val_samples,
-            "metrics": metrics,
-            "collector_total_events": self._collector.get_stats().get("total_events", 0),
-            "drift_stats": self._drift_detector.get_stats(),
         }
-        saved = self._registry.save_model(
-            model_name=self._model_name,
-            model=model,
-            version=version,
+        
+        # Update the incremental model
+        result = incremental_persistence.update(
+            model_data=model_data,
+            reason=reason,
             metrics=metrics,
-            description=description,
-            provenance=provenance,
-            stage=settings.ml_model_stage,
-            actor="trainer",
+            training_info=training_info,
         )
-        if not saved:
-            return {"success": False, "reason": "registry_save_failed"}
-
-        active_version = self._registry.get_active_version(self._model_name)
-        self._active_model_version = active_version.version if active_version is not None else version
-        self._active_artifact_path = active_version.file_path if active_version is not None else None
-        self._model_source = "registry"
+        
+        if not result.get("success"):
+            logger.error("Failed to update incremental model: %s", result.get("reason"))
+            return {"success": False, "reason": result.get("reason")}
+        
+        if result.get("accepted"):
+            self._active_model_version = result.get("version")
+            self._active_artifact_path = incremental_persistence.get_info().get("file_path")
+            self._model_source = "incremental"
+            logger.info(
+                "Updated incremental model %s:%s at %s",
+                self._model_name,
+                self._active_model_version,
+                self._active_artifact_path,
+            )
+        else:
+            logger.info(
+                "Retained active model %s:%s after training attempt (%s)",
+                self._model_name,
+                self._active_model_version,
+                result.get("decision_reason"),
+            )
+        
         return {
             "success": True,
-            "version": self._active_model_version,
+            "accepted": bool(result.get("accepted")),
+            "version": result.get("version"),
             "artifact_path": self._active_artifact_path,
+            "decision_reason": result.get("decision_reason"),
+            "attempt_count": result.get("attempt_count"),
         }
 
     # ----------------------------------------------------------
@@ -626,7 +712,7 @@ class ModelTrainer:
                 }
 
             access_data = self._collector.get_access_sequence(
-                window_seconds=3600, max_events=10_000
+                window_seconds=86400, max_events=10_000  # Use 24 hour window for training
             )
 
             if not access_data:
@@ -655,8 +741,64 @@ class ModelTrainer:
                 access_sequence=key_sequence,
             )
 
-            # Evaluate on validation split
-            val_metrics = self._quick_eval(trainable_model, X_val, y_val)
+            # Evaluate on validation split using the same ensemble path used at runtime.
+            val_metrics = self._quick_eval(
+                trainable_model,
+                X_val,
+                y_val,
+                access_data=access_data,
+                validation_offset=split_idx,
+            )
+            val_accuracy = float(val_metrics.get("accuracy", 0.0) or 0.0)
+            training_time = time.time() - start_time
+            completed_at = datetime.now(timezone.utc).isoformat()
+            training_info = {
+                "sample_count": len(access_data),
+                "train_samples": split_idx,
+                "val_samples": len(access_data) - split_idx,
+            }
+
+            # Check if model accuracy meets minimum threshold for active model
+            if val_accuracy < self._min_accuracy_for_active:
+                logger.warning(
+                    f"Model accuracy {val_accuracy:.2%} is below threshold {self._min_accuracy_for_active:.2%}. "
+                    f"Model will not be set as active."
+                )
+                attempt_result = self._incremental_persistence.record_training_attempt(
+                    reason=reason,
+                    metrics=val_metrics,
+                    training_info=training_info,
+                    status="rejected_threshold",
+                    detail="accuracy_below_threshold",
+                )
+                result = {
+                    "success": True,
+                    "reason": "accuracy_below_threshold",
+                    "message": f"Model accuracy {val_accuracy:.2%} is below threshold {self._min_accuracy_for_active:.2%}",
+                    "val_accuracy": val_accuracy,
+                    "val_top_10_accuracy": float(val_metrics.get("top_10_accuracy", 0.0) or 0.0),
+                    "sample_count": len(access_data),
+                    "train_samples": split_idx,
+                    "val_samples": len(access_data) - split_idx,
+                    "training_time_s": round(training_time, 2),
+                    "completed_at": completed_at,
+                    "model_accepted": False,
+                    "version_bumped": False,
+                    "active_version": self._active_model_version,
+                    "artifact_path": self._active_artifact_path,
+                    "attempt_count": attempt_result.get("attempt_count"),
+                }
+                self._training_history.append(result)
+                self._record_training_metrics(
+                    accuracy=val_accuracy,
+                    loss=max(0.0, 1.0 - val_accuracy),
+                    samples=len(access_data),
+                    duration_seconds=round(training_time, 2),
+                    status="rejected_threshold",
+                )
+                # Reset drift detector short window after retrain (even if not active, to avoid immediate re-trigger)
+                self._drift_detector.reset_short_window()
+                return result
 
             # Reset drift detector short window after retrain
             self._drift_detector.reset_short_window()
@@ -673,31 +815,46 @@ class ModelTrainer:
                 logger.error("Runtime model persistence failed: %s", persist_result.get("reason"))
                 return {"success": False, "reason": str(persist_result.get("reason"))}
 
-            self._model = trainable_model
-            self._last_train_time = time.time()
-            self._training_count += 1
-            training_time = time.time() - start_time
+            accepted = bool(persist_result.get("accepted"))
+            if accepted:
+                self._model = trainable_model
+                self._last_train_time = time.time()
+                self._training_count += 1
 
             result = {
                 "success": True,
-                "reason": reason,
+                "reason": reason if accepted else str(persist_result.get("decision_reason") or "not_promoted"),
                 "sample_count": len(access_data),
                 "train_samples": split_idx,
                 "val_samples": len(access_data) - split_idx,
                 "training_time_s": round(training_time, 2),
                 "training_count": self._training_count,
-                "completed_at": datetime.now(timezone.utc).isoformat(),
-                "val_accuracy": val_metrics.get("accuracy"),
-                "model_stats": self._model.get_model_stats(),
-                "artifact_path": persist_result.get("artifact_path"),
+                "completed_at": completed_at,
+                "val_accuracy": val_accuracy,
+                "val_top_10_accuracy": float(val_metrics.get("top_10_accuracy", 0.0) or 0.0),
+                "model_stats": self.model.get_model_stats(),
+                "artifact_path": self._active_artifact_path,
                 "registry_version": persist_result.get("version"),
+                "active_version": self._active_model_version,
+                "model_accepted": accepted,
+                "version_bumped": accepted,
+                "attempt_count": persist_result.get("attempt_count"),
+                "decision_reason": persist_result.get("decision_reason"),
             }
 
             self._training_history.append(result)
+            self._record_training_metrics(
+                accuracy=val_accuracy,
+                loss=max(0.0, 1.0 - val_accuracy),
+                samples=len(access_data),
+                duration_seconds=round(training_time, 2),
+                status="accepted" if accepted else "retained_existing_version",
+            )
             logger.info(
                 f"Training complete [{reason}]: "
                 f"samples={len(access_data)}, "
-                f"val_acc={val_metrics.get('accuracy', 'N/A')}, "
+                f"val_acc={val_accuracy:.2%}, "
+                f"accepted={accepted}, "
                 f"time={training_time:.1f}s"
             )
             return result
@@ -708,32 +865,63 @@ class ModelTrainer:
         finally:
             self._is_training = False
 
-    def _quick_eval(self, model: EnsembleModel, X_val: np.ndarray, y_val: List[str]) -> Dict[str, Any]:
-        """Quick accuracy evaluation on validation data using RF sub-model."""
+    def _quick_eval(
+        self,
+        model: EnsembleModel,
+        X_val: np.ndarray,
+        y_val: List[str],
+        access_data: List[Dict[str, Any]],
+        validation_offset: int,
+    ) -> Dict[str, Any]:
+        """Evaluate validation split using the same ensemble path used at runtime."""
         try:
-            if model.rf is None or not getattr(model.rf, "is_trained", False):
-                return {}
+            if not getattr(model, "is_trained", False):
+                return {"accuracy": 0.0, "top_10_accuracy": 0.0, "n_samples": 0}
 
-            le = model.rf.label_encoder
-            known = set(le.classes_)
+            top1_hits = 0
+            top10_hits = 0
+            total = 0
 
-            y_true_enc, X_filtered = [], []
-            for label, x in zip(y_val, X_val):
-                if label in known:
-                    y_true_enc.append(le.transform([label])[0])
-                    X_filtered.append(x)
+            for idx, (x, true_key) in enumerate(zip(X_val, y_val)):
+                source_index = validation_offset + idx
+                current_key = access_data[source_index - 1]["key_id"] if source_index > 0 else None
+                top_predictions, _ = model.predict_top_n(
+                    n=10,
+                    X_rf=x.reshape(1, -1),
+                    current_key=current_key,
+                )
 
-            if not X_filtered:
-                return {}
+                predicted_keys: List[str] = []
+                for item in top_predictions:
+                    if isinstance(item, str):
+                        predicted_keys.append(item)
+                    elif isinstance(item, (int, np.integer)):
+                        key_index = int(item)
+                        rf_model = getattr(model, "rf", None)
+                        label_encoder = getattr(rf_model, "label_encoder", None)
+                        classes = getattr(label_encoder, "classes_", None)
+                        if classes is not None and 0 <= key_index < len(classes):
+                            predicted_keys.append(str(classes[key_index]))
+                            continue
+                        known_keys = model.markov.get_known_keys()
+                        if 0 <= key_index < len(known_keys):
+                            predicted_keys.append(str(known_keys[key_index]))
 
-            X_arr = np.array(X_filtered)
-            y_pred = model.rf.predict(X_arr)
-            accuracy = (y_pred == np.array(y_true_enc)).mean()
+                if predicted_keys:
+                    if predicted_keys[0] == true_key:
+                        top1_hits += 1
+                    if true_key in predicted_keys:
+                        top10_hits += 1
+                total += 1
 
-            return {"accuracy": round(float(accuracy), 4), "n_samples": len(X_filtered)}
+            return {
+                "accuracy": round(float(top1_hits / total), 4) if total else 0.0,
+                "top_10_accuracy": round(float(top10_hits / total), 4) if total else 0.0,
+                "n_samples": total,
+            }
         except Exception as e:
             logger.debug(f"Quick eval failed: {e}")
-            return {}
+            return {"accuracy": 0.0, "top_10_accuracy": 0.0, "n_samples": 0}
 
     # ----------------------------------------------------------
     # Online Learning / Incremental Update
@@ -812,7 +1000,7 @@ class ModelTrainer:
         AFTER: computes actual top-1 and top-10 accuracy against true labels.
         """
         if test_data is None:
-            test_data = self._collector.get_access_sequence(window_seconds=300)
+            test_data = self._collector.get_access_sequence(window_seconds=86400)
 
         if not test_data:
             return {"success": False, "reason": "no_test_data"}
@@ -850,7 +1038,7 @@ class ModelTrainer:
                         top10_hits += 1
                 total += 1
 
-            return {
+            result = {
                 "success": True,
                 "test_samples": total,
                 "top_1_accuracy":  round(top1_hits  / total, 4) if total else 0.0,
@@ -858,6 +1046,8 @@ class ModelTrainer:
                 "drift_stats": self._drift_detector.get_stats(),
                 "model_stats": self.model.get_model_stats(),
             }
+            self._last_evaluation = result
+            return result
 
         except Exception as e:
             logger.error(f"Evaluation failed: {e}", exc_info=True)
@@ -868,12 +1058,14 @@ class ModelTrainer:
     # ----------------------------------------------------------
 
     def get_stats(self) -> Dict[str, Any]:
+        incremental_info = self._incremental_persistence.get_info()
         return {
             "training_count":  self._training_count,
             "last_train_time": self._last_train_time,
             "update_interval": self._update_interval,
             "min_samples":     self._min_samples,
             "auto_training":   self._running,
+            "is_training":     self._is_training,
             "drift_stats":     self._drift_detector.get_stats(),
             "model_stats":     self.model.get_model_stats(),
             "collector_stats": self._collector.get_stats(),
@@ -881,10 +1073,13 @@ class ModelTrainer:
             "active_version":  self._active_model_version,
             "artifact_path":   self._active_artifact_path,
             "model_source":    self._model_source,
+            "incremental_info": incremental_info,
+            "last_evaluation": self._last_evaluation,
         }
 
     def get_training_history(self) -> List[Dict]:
-        return self._training_history.copy()
+        incremental_history = self._incremental_persistence.get_history(limit=100)
+        return incremental_history if incremental_history else self._training_history.copy()
 
 
 # ============================================================

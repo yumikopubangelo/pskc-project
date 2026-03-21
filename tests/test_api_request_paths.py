@@ -368,6 +368,100 @@ def test_ml_lifecycle_endpoint_returns_persisted_history_payload(test_client, mo
     assert response.json()["events"][0]["event"] == "promote"
 
 
+def test_ml_evaluate_endpoint_returns_runtime_evaluation_payload(test_client, monkeypatch):
+    monkeypatch.setattr(
+        routes,
+        "get_model_evaluation_payload",
+        lambda: {
+            "success": True,
+            "top_1_accuracy": 0.71,
+            "top_10_accuracy": 0.95,
+            "test_samples": 120,
+            "active_version": "v4",
+        },
+    )
+
+    response = test_client.get("/ml/evaluate")
+
+    assert response.status_code == 200
+    assert response.json()["top_1_accuracy"] == 0.71
+    assert response.json()["active_version"] == "v4"
+
+
+def test_simulation_live_test_endpoint_uses_validation_engine(test_client, monkeypatch):
+    async def fake_run_live_validation(**kwargs):
+        return {
+            "test_id": "live-1",
+            "overall_success": True,
+            "evidence": {"live_accuracy": {"top_1_accuracy": 88.0}},
+            "steps": [],
+        }
+
+    monkeypatch.setattr(routes, "run_live_validation", fake_run_live_validation)
+
+    response = test_client.post("/simulation/live-test", params={"num_requests": 20, "scenario": "test"})
+
+    assert response.status_code == 200
+    assert response.json()["test_id"] == "live-1"
+    assert response.json()["evidence"]["live_accuracy"]["top_1_accuracy"] == 88.0
+
+
+def test_simulation_live_session_start_endpoint_returns_initial_snapshot(test_client, monkeypatch):
+    async def fake_start_live_simulation_session(**kwargs):
+        return {
+            "session_id": "session-1",
+            "status": "starting",
+            "scenario": "test",
+            "traffic_type": "normal",
+        }
+
+    monkeypatch.setattr(routes, "start_live_simulation_session", fake_start_live_simulation_session)
+
+    response = test_client.post("/simulation/live-session/start", params={"scenario": "test"})
+
+    assert response.status_code == 200
+    assert response.json()["session_id"] == "session-1"
+    assert response.json()["status"] == "starting"
+
+
+def test_simulation_live_session_snapshot_endpoint_returns_404_when_missing(test_client, monkeypatch):
+    monkeypatch.setattr(routes, "get_live_simulation_session", lambda session_id: None)
+
+    response = test_client.get("/simulation/live-session/missing")
+
+    assert response.status_code == 404
+
+
+def test_simulation_live_session_stop_endpoint_returns_snapshot(test_client, monkeypatch):
+    monkeypatch.setattr(
+        routes,
+        "stop_live_simulation_session",
+        lambda session_id: {"session_id": session_id, "status": "stopping"},
+    )
+
+    response = test_client.post("/simulation/live-session/live-123/stop")
+
+    assert response.status_code == 200
+    assert response.json()["session_id"] == "live-123"
+    assert response.json()["status"] == "stopping"
+
+
+def test_simulation_live_session_stream_endpoint_returns_sse_snapshot(test_client, monkeypatch):
+    monkeypatch.setattr(
+        routes,
+        "get_live_simulation_session",
+        lambda session_id: {"session_id": session_id, "status": "completed", "requests_processed": 12},
+    )
+
+    with test_client.stream("GET", "/simulation/live-session/live-123/stream") as response:
+        body = "".join(chunk.decode("utf-8") if isinstance(chunk, bytes) else chunk for chunk in response.iter_text())
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/event-stream")
+    assert "event: snapshot" in body
+    assert '"session_id": "live-123"' in body
+
+
 def test_ml_promote_endpoint_maps_integrity_failures_to_409(test_client, monkeypatch):
     monkeypatch.setattr(
         routes,

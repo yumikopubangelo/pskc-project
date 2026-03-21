@@ -59,7 +59,7 @@ function Overview() {
           totalRequests: metrics.total_requests || 0,
           activeKeys: metrics.active_keys || 0,
           keysCached: cacheStats.size || 0,
-          modelStatus: modelStatus.status || 'unknown',
+          modelStatus: modelStatus.status_code || 'unknown',
           modelLoaded: Boolean(modelStatus.model_loaded),
           sampleCount: modelStatus.sample_count || 0,
         })

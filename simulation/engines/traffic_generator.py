@@ -61,6 +61,58 @@ class TrafficParams:
             seasonality=True
         )
 
+    @classmethod
+    def normal_day(cls) -> 'TrafficParams':
+        """Normal day traffic for a typical web service."""
+        return cls(
+            base_rps=200.0,
+            peak_multiplier=3.0,
+            peak_start_hour=14,
+            peak_end_hour=17,
+            burst_probability=0.1,
+            burst_size=10,
+            seasonality=True
+        )
+
+    @classmethod
+    def heavy_load(cls) -> 'TrafficParams':
+        """Sustained heavy load, like a launch day."""
+        return cls(
+            base_rps=1000.0,
+            peak_multiplier=2.0,  # Already high base
+            peak_start_hour=9,
+            peak_end_hour=18,
+            burst_probability=0.2,
+            burst_size=50,
+            seasonality=False # Sustained
+        )
+
+    @classmethod
+    def prime_time(cls) -> 'TrafficParams':
+        """Peak usage in the evening, e.g. streaming service."""
+        return cls(
+            base_rps=800.0,
+            peak_multiplier=4.0,
+            peak_start_hour=19,
+            peak_end_hour=23,
+            burst_probability=0.15,
+            burst_size=80,
+            seasonality=True
+        )
+
+    @classmethod
+    def overload_degradation(cls) -> 'TrafficParams':
+        """Extreme traffic causing system degradation."""
+        return cls(
+            base_rps=2000.0,
+            peak_multiplier=5.0,
+            peak_start_hour=0, # All day
+            peak_end_hour=23,
+            burst_probability=0.5, # Very bursty
+            burst_size=200,
+            seasonality=False
+        )
+
 
 class TrafficGenerator:
     """
@@ -95,6 +147,10 @@ class TrafficGenerator:
     def _get_profile(self, profile: str) -> TrafficParams:
         """Get preset traffic profile"""
         profiles = {
+            "normal": TrafficParams.normal_day(),
+            "heavy": TrafficParams.heavy_load(),
+            "prime_time": TrafficParams.prime_time(),
+            "overload": TrafficParams.overload_degradation(),
             "spotify": TrafficParams.spotify(),
             "netflix": TrafficParams.netflix(),
             "aws": TrafficParams.aws_kms(),
@@ -108,7 +164,7 @@ class TrafficGenerator:
                 seasonality=False
             )
         }
-        return profiles.get(profile, TrafficParams.spotify())
+        return profiles.get(profile, TrafficParams.normal_day())
     
     def get_current_rps(self, timestamp: datetime = None) -> float:
         """
