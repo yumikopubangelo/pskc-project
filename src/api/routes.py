@@ -28,7 +28,7 @@ import ipaddress
 import logging
 import time
 from contextlib import asynccontextmanager
-from fastapi import APIRouter, BackgroundTasks, HTTPException, status, Request, Depends, FastAPI, Query
+from fastapi import APIRouter, BackgroundTasks, HTTPException, status, Request, Depends, FastAPI, Query, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response, StreamingResponse
 from typing import Optional
@@ -1156,8 +1156,126 @@ async def train_model_improved(
         )
 
 
+@router.websocket("/ml/training/progress/stream")
+async def websocket_training_progress(websocket: WebSocket):
+    """
+    WebSocket endpoint for real-time training progress updates.
+    
+    Clients connect to this WebSocket to receive real-time TrainingProgressUpdate
+    objects as training progresses.
+    
+    Usage (JavaScript):
+    ```javascript
+    const ws = new WebSocket('ws://localhost:8000/ml/training/progress/stream');
+    ws.onmessage = (event) => {
+      const update = JSON.parse(event.data);
+      console.log(`${update.phase}: ${update.progress_percent}%`);
+    };
+    ```
+    
+    Sends JSON objects with structure:
+    {
+      "phase": "training_lstm",
+      "progress_percent": 45.5,
+      "current_step": 15,
+      "total_steps": 50,
+      "message": "Epoch 15/50 - Accuracy improving",
+      "timestamp": "2024-01-02T12:00:00Z",
+      "details": {
+        "train_accuracy": 0.78,
+        "val_accuracy": 0.75,
+        ...
+      }
+    }
+    """
+    from src.api.training_progress import get_training_progress_tracker, TrainingPhase
+    
+    await websocket.accept()
+    tracker = get_training_progress_tracker()
+    
+    # Track this connection
+    client_id = id(websocket)
+    logger.info(f"WebSocket client connected: {client_id}")
+    
+    try:
+        # Send initial state
+        summary = tracker.get_progress_summary()
+        latest = summary.get("latest_update")
+        if latest:
+            await websocket.send_json(latest)
+        
+        # Keep connection alive and send updates
+        while True:
+            # Check if new updates available
+            latest = tracker.get_latest_update()
+            if latest:
+                await websocket.send_json(latest.to_dict())
+            
+            # Small delay to avoid busy loop
+            await asyncio.sleep(0.5)
+            
+    except WebSocketDisconnect:
+        logger.info(f"WebSocket client disconnected: {client_id}")
+    except Exception as e:
+        logger.exception(f"WebSocket error for client {client_id}: {e}")
+        await websocket.close(code=1011, reason="Internal error")
 
-# ============================================================
+
+@router.websocket("/ml/training/generate-progress/stream")
+async def websocket_data_generation_progress(websocket: WebSocket):
+    """
+    WebSocket endpoint for real-time data generation progress.
+    
+    Streams data generation progress with ETA updates.
+    
+    Usage (JavaScript):
+    ```javascript
+    const ws = new WebSocket('ws://localhost:8000/ml/training/generate-progress/stream');
+    ws.onmessage = (event) => {
+      const update = JSON.parse(event.data);
+      console.log(`${update.percent}% - ETA: ${update.eta_seconds}s`);
+    };
+    ```
+    """
+    from src.api.training_progress import get_data_generation_tracker
+    
+    await websocket.accept()
+    tracker = get_data_generation_tracker()
+    
+    client_id = id(websocket)
+    logger.info(f"Data generation WebSocket client connected: {client_id}")
+    
+    try:
+        last_processed = -1
+        
+        while True:
+            # Only send if progress changed
+            if tracker.processed_events > last_processed:
+                summary = tracker.get_summary()
+                update = {
+                    **summary,
+                    "message": f"Generating {summary.get('total', 0)} training events...",
+                    "timestamp": datetime.utcnow().isoformat() + "Z",
+                }
+                await websocket.send_json(update)
+                last_processed = tracker.processed_events
+            
+            # Check if generation complete
+            if (tracker.processed_events >= tracker.total_events and 
+                tracker.total_events > 0):
+                logger.info(f"Data generation complete for client {client_id}")
+                break
+            
+            await asyncio.sleep(0.5)
+            
+    except WebSocketDisconnect:
+        logger.info(f"Data generation WebSocket client disconnected: {client_id}")
+    except Exception as e:
+        logger.exception(f"Data generation WebSocket error for client {client_id}: {e}")
+        await websocket.close(code=1011, reason="Internal error")
+
+
+
 # Simulation Endpoints
 # ============================================================
 
