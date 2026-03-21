@@ -368,3 +368,77 @@ class PipelineStatusResponse(BaseModel):
     started_at: str
     completed_at: Optional[str] = None
     timestamp: str = Field(default_factory=lambda: datetime.utcnow().isoformat())
+
+
+# ============================================================
+# Training Progress Schemas
+# ============================================================
+
+class TrainingProgressUpdate(BaseModel):
+    """Real-time training progress update"""
+    phase: str  # TrainingPhase value
+    progress_percent: float = Field(ge=0, le=100)
+    current_step: int = Field(ge=0)
+    total_steps: int = Field(ge=0)
+    message: str
+    timestamp: str
+    details: Optional[Dict[str, Any]] = None
+
+
+class TrainingMetrics(BaseModel):
+    """Training metrics at current step"""
+    train_accuracy: Optional[float] = None
+    val_accuracy: Optional[float] = None
+    train_loss: Optional[float] = None
+    val_loss: Optional[float] = None
+    samples_processed: int = 0
+    total_samples: int = 0
+    epoch: int = 0
+    total_epochs: int = 0
+
+
+class TrainingProgressResponse(BaseModel):
+    """Current training progress summary"""
+    current_phase: str
+    progress_percent: float = Field(ge=0, le=100)
+    latest_update: Optional[TrainingProgressUpdate] = None
+    metrics: TrainingMetrics
+    total_updates: int
+    elapsed_seconds: float
+    estimated_remaining_seconds: Optional[float] = None
+
+
+class DataGenerationProgressUpdate(BaseModel):
+    """Data generation progress update"""
+    processed: int
+    total: int
+    percent: float = Field(ge=0, le=100)
+    elapsed_seconds: float
+    eta_seconds: float
+    events_per_second: float
+    timestamp: str
+
+
+class DataGenerationProgressResponse(BaseModel):
+    """Data generation progress summary"""
+    processed: int
+    total: int
+    percent: float = Field(ge=0, le=100)
+    elapsed_seconds: float
+    eta_seconds: float
+    events_per_second: float
+    message: str = "Generating training data..."
+    timestamp: str = Field(default_factory=lambda: datetime.utcnow().isoformat())
+
+
+class TrainingResultResponse(BaseModel):
+    """Response after training completion"""
+    success: bool
+    model_version: Optional[str] = None
+    accuracy: Optional[float] = None
+    data_size: int
+    features_count: int
+    training_time_seconds: float
+    metrics: Optional[Dict[str, Any]] = None
+    message: str
+    timestamp: str = Field(default_factory=lambda: datetime.utcnow().isoformat())
