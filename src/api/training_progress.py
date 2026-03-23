@@ -67,12 +67,35 @@ class TrainingMetrics:
         return asdict(self)
 
 
+REDIS_PROGRESS_KEY = "pskc:ml:training_progress"
+
+
+def _get_redis():
+    """Try to get a Redis client; return None if unavailable."""
+    try:
+        import os
+        import redis as _redis
+        r = _redis.Redis(
+            host=os.environ.get("REDIS_HOST", "redis"),
+            port=int(os.environ.get("REDIS_PORT", "6379")),
+            db=int(os.environ.get("REDIS_DB", "0")),
+            password=os.environ.get("REDIS_PASSWORD", "pskc_redis_secret"),
+            decode_responses=True,
+            socket_connect_timeout=2,
+        )
+        r.ping()
+        return r
+    except Exception:
+        return None
+
+
 class TrainingProgressTracker:
     """
     Track training progress with support for real-time updates.
     Designed for use with WebSocket and async streaming.
+    State is also persisted to Redis so clients can resume after page reload.
     """
-    
+
     def __init__(self, max_history: int = 1000):
         self.max_history = max_history
         self.updates: List[TrainingProgressUpdate] = []
@@ -80,12 +103,45 @@ class TrainingProgressTracker:
         self.current_metrics = TrainingMetrics()
         self.start_time: Optional[float] = None
         self.end_time: Optional[float] = None
-        
+
         # For progress callbacks
         self._callbacks: List[Callable[[TrainingProgressUpdate], None]] = []
-        
+
         # Thread-safe queue for async streaming
         self._update_queue: Queue = Queue()
+
+    def _persist_to_redis(self, update: "TrainingProgressUpdate") -> None:
+        """Save latest progress state to Redis for cross-session recovery."""
+        try:
+            r = _get_redis()
+            if not r:
+                return
+            payload = {
+                **update.to_dict(),
+                "elapsed_seconds": max(
+                    0.0,
+                    (self.end_time or datetime.utcnow().timestamp())
+                    - (self.start_time or datetime.utcnow().timestamp()),
+                ),
+                "start_time": self.start_time,
+            }
+            r.setex(REDIS_PROGRESS_KEY, 3600, json.dumps(payload))  # TTL 1 hour
+        except Exception as e:
+            logger.debug(f"Could not persist progress to Redis: {e}")
+
+    @staticmethod
+    def load_from_redis() -> Optional[Dict[str, Any]]:
+        """Load last known progress state from Redis (for page-reload resume)."""
+        try:
+            r = _get_redis()
+            if not r:
+                return None
+            raw = r.get(REDIS_PROGRESS_KEY)
+            if raw:
+                return json.loads(raw)
+            return None
+        except Exception:
+            return None
     
     def add_callback(self, callback: Callable[[TrainingProgressUpdate], None]) -> None:
         """Register callback for progress updates."""
@@ -146,6 +202,9 @@ class TrainingProgressTracker:
         # Queue for async streaming
         self._update_queue.put(update)
         
+        # Persist to Redis immediately (for page-reload recovery)
+        self._persist_to_redis(update)
+        
         # Notify callbacks
         self._notify_callbacks(update)
         
@@ -181,6 +240,13 @@ class TrainingProgressTracker:
             "start_time": datetime.fromtimestamp(self.start_time).isoformat() if self.start_time else None,
             "elapsed_seconds": (self.end_time or datetime.utcnow().timestamp()) - (self.start_time or 0),
         }
+    
+    def get_last_saved_state(self) -> Optional[Dict[str, Any]]:
+        """
+        Get the last saved progress state from Redis.
+        Used by WebSocket clients to resume on connect.
+        """
+        return self.load_from_redis()
     
     async def stream_progress_updates(self):
         """

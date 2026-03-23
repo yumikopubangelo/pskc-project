@@ -444,3 +444,88 @@ class TrainingResultResponse(BaseModel):
     metrics: Optional[Dict[str, Any]] = None
     message: str
     timestamp: str = Field(default_factory=lambda: datetime.utcnow().isoformat())
+
+
+# ============================================================
+# Simulation Learning Schemas (Phase 3D)
+# ============================================================
+
+class SimulationEventRequest(BaseModel):
+    """Single simulation event from simulation service"""
+    simulation_id: str = Field(..., description="Simulation ID")
+    timestamp: float = Field(..., description="Event timestamp (Unix)")
+    key_id: str = Field(..., description="Key ID accessed")
+    service_id: str = Field(..., description="Service ID")
+    access_type: str = Field(default="read", description="read/write/delete")
+    latency_ms: float = Field(default=0.0, description="Latency in milliseconds")
+    cache_hit: bool = Field(default=False, description="Cache hit or miss")
+    metadata: Optional[Dict[str, Any]] = Field(default=None, description="Additional metadata")
+
+
+class SimulationEventsRequest(BaseModel):
+    """Batch of simulation events"""
+    events: List[SimulationEventRequest] = Field(..., description="List of events")
+    simulation_metadata: Optional[Dict[str, Any]] = Field(
+        default=None, 
+        description="Simulation metadata (scenario, profile, duration)"
+    )
+
+
+class SimulationEventsResponse(BaseModel):
+    """Response after receiving simulation events"""
+    success: bool
+    message: str
+    events_processed: int
+    drift_detected: bool
+    drift_score: Optional[float] = None
+    timestamp: str = Field(default_factory=lambda: datetime.utcnow().isoformat())
+
+
+class DriftStatusResponse(BaseModel):
+    """Current drift status between simulation and training patterns"""
+    drift_score: float = Field(ge=0, le=1, description="Overall drift score (0-1)")
+    frequency_divergence: float = Field(ge=0, le=1, description="Key frequency divergence")
+    temporal_divergence: float = Field(ge=0, le=1, description="Temporal pattern divergence")
+    sequence_divergence: float = Field(ge=0, le=1, description="Sequence pattern divergence")
+    should_retrain: bool = Field(description="Should model be retrained")
+    major_changes: List[str] = Field(default_factory=list, description="Major pattern changes")
+    recommendations: List[str] = Field(default_factory=list, description="Action recommendations")
+    simulation_event_count: int = Field(description="Events available for retraining")
+    last_analysis_timestamp: float = Field(description="When drift was last analyzed")
+    next_retraining_available_at: Optional[float] = Field(
+        default=None, 
+        description="When cooldown expires (Unix timestamp)"
+    )
+    cooldown_remaining_seconds: Optional[float] = Field(
+        default=None,
+        description="Cooldown remaining in seconds"
+    )
+    timestamp: str = Field(default_factory=lambda: datetime.utcnow().isoformat())
+
+
+class RetrainingFromSimulationRequest(BaseModel):
+    """Request to retrain model from simulation data"""
+    force: bool = Field(
+        default=False, 
+        description="Force retraining even if cooldown active"
+    )
+    description: Optional[str] = Field(
+        default=None,
+        description="Description of retraining reason"
+    )
+    use_events_since: Optional[float] = Field(
+        default=None,
+        description="Only use simulation events after this timestamp"
+    )
+
+
+class RetrainingFromSimulationResponse(BaseModel):
+    """Response when simulation retraining starts"""
+    success: bool
+    message: str
+    retraining_id: str = Field(description="Unique retraining ID")
+    drift_score: float = Field(description="Drift score that triggered this")
+    events_used: int = Field(description="Number of simulation events used")
+    expected_duration_seconds: int = Field(description="Estimated training duration")
+    # Continue with training progress updates via WebSocket
+    timestamp: str = Field(default_factory=lambda: datetime.utcnow().isoformat())

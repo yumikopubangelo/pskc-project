@@ -755,17 +755,23 @@ def generate_training_data(
     
     traffic_config = traffic_configs.get(traffic_profile, traffic_configs["normal"])
     
+    # Progress tracker was already reset and initialised in the endpoint
+    # handler before this function was scheduled on the executor.
+    from src.api.training_progress import get_data_generation_tracker
+    gen_tracker = get_data_generation_tracker()
+
     # Generate events
     events = []
     now = datetime.now(timezone.utc)
     base_time = now - timedelta(minutes=30)  # Use recent 30 minutes for training data
-    
+
     # Create hot keys (frequently accessed)
     hot_keys = [f"{random.choice(key_patterns)}{random.randint(1, num_keys // 5)}" for _ in range(int(num_keys * traffic_config["hot_key_ratio"]))]
-    
+
     # Track sequential access patterns
     last_key = None
-    
+    _progress_step = max(1, num_events // 20)  # report every 5%
+
     for i in range(num_events):
         # Determine timestamp (spread over the recent window for training)
         # Use last 30 minutes to ensure events are within training window
@@ -819,12 +825,20 @@ def generate_training_data(
         })
         
         last_key = key_id
-    
+
+        # Update progress tracker periodically
+        if (i + 1) % _progress_step == 0 or (i + 1) == num_events:
+            gen_tracker.update(i + 1)
+
     # Sort by timestamp
     events.sort(key=lambda x: x["timestamp"])
     
     # Import events into collector
     imported = collector.import_events(events)
+    
+    # CRITICAL: Flush all events to Redis immediately so ML Worker can detect them
+    # (Otherwise last 1-49 events won't be in Redis until next periodic save)
+    collector.flush_to_redis()
     
     stats = collector.get_stats()
     
