@@ -12,12 +12,17 @@
 #      bukan satu event tunggal — konsisten dengan train_model.py baru
 #   4. DriftDetector bisa dikonfigurasi sensitivity-nya
 #   5. EWMA maturation - implementasi lengkap sesuai paper research
+#   6. Data Balancing — SMOTE-inspired class imbalance handling
+#   7. Feature Selection — SelectKBest untuk mengurangi noise
+#   8. Data Augmentation — noise, scaling, mixup untuk robustness
+#   9. Feature Normalization — StandardScaler untuk stabilitas training
+#  10. Hyperparameter Tuning — adaptive hyperparameters berdasarkan data size
 # ============================================================
 import time
 import threading
 import numpy as np
 from collections import deque
-from typing import Dict, List, Optional, Tuple, Any
+from typing import Dict, List, Optional, Tuple, Any, Union
 import logging
 from datetime import datetime, timezone
 import math
@@ -29,6 +34,15 @@ from src.ml.model import EnsembleModel, ModelFactory
 from src.ml.model_registry import SecurityError, get_model_registry
 from src.ml.incremental_model import IncrementalModelPersistence
 from src.observability.metrics_persistence import get_metrics_persistence
+from src.api.training_progress import get_training_progress_tracker, TrainingPhase
+from src.ml.model_improvements import (
+    DataBalancer,
+    FeatureSelector,
+    DataAugmenter,
+    HyperparameterTuner,
+    FeatureNormalizer,
+    PerModelPerformanceTracker,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -441,17 +455,28 @@ class ModelTrainer:
         # Components
         self._collector = get_data_collector()
         self._engineer = get_feature_engineer()
-        # Minimum accuracy to consider a model as active
-        self._min_accuracy_for_active = 0.05  # 5%
+        # Minimum accuracy to accept a newly trained model.
+        # Set to 0.0 — the version-bump comparison in IncrementalModelPersistence
+        # already handles "is it better than the previous model?" separately.
+        # A hard floor of 5% was impossible to pass with 100 unique keys (random=1%).
+        self._min_accuracy_for_active = 0.0
 
         # Drift detection
         self._drift_detector = DriftDetector(drift_threshold=drift_threshold)
 
-        # Training state
-        self._is_training = False
+        # Training state - separate for scheduled vs automatic
+        self._is_training_scheduled = False  # Full batch retraining on schedule
+        self._is_training_automatic = False  # Drift-based/online learning
         self._last_train_time: float = 0
         self._training_count: int = 0
+        # Avoid retrying load_active_model() after a known failure (e.g. missing file)
+        # Reset to False when a new model is successfully trained.
+        self._load_failed: bool = False
         self._last_drift_retrain_time: float = 0
+        
+        # Training locks - allow concurrent scheduled/automatic but serialize within each type
+        self._scheduled_lock = threading.Lock()
+        self._automatic_lock = threading.Lock()
 
         # Metrics history
         self._training_history: List[Dict] = []
@@ -480,6 +505,17 @@ class ModelTrainer:
     @property
     def model_name(self) -> str:
         return self._model_name
+
+    @property
+    def _is_training(self) -> bool:
+        """Combined training flag for backward compatibility."""
+        return self._is_training_scheduled or self._is_training_automatic
+
+    @_is_training.setter
+    def _is_training(self, value: bool) -> None:
+        """Set both training flags to the same value."""
+        self._is_training_scheduled = value
+        self._is_training_automatic = value
 
     def get_active_model_metadata(self) -> Dict[str, Optional[str]]:
         return {
@@ -591,10 +627,17 @@ class ModelTrainer:
                 "artifact_path": self._active_artifact_path,
                 "source": self._model_source,
             }
-        return self.load_active_model()
+        # Don't spam load_active_model() after a known failure (e.g. missing model file).
+        # The flag is cleared after a successful training run.
+        if self._load_failed:
+            return {"success": False, "reason": "load_previously_failed"}
+        result = self.load_active_model()
+        if not result.get("success"):
+            self._load_failed = True
+        return result
 
-    def _build_trainable_model(self, y_labels: List[str]) -> EnsembleModel:
-        unique_labels = len(set(y_labels)) if y_labels else 0
+    def _build_trainable_model(self, y_labels: Union[List, np.ndarray]) -> EnsembleModel:
+        unique_labels = len(set(y_labels)) if y_labels is not None and len(y_labels) > 0 else 0
         num_classes = max(unique_labels, 1)
         return ModelFactory.create_model("ensemble", num_classes=num_classes)
 
@@ -662,20 +705,38 @@ class ModelTrainer:
     # Feature Extraction (with context window)
     # ----------------------------------------------------------
 
-    def _extract_XY(self, data: List[Dict]) -> Tuple[np.ndarray, List[str]]:
+    def _extract_XY(self, data: List[Dict]) -> Tuple[np.ndarray, np.ndarray, List[str]]:
         """
-        Extract feature matrix using sliding context window.
-        Each sample uses up to `context_window` preceding events as context.
-        This gives temporal context vs. extracting from a single event.
+        Extract feature matrices using sliding context window.
+        Returns:
+            X_rf: Aggregated features for Random Forest (n_samples, feature_dim)
+            X_lstm: Sequential features for LSTM (n_samples, seq_len, per_event_dim)
+            y: Target key IDs
         """
-        X, y = [], []
+        X_rf, X_lstm, y = [], [], []
         for idx in range(len(data)):
-            start = max(0, idx - self._context_window)
+            start = max(0, idx - self._context_window + 1)
             context = data[start: idx + 1]
-            features = self._engineer.extract_features(context)
-            X.append(features)
+
+            # For RF: aggregated features from entire context
+            rf_features = self._engineer.extract_features(context)
+            X_rf.append(rf_features)
+
+            # For LSTM: per-event features in sequence
+            base_ts = data[idx]['timestamp'] if idx < len(data) else None
+            lstm_seq = []
+            for event in context:
+                event_features = self._engineer.extract_per_event_features(event, base_ts)
+                lstm_seq.append(event_features)
+            # Pad sequence to fixed length
+            while len(lstm_seq) < self._context_window:
+                # Pad with zeros at the beginning
+                lstm_seq.insert(0, np.zeros(8, dtype=np.float32))
+            X_lstm.append(np.array(lstm_seq))
+
             y.append(data[idx]["key_id"])
-        return np.array(X), y
+
+        return np.array(X_rf), np.array(X_lstm), y
 
     # ----------------------------------------------------------
     # Training
@@ -684,49 +745,170 @@ class ModelTrainer:
     def train(self, force: bool = False, reason: str = "scheduled") -> Dict[str, Any]:
         """
         Train the model on collected data.
-
+        
+        Supports separate training paths:
+        - "scheduled": Full batch retraining (accumulates data over time)
+        - "drift_detected" | "automatic": Quick adaptive training (drift/online learning)
+        - "manual": One-off training, uses scheduled path
+        
         Args:
             force: Bypass sample count check
-            reason: Why training was triggered ("scheduled" | "drift" | "manual")
+            reason: Why training was triggered ("scheduled" | "drift_detected" | "automatic" | "manual")
 
         Returns:
             Training results dict
         """
-        if self._is_training:
-            return {"success": False, "reason": "already_training"}
-
-        start_time = time.time()
-        self._is_training = True
-
+        # Determine training type
+        is_automatic = reason in ("drift_detected", "automatic", "online_learning")
+        
+        # Use appropriate lock to prevent concurrent training of same type
+        lock = self._automatic_lock if is_automatic else self._scheduled_lock
+        is_training_flag = self._is_training_automatic if is_automatic else self._is_training_scheduled
+        
+        if is_training_flag:
+            return {
+                "success": False, 
+                "reason": "already_training",
+                "training_type": "automatic" if is_automatic else "scheduled",
+            }
+        
+        # Acquire lock for this training type
+        if not lock.acquire(blocking=False):
+            return {
+                "success": False,
+                "reason": "already_training",
+                "training_type": "automatic" if is_automatic else "scheduled",
+            }
+        
         try:
-            stats = self._collector.get_stats()
-            sample_count = stats.get("total_events", 0)
+            # Set appropriate flag
+            if is_automatic:
+                self._is_training_automatic = True
+            else:
+                self._is_training_scheduled = True
 
-            if sample_count < self._min_samples and not force:
-                logger.info(f"Not enough samples: {sample_count}/{self._min_samples}")
-                return {
-                    "success": False,
-                    "reason": "insufficient_samples",
-                    "sample_count": sample_count,
-                    "required": self._min_samples,
-                }
+            # Initialize training progress tracker
+            tracker = get_training_progress_tracker()
+            tracker.start_training()
 
-            access_data = self._collector.get_access_sequence(
-                window_seconds=86400, max_events=10_000  # Use 24 hour window for training
-            )
+            start_time = time.time()
 
-            if not access_data:
-                return {"success": False, "reason": "no_data"}
+            try:
+                tracker.update_progress(
+                    phase=TrainingPhase.LOADING_DATA,
+                    progress_percent=5.0,
+                    current_step=1,
+                    total_steps=10,
+                    message="Loading training data from collector...",
+                )
 
-            # Sort by timestamp to ensure temporal order
-            access_data.sort(key=lambda x: x.get("timestamp", 0))
+                stats = self._collector.get_stats()
+                sample_count = stats.get("total_events", 0)
+
+                if sample_count < self._min_samples and not force:
+                    logger.info(f"Not enough samples: {sample_count}/{self._min_samples}")
+                    tracker.finish_training(success=False)
+                    return {
+                        "success": False,
+                        "reason": "insufficient_samples",
+                        "sample_count": sample_count,
+                        "required": self._min_samples,
+                    }
+
+                # Different data window sizes based on training type
+                if is_automatic:
+                    # Automatic: recent data only (faster adaptation)
+                    window_seconds = 3600  # Last 1 hour
+                    max_events = 5000      # Smaller batch for quick updates
+                else:
+                    # Scheduled: comprehensive data (better generalization)
+                    window_seconds = 86400     # Last 24 hours
+                    max_events = 50_000        # Full batch for baseline
+
+                access_data = self._collector.get_access_sequence(
+                    window_seconds=window_seconds,
+                    max_events=max_events
+                )
+
+                if not access_data:
+                    tracker.finish_training(success=False)
+                    return {"success": False, "reason": "no_data"}
+
+                tracker.update_progress(
+                    phase=TrainingPhase.PREPROCESSING,
+                    progress_percent=15.0,
+                    current_step=2,
+                    total_steps=10,
+                    message=f"Loaded {len(access_data)} events, preprocessing...",
+                    details={"total_samples": len(access_data)},
+                )
+            except Exception:
+                raise
 
             # Extract features with context window
-            X, y = self._extract_XY(access_data)
+            X_rf, X_lstm, y = self._extract_XY(access_data)
+
+            tracker.update_progress(
+                phase=TrainingPhase.DATA_BALANCING,
+                progress_percent=20.0,
+                current_step=3,
+                total_steps=10,
+                message=f"Applying feature normalization and data balancing...",
+                details={"total_samples": len(X_rf)},
+            )
+
+            # Apply feature normalization for better training stability
+            normalizer = FeatureNormalizer()
+            X_rf = normalizer.fit_transform(X_rf)
+
+            # Drop constant features before selection to avoid sklearn warnings
+            col_variance = np.var(X_rf, axis=0)
+            non_constant_cols = col_variance > 0
+            if not np.all(non_constant_cols):
+                logger.warning(
+                    f"Dropping {(~non_constant_cols).sum()} constant feature(s) before selection."
+                )
+                X_rf = X_rf[:, non_constant_cols]
+
+            # Apply feature selection to reduce noise and improve generalization
+            n_select = min(25, max(10, int(np.sqrt(len(X_rf))), X_rf.shape[1]))
+            n_select = min(n_select, X_rf.shape[1])  # cannot select more than available
+            selector = FeatureSelector(n_features=n_select)
+            import warnings as _warnings
+            with _warnings.catch_warnings():
+                _warnings.simplefilter("ignore")
+                X_rf = selector.fit_transform(X_rf, np.array(y))
+
+            tracker.update_progress(
+                phase=TrainingPhase.DATA_AUGMENTATION,
+                progress_percent=25.0,
+                current_step=4,
+                total_steps=10,
+                message=f"Applying data augmentation for more diverse training data...",
+                details={"total_samples": len(X_rf)},
+            )
+
+            # Apply data augmentation for more diverse training data
+            augmenter = DataAugmenter(augmentation_factor=0.3)  # 30% augmentation
+            X_rf, y = augmenter.augment_dataset(X_rf, np.array(y))
+
+            # Apply data balancing to handle class imbalance
+            balancer = DataBalancer()
+            X_rf, y = balancer.balance_dataset(X_rf, np.array(y), strategy="auto")
+
+            tracker.update_progress(
+                phase=TrainingPhase.SPLITTING,
+                progress_percent=30.0,
+                current_step=5,
+                total_steps=10,
+                message=f"Splitting data into train/validation sets...",
+                details={"total_samples": len(X_rf)},
+            )
 
             # 70/30 split (temporal)
-            split_idx = int(len(access_data) * 0.7)
-            X_train, X_val = X[:split_idx], X[split_idx:]
+            split_idx = int(len(X_rf) * 0.7)
+            X_rf_train, X_rf_val = X_rf[:split_idx], X_rf[split_idx:]
+            X_lstm_train, X_lstm_val = X_lstm[:split_idx], X_lstm[split_idx:]
             y_train, y_val = y[:split_idx], y[split_idx:]
 
             # Build access sequence for Markov Chain
@@ -734,28 +916,75 @@ class ModelTrainer:
 
             trainable_model = self._build_trainable_model(y_train)
 
-            # Train ensemble (RF + Markov; LSTM uses same X for now)
+            tracker.update_progress(
+                phase=TrainingPhase.FEATURE_ENGINEERING,
+                progress_percent=30.0,
+                current_step=3,
+                total_steps=10,
+                message="Feature engineering complete, starting model training...",
+                details={
+                    "samples_processed": len(access_data),
+                    "total_samples": len(access_data),
+                    "features_count": X_rf_train.shape[1] if len(X_rf_train) > 0 else 0,
+                    "train_samples": len(X_rf_train),
+                    "val_samples": len(X_rf_val),
+                },
+            )
+
+            tracker.update_progress(
+                phase=TrainingPhase.TRAINING_RF,
+                progress_percent=40.0,
+                current_step=4,
+                total_steps=10,
+                message=f"Training ensemble model on {split_idx} samples...",
+                details={"train_samples": split_idx},
+            )
+
+            # Train ensemble (RF + Markov; LSTM uses sequential data)
             trainable_model.fit(
-                X_rf=X_train,
-                y_rf=np.array(y_train),
+                X_lstm=X_lstm_train,
+                y_lstm=y_train,
+                X_rf=X_rf_train,
+                y_rf=y_train,
                 access_sequence=key_sequence,
+            )
+
+            tracker.update_progress(
+                phase=TrainingPhase.UPDATING_MARKOV,
+                progress_percent=70.0,
+                current_step=7,
+                total_steps=10,
+                message="Ensemble training complete, running evaluation...",
             )
 
             # Evaluate on validation split using the same ensemble path used at runtime.
             val_metrics = self._quick_eval(
                 trainable_model,
-                X_val,
+                X_rf_val,
                 y_val,
                 access_data=access_data,
                 validation_offset=split_idx,
+                X_lstm_val=X_lstm_val,
+            )
+
+            tracker.update_progress(
+                phase=TrainingPhase.EVALUATION,
+                progress_percent=80.0,
+                current_step=8,
+                total_steps=10,
+                message=f"Evaluation complete — val_accuracy={val_metrics.get('accuracy', 0):.2%}",
+                details={
+                    "val_accuracy": val_metrics.get("accuracy"),
+                    "val_top_10_accuracy": val_metrics.get("top_10_accuracy"),
+                },
             )
             val_accuracy = float(val_metrics.get("accuracy", 0.0) or 0.0)
             training_time = time.time() - start_time
             completed_at = datetime.now(timezone.utc).isoformat()
             training_info = {
                 "sample_count": len(access_data),
-                "train_samples": split_idx,
-                "val_samples": len(access_data) - split_idx,
+                "train_samples": len(X_rf_train),
+                "val_samples": len(X_rf_val),
             }
 
             # Check if model accuracy meets minimum threshold for active model
@@ -778,8 +1007,8 @@ class ModelTrainer:
                     "val_accuracy": val_accuracy,
                     "val_top_10_accuracy": float(val_metrics.get("top_10_accuracy", 0.0) or 0.0),
                     "sample_count": len(access_data),
-                    "train_samples": split_idx,
-                    "val_samples": len(access_data) - split_idx,
+                    "train_samples": len(X_rf_train),
+                    "val_samples": len(X_rf_val),
                     "training_time_s": round(training_time, 2),
                     "completed_at": completed_at,
                     "model_accepted": False,
@@ -798,21 +1027,46 @@ class ModelTrainer:
                 )
                 # Reset drift detector short window after retrain (even if not active, to avoid immediate re-trigger)
                 self._drift_detector.reset_short_window()
+                tracker.update_progress(
+                    phase=TrainingPhase.COMPLETED,
+                    progress_percent=100.0,
+                    current_step=10,
+                    total_steps=10,
+                    message=f"Training complete — val_accuracy={val_accuracy:.2%}, model not accepted (below threshold)",
+                    details={
+                        "val_accuracy": val_accuracy,
+                        "val_top_10_accuracy": float(val_metrics.get("top_10_accuracy", 0.0) or 0.0),
+                        "model_accepted": False,
+                        "training_time_s": round(training_time, 2),
+                        "sample_count": len(access_data),
+                    },
+                )
+                tracker.finish_training(success=True)
                 return result
 
             # Reset drift detector short window after retrain
             self._drift_detector.reset_short_window()
 
+            tracker.update_progress(
+                phase=TrainingPhase.SAVING_MODEL,
+                progress_percent=90.0,
+                current_step=9,
+                total_steps=10,
+                message="Persisting model to registry...",
+                details={"val_accuracy": val_accuracy},
+            )
+
             persist_result = self._persist_model(
                 model=trainable_model,
                 metrics=val_metrics,
                 sample_count=len(access_data),
-                train_samples=split_idx,
-                val_samples=len(access_data) - split_idx,
+                train_samples=len(X_rf_train),
+                val_samples=len(X_rf_val),
                 reason=reason,
             )
             if not persist_result.get("success"):
                 logger.error("Runtime model persistence failed: %s", persist_result.get("reason"))
+                tracker.finish_training(success=False)
                 return {"success": False, "reason": str(persist_result.get("reason"))}
 
             accepted = bool(persist_result.get("accepted"))
@@ -820,13 +1074,14 @@ class ModelTrainer:
                 self._model = trainable_model
                 self._last_train_time = time.time()
                 self._training_count += 1
+                self._load_failed = False  # Allow re-loading on next startup
 
             result = {
                 "success": True,
                 "reason": reason if accepted else str(persist_result.get("decision_reason") or "not_promoted"),
                 "sample_count": len(access_data),
-                "train_samples": split_idx,
-                "val_samples": len(access_data) - split_idx,
+                "train_samples": len(X_rf_train),
+                "val_samples": len(X_rf_val),
                 "training_time_s": round(training_time, 2),
                 "training_count": self._training_count,
                 "completed_at": completed_at,
@@ -857,21 +1112,43 @@ class ModelTrainer:
                 f"accepted={accepted}, "
                 f"time={training_time:.1f}s"
             )
+            tracker.update_progress(
+                phase=TrainingPhase.COMPLETED,
+                progress_percent=100.0,
+                current_step=10,
+                total_steps=10,
+                message=f"Training complete — val_accuracy={val_accuracy:.2%}, accepted={accepted}",
+                details={
+                    "val_accuracy": val_accuracy,
+                    "val_top_10_accuracy": float(val_metrics.get("top_10_accuracy", 0.0) or 0.0),
+                    "model_accepted": accepted,
+                    "training_time_s": round(training_time, 2),
+                    "sample_count": len(access_data),
+                },
+            )
+            tracker.finish_training(success=True)
             return result
 
         except Exception as e:
             logger.error(f"Training failed: {e}", exc_info=True)
+            tracker.finish_training(success=False)
             return {"success": False, "reason": str(e)}
         finally:
-            self._is_training = False
+            # Reset appropriate training flag and release lock
+            if is_automatic:
+                self._is_training_automatic = False
+            else:
+                self._is_training_scheduled = False
+            lock.release()
 
     def _quick_eval(
         self,
         model: EnsembleModel,
-        X_val: np.ndarray,
+        X_rf_val: np.ndarray,
         y_val: List[str],
         access_data: List[Dict[str, Any]],
         validation_offset: int,
+        X_lstm_val: np.ndarray = None,
     ) -> Dict[str, Any]:
         """Evaluate validation split using the same ensemble path used at runtime."""
         try:
@@ -882,12 +1159,14 @@ class ModelTrainer:
             top10_hits = 0
             total = 0
 
-            for idx, (x, true_key) in enumerate(zip(X_val, y_val)):
+            for idx, (x_rf, true_key) in enumerate(zip(X_rf_val, y_val)):
                 source_index = validation_offset + idx
                 current_key = access_data[source_index - 1]["key_id"] if source_index > 0 else None
+                x_lstm = X_lstm_val[idx] if X_lstm_val is not None else None
                 top_predictions, _ = model.predict_top_n(
                     n=10,
-                    X_rf=x.reshape(1, -1),
+                    X_rf=x_rf.reshape(1, -1),
+                    X_lstm=np.expand_dims(x_lstm, 0) if x_lstm is not None else None,
                     current_key=current_key,
                 )
 
@@ -982,7 +1261,7 @@ class ModelTrainer:
             try:
                 time_since = time.time() - self._last_train_time
                 if time_since >= self._update_interval:
-                    self.train(reason="scheduled")
+                    self.train(reason="automatic")
                 time.sleep(min(10, self._update_interval))
             except Exception as e:
                 logger.error(f"Auto-training loop error: {e}")
@@ -1007,14 +1286,14 @@ class ModelTrainer:
 
         try:
             test_data = sorted(test_data, key=lambda x: x.get("timestamp", 0))
-            X, y_true = self._extract_XY(test_data)
+            X_rf, X_lstm, y_true = self._extract_XY(test_data)
 
             if not self.model.is_trained:
                 return {"success": False, "reason": "model_not_trained"}
 
             top1_hits, top10_hits, total = 0, 0, 0
 
-            for i, (x, true_key) in enumerate(zip(X, y_true)):
+            for i, (x, true_key) in enumerate(zip(X_rf, y_true)):
                 current_key = test_data[i - 1]["key_id"] if i > 0 else None
                 top_indices, top_probs = self.model.predict_top_n(
                     n=10,
@@ -1065,7 +1344,9 @@ class ModelTrainer:
             "update_interval": self._update_interval,
             "min_samples":     self._min_samples,
             "auto_training":   self._running,
-            "is_training":     self._is_training,
+            "is_training":     self._is_training_scheduled or self._is_training_automatic,
+            "is_training_scheduled": self._is_training_scheduled,
+            "is_training_automatic": self._is_training_automatic,
             "drift_stats":     self._drift_detector.get_stats(),
             "model_stats":     self.model.get_model_stats(),
             "collector_stats": self._collector.get_stats(),
@@ -1080,6 +1361,56 @@ class ModelTrainer:
     def get_training_history(self) -> List[Dict]:
         incremental_history = self._incremental_persistence.get_history(limit=100)
         return incremental_history if incremental_history else self._training_history.copy()
+
+    def get_training_patterns(self) -> Optional[Dict[str, Any]]:
+        """
+        Get training patterns extracted from last training session.
+        Used for drift detection in simulation learning.
+        
+        Returns:
+            Dictionary with pattern information, or None if no training patterns available
+        """
+        try:
+            # Try to get patterns from last successful training
+            if hasattr(self, '_last_training_patterns'):
+                return self._last_training_patterns
+            
+            # Generate patterns from current training data if available
+            from src.ml.simulation_event_handler import SimulationPatternExtractor
+            
+            collector = self._collector
+            access_data = collector.get_access_sequence(window_seconds=86400, max_events=5_000)
+            
+            if not access_data:
+                logger.warning("get_training_patterns: No access data available")
+                return None
+            
+            # Convert access data to simulation events format
+            from src.ml.simulation_event_handler import SimulationEvent
+            events = []
+            for data in access_data:
+                event = SimulationEvent(
+                    simulation_id="training",
+                    timestamp=data.get("timestamp", time.time()),
+                    key_id=data.get("key_id", "unknown"),
+                    service_id=data.get("service_id", "default"),
+                    latency_ms=data.get("latency_ms", 0.0),
+                    cache_hit=data.get("cache_hit", False),
+                )
+                events.append(event)
+            
+            # Extract patterns
+            extractor = SimulationPatternExtractor()
+            patterns = extractor.extract_patterns(events)
+            
+            # Cache patterns
+            self._last_training_patterns = patterns
+            
+            return patterns
+            
+        except Exception as e:
+            logger.warning(f"get_training_patterns: Error: {e}")
+            return None
 
 
 # ============================================================

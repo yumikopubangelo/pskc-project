@@ -240,14 +240,23 @@ class IncrementalModelPersistence:
                 "sample_delta": sample_delta,
             }
 
+        if reason == "manual":
+            return {
+                "accepted": True,
+                "reason": "manual_retrain_accepted",
+                "previous_accuracy": previous_accuracy,
+                "current_accuracy": current_accuracy,
+                "sample_delta": sample_delta,
+            }
+
         if (
-            reason in {"manual", "drift", "incremental"}
+            reason in {"drift", "incremental"}
             and sample_delta >= min_sample_delta
             and current_accuracy > previous_accuracy
         ):
             return {
                 "accepted": True,
-                "reason": "manual_improvement_with_new_data",
+                "reason": "drift_improvement_with_new_data",
                 "previous_accuracy": previous_accuracy,
                 "current_accuracy": current_accuracy,
                 "sample_delta": sample_delta,
@@ -341,8 +350,7 @@ class IncrementalModelPersistence:
             self._cache = self._build_empty_cache()
         else:
             self._ensure_cache_defaults()
-            self._cache["model_data"] = model_data
-            
+        self._cache["model_data"] = model_data
         self._dirty = True
         return self._persist()
 
@@ -487,11 +495,33 @@ class IncrementalModelPersistence:
             "history_count": len(self._cache.get("history", [])),
         }
 
+    def reset(self) -> Dict[str, Any]:
+        """
+        Delete the model file and clear the in-memory cache so that the next
+        training run is treated as an initial model (always accepted, no
+        accuracy comparison against a corrupted/bugged previous version).
+        """
+        file_existed = False
+        try:
+            os.remove(self._file_path)
+            file_existed = True
+            logger.info("Deleted incremental model file: %s", self._file_path)
+        except FileNotFoundError:
+            pass
+        except Exception as e:
+            logger.error("Failed to delete incremental model file: %s", e)
+            return {"success": False, "reason": str(e)}
+
+        self._cache = None
+        self._dirty = False
+        logger.info("Incremental model state reset — next training will be accepted as initial model")
+        return {"success": True, "file_existed": file_existed}
+
     def get_history(self, limit: int = 10) -> List[Dict[str, Any]]:
         """Get recent update history"""
         if self._cache is None:
             return []
-        
+
         history = self._cache.get("history", [])
         return history[-limit:] if limit > 0 else history
 

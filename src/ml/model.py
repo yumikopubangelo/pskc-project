@@ -316,15 +316,15 @@ class LSTMModel(nn.Module if TORCH_AVAILABLE else object):
     ):
         if not TORCH_AVAILABLE:
             return
-        
+
         super().__init__()
-        
+
         # Use config defaults if not provided
         input_size = input_size if input_size is not None else settings.ml_lstm_input_size
         hidden_size = hidden_size if hidden_size is not None else settings.ml_lstm_hidden_size
         num_layers = num_layers if num_layers is not None else settings.ml_lstm_num_layers
         dropout = dropout if dropout is not None else settings.ml_lstm_dropout
-        
+
         self.input_size = input_size
         self.hidden_size = hidden_size
         self.num_layers = num_layers
@@ -339,7 +339,13 @@ class LSTMModel(nn.Module if TORCH_AVAILABLE else object):
         self.relu = nn.ReLU()
         self.dropout = nn.Dropout(dropout)
         self.fc2 = nn.Linear(hidden_size // 2, num_classes)
-        
+
+        # Label encoder for training
+        if SKLEARN_AVAILABLE:
+            self.label_encoder = LabelEncoder()
+        else:
+            self.label_encoder = None
+
         # Training state
         self.is_trained = False
         self._last_training_epochs = 0
@@ -505,7 +511,7 @@ class EnsembleModel:
         self.dynamic_weights = dynamic_weights
 
         # Sub-models
-        self.lstm = LSTMModel(num_classes=num_classes) if TORCH_AVAILABLE else None
+        self.lstm = LSTMModel(input_size=8, num_classes=num_classes) if TORCH_AVAILABLE else None  # Sequential input: 8 features per event
         self.rf = RandomForestModel(num_classes=num_classes) if SKLEARN_AVAILABLE else None
         self.markov = MarkovChainPredictor(num_classes=num_classes)
 
@@ -540,10 +546,10 @@ class EnsembleModel:
         access_sequence: List[str] = None,  # For Markov Chain update
     ):
         """Train all sub-models."""
-        if TORCH_AVAILABLE and X_lstm is not None and y_lstm is not None:
+        if TORCH_AVAILABLE and self.lstm is not None and X_lstm is not None and y_lstm is not None:
             self._train_lstm(X_lstm, y_lstm)
 
-        if SKLEARN_AVAILABLE and X_rf is not None and y_rf is not None:
+        if SKLEARN_AVAILABLE and self.rf is not None and X_rf is not None and y_rf is not None:
             self._train_rf(X_rf, y_rf)
 
         # Feed access sequence to Markov Chain
@@ -576,9 +582,18 @@ class EnsembleModel:
             min_delta = settings.ml_lstm_early_stopping_min_delta
             use_lr_scheduler = settings.ml_lstm_use_lr_scheduler
             
+            # Encode labels
+            if self.lstm and self.lstm.label_encoder is not None:
+                y_encoded = self.lstm.label_encoder.fit_transform(y)
+            else:
+                # Fallback: simple mapping
+                unique_keys = list(set(y))
+                key_to_idx = {k: i for i, k in enumerate(unique_keys)}
+                y_encoded = [key_to_idx[k] for k in y]
+
             # Prepare dataset with validation split
             X_tensor = torch.FloatTensor(X)
-            y_tensor = torch.LongTensor(y)
+            y_tensor = torch.LongTensor(y_encoded)
             dataset = TensorDataset(X_tensor, y_tensor)
             
             # 80/20 train/val split
@@ -771,7 +786,7 @@ class EnsembleModel:
         current_key: str = None,
     ) -> Tuple[np.ndarray, np.ndarray]:
         """Get top N predicted class indices and their probabilities."""
-        probs = self.predict_proba(X_lstm, X_rf, current_key)
+        probs = self.predict_proba(X_lstm=X_lstm, X_rf=X_rf, current_key=current_key)
 
         if probs is None:
             # Fallback: use Markov only if available

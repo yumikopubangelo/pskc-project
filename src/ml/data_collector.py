@@ -113,7 +113,7 @@ class DataCollector:
         self._key_stats: Dict[str, KeyAccessStats] = {}
         
         # Time windows for different time scales
-        self._recent_events: deque = deque(maxlen=10000)  # Last hour
+        self._recent_events: deque = deque(maxlen=25000)  # ~last few hours
         self._historical_stats: Dict[str, List[float]] = defaultdict(list)
         
         # Redis for shared storage
@@ -190,8 +190,10 @@ class DataCollector:
             # Periodic cleanup of historical stats
             self._cleanup_historical_stats()
         
-        # Save to Redis for sharing with other processes (with error handling)
-        self._save_to_redis()
+        # Save to Redis periodically (every 50 events) to avoid O(n²) cost
+        # during bulk imports and to reduce lock contention.
+        if len(self._events) % 50 == 0:
+            self._save_to_redis()
     
     def _cleanup_historical_stats(self):
         """
@@ -305,7 +307,7 @@ class DataCollector:
     def get_access_sequence(
         self,
         window_seconds: int = None,
-        max_events: int = 1000
+        max_events: int = 20000
     ) -> List[Dict[str, Any]]:
         """
         Get access sequence for sequence modeling.
@@ -470,27 +472,36 @@ class DataCollector:
             logger.warning(f"Could not load from Redis: {e}")
     
     def _save_to_redis(self):
-        """Save events to Redis shared storage"""
+        """Save events to Redis shared storage (thread-safe snapshot)."""
         if not self._redis:
             return
+        # Take a snapshot inside the lock so no other thread can mutate the deque
+        # while we're serialising it.
+        with self._lock:
+            events_snapshot = list(self._events)
         try:
+            if not events_snapshot:
+                return
+            events_data = [
+                json.dumps({
+                    "key_id": e.key_id,
+                    "service_id": e.service_id,
+                    "timestamp": e.timestamp,
+                    "access_type": e.access_type,
+                    "latency_ms": e.latency_ms,
+                    "cache_hit": e.cache_hit,
+                })
+                for e in events_snapshot
+            ]
             self._redis.delete(self.REDIS_KEY_PREFIX)
-            if self._events:
-                events_data = [
-                    json.dumps({
-                        "key_id": e.key_id,
-                        "service_id": e.service_id,
-                        "timestamp": e.timestamp,
-                        "access_type": e.access_type,
-                        "latency_ms": e.latency_ms,
-                        "cache_hit": e.cache_hit,
-                    })
-                    for e in self._events
-                ]
-                if events_data:
-                    self._redis.rpush(self.REDIS_KEY_PREFIX, *events_data)
+            self._redis.rpush(self.REDIS_KEY_PREFIX, *events_data)
+            logger.debug(f"Saved {len(events_snapshot)} events to Redis")
         except Exception as e:
             logger.warning(f"Could not save to Redis: {e}")
+    
+    def flush_to_redis(self):
+        """Force flush all events to Redis immediately (non-periodic)."""
+        self._save_to_redis()
 
 
 # Global data collector instance

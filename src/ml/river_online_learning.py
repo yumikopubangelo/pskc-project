@@ -88,17 +88,15 @@ class RiverOnlineLearner:
         
         try:
             if self.model_type == "adaptive_forest":
-                # Adaptive Random Forest - handles concept drift
-                self._model = ensemble.AdaptiveRandomForest(
+                # Streaming Random Patches — River's best ensemble for concept drift
+                # (AdaptiveRandomForest was removed in River ≥0.19; SRPClassifier is the replacement)
+                self._model = ensemble.SRPClassifier(
                     n_models=self.n_models,
                     max_depth=self.max_depth,
                     grace_period=self.grace_period,
-                    split_confidence=0.01,
-                    drift_detector=None,  # Each tree handles its own
-                    max_size=self.max_size,
                     seed=42,
                 )
-                logger.info("Initialized Adaptive Random Forest")
+                logger.info("Initialized SRPClassifier (Streaming Random Patches)")
                 
             elif self.model_type == "hoeffding_tree":
                 # Hoeffding Tree - very efficient
@@ -122,13 +120,13 @@ class RiverOnlineLearner:
                 logger.info("Initialized Logistic Regression")
                 
             else:
-                # Default to adaptive forest
-                self._model = ensemble.AdaptiveRandomForest(
+                # Default to SRPClassifier
+                self._model = ensemble.SRPClassifier(
                     n_models=self.n_models,
                     max_depth=self.max_depth,
                     seed=42,
                 )
-                logger.info("Initialized default Adaptive Random Forest")
+                logger.info("Initialized default SRPClassifier")
                 
             self._initialized = True
             

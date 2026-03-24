@@ -69,6 +69,73 @@ class FeatureEngineer:
         )
         
         return result
+
+    def extract_per_event_features(
+        self,
+        event: Dict[str, Any],
+        base_timestamp: Optional[float] = None
+    ) -> np.ndarray:
+        """
+        Extract features for a single event (for sequential LSTM input).
+
+        Args:
+            event: Single access event
+            base_timestamp: Timestamp to calculate relative time (e.g., current time)
+
+        Returns:
+            Feature vector for this event
+        """
+        features = []
+
+        # Timestamp features
+        ts = event.get('timestamp', 0)
+        dt = datetime.fromtimestamp(ts)
+
+        # Cyclical hour encoding
+        hour_sin = np.sin(2 * np.pi * dt.hour / 24)
+        hour_cos = np.cos(2 * np.pi * dt.hour / 24)
+
+        # Cyclical day of week
+        dow_sin = np.sin(2 * np.pi * dt.weekday() / 7)
+        dow_cos = np.cos(2 * np.pi * dt.weekday() / 7)
+
+        # Relative time (seconds from base_timestamp)
+        if base_timestamp is not None:
+            relative_time = ts - base_timestamp
+        else:
+            relative_time = 0
+
+        features.extend([hour_sin, hour_cos, dow_sin, dow_cos, relative_time])
+
+        # Cache hit (0 or 1)
+        cache_hit = 1.0 if event.get('cache_hit', False) else 0.0
+        features.append(cache_hit)
+
+        # Latency (normalized)
+        latency_ms = event.get('latency_ms', 0.0)
+        features.append(min(latency_ms / 1000.0, 10.0))  # Cap at 10 seconds
+
+        # Service ID (simple hash-based encoding, or use known services)
+        service_id = event.get('service_id', 'unknown')
+        # Simple encoding: hash mod 10 for some diversity
+        service_encoded = hash(service_id) % 10
+        features.append(float(service_encoded))
+
+        # Key ID encoding (but this might leak the target, so maybe exclude or use different)
+        # For now, exclude key_id to avoid target leakage
+        # key_encoded = hash(event.get('key_id', 'unknown')) % 100
+        # features.append(float(key_encoded))
+
+        result = np.array(features, dtype=np.float32)
+
+        # Expected size: 5 (temporal) + 1 (cache) + 1 (latency) + 1 (service) = 8
+        expected_size = 8
+        assert result.shape[0] == expected_size, (
+            f"Per-event feature vector shape mismatch: expected {expected_size}, "
+            f"got {result.shape[0]}"
+        )
+
+        return result
     
     def _get_default_features(self) -> np.ndarray:
         """Return default features when no data available"""

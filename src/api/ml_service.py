@@ -78,9 +78,9 @@ def _accuracy_confidence(val_samples: Optional[int]) -> str:
     except (TypeError, ValueError):
         sample_count = 0
 
-    if sample_count >= 200:
+    if sample_count >= 500:
         return "high"
-    if sample_count >= 50:
+    if sample_count >= 150:
         return "medium"
     return "low"
 
@@ -88,9 +88,9 @@ def _accuracy_confidence(val_samples: Optional[int]) -> str:
 def _accuracy_warning(val_samples: Optional[int]) -> Optional[str]:
     confidence = _accuracy_confidence(val_samples)
     if confidence == "low":
-        return "Validation sample count is still small, so the displayed accuracy can move a lot under new traffic."
+        return "Validation sample count is still small (<150). Generate more training data to get a reliable accuracy estimate."
     if confidence == "medium":
-        return "Validation coverage is moderate. Treat the metric as directional, not final."
+        return "Validation coverage is moderate (150–499 samples). Treat the metric as directional, not final."
     return None
 
 

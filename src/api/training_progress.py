@@ -270,8 +270,12 @@ class TrainingProgressTracker:
         self.updates = []
     
     def finish_training(self, success: bool = True) -> None:
-        """Mark training completion."""
+        """Mark training completion. If caller already sent a COMPLETED/FAILED update
+        via update_progress(), this only sets end_time without sending a duplicate."""
         self.end_time = datetime.utcnow().timestamp()
+        # Avoid sending a second bare COMPLETED/FAILED if one with full details was already queued
+        if self.current_phase in (TrainingPhase.COMPLETED, TrainingPhase.FAILED):
+            return
         phase = TrainingPhase.COMPLETED if success else TrainingPhase.FAILED
         self.update_progress(
             phase=phase,
