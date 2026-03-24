@@ -24,12 +24,12 @@ def create_training_router() -> APIRouter:
 
     @router.post("/generate")
     async def generate_training_data_endpoint(
-        num_events: Optional[int] = Query(default=None, ge=100, le=10000),
-        num_keys: Optional[int] = Query(default=None, ge=10, le=1000),
-        num_services: Optional[int] = Query(default=None, ge=1, le=20),
+        num_events: Optional[int] = Query(default=None, ge=100),
+        num_keys: Optional[int] = Query(default=None, ge=10),
+        num_services: Optional[int] = Query(default=None, ge=1),
         scenario: str = Query(default="dynamic", description="Scenario: siakad, sevima, pddikti, dynamic"),
         traffic_profile: str = Query(default="normal", description="Traffic profile: normal, heavy, prime_time, overload"),
-        duration_hours: Optional[int] = Query(default=None, ge=1, le=168),
+        duration_hours: Optional[int] = Query(default=None, ge=1),
     ):
         """Generate synthetic training data based on scenario and traffic profile."""
         if num_events is None or num_keys is None or num_services is None or duration_hours is None:
@@ -59,6 +59,82 @@ def create_training_router() -> APIRouter:
         except Exception as e:
             logger.exception("Error generating training data: %s", e)
             raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
+
+    @router.get("/generate/estimate")
+    async def estimate_data_generation(
+        num_events: Optional[int] = Query(default=None, ge=100),
+        num_keys: Optional[int] = Query(default=None, ge=10),
+        num_services: Optional[int] = Query(default=None, ge=1),
+        scenario: str = Query(default="dynamic"),
+        traffic_profile: str = Query(default="normal"),
+        duration_hours: Optional[int] = Query(default=None, ge=1),
+    ):
+        """Estimate the number of training samples that will be generated with given parameters."""
+        if num_events is None or num_keys is None or num_services is None or duration_hours is None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="All numeric fields are required"
+            )
+        
+        try:
+            # Basic estimation: num_events is the primary factor
+            # Also consider the traffic profile multiplier
+            traffic_profile_multipliers = {
+                "normal": 1.0,
+                "heavy": 1.2,
+                "prime_time": 1.15,
+                "overload": 1.5,
+            }
+            
+            multiplier = traffic_profile_multipliers.get(traffic_profile, 1.0)
+            estimated_events = int(num_events * multiplier)
+            
+            # Calculate approximate file size (rough estimate: 200 bytes per event)
+            bytes_per_event = 200
+            estimated_bytes = estimated_events * bytes_per_event
+            
+            # Format size in human-readable format
+            if estimated_bytes < 1024:
+                size_formatted = f"{estimated_bytes} B"
+            elif estimated_bytes < 1024 * 1024:
+                size_formatted = f"{estimated_bytes / 1024:.1f} KB"
+            else:
+                size_formatted = f"{estimated_bytes / (1024 * 1024):.1f} MB"
+            
+            return {
+                "estimated_events": estimated_events,
+                "bytes_per_event": bytes_per_event,
+                "estimated_bytes": estimated_bytes,
+                "estimated_size_formatted": size_formatted,
+                "traffic_profile_multiplier": multiplier,
+                "base_events": num_events,
+                "scenario": scenario,
+                "num_keys": num_keys,
+                "num_services": num_services,
+                "duration_hours": duration_hours,
+            }
+        except Exception as e:
+            logger.exception("Error estimating data generation: %s", e)
+            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
+
+    @router.get("/collector/config")
+    async def get_collector_config():
+        """Get data collector configuration and limits."""
+        from config.settings import settings
+        from src.ml.data_collector import get_data_collector
+        
+        collector = get_data_collector()
+        stats = collector.get_stats()
+        
+        return {
+            "max_events": settings.ml_collector_max_events,
+            "current_events": stats.get("total_events", 0),
+            "usage_percent": (stats.get("total_events", 0) / settings.ml_collector_max_events * 100) if settings.ml_collector_max_events > 0 else 0,
+            "window_seconds": settings.ml_collector_window_seconds,
+            "historical_stats_ttl_hours": settings.ml_collector_historical_stats_ttl_hours,
+            "historical_stats_max_entries": settings.ml_collector_historical_stats_max_entries,
+            "configuration_note": "To change these limits, set environment variables: ML_COLLECTOR_MAX_EVENTS, ML_COLLECTOR_WINDOW_SECONDS, ML_COLLECTOR_HISTORICAL_STATS_TTL_HOURS, ML_COLLECTOR_HISTORICAL_STATS_MAX_ENTRIES",
+        }
 
     @router.post("/train")
     async def train_model_endpoint(

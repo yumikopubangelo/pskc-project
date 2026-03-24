@@ -180,7 +180,15 @@ Lihat detail payload dan caveat implementasi di [docs/api_reference.md](docs/api
 
 ## Simulasi dan ML
 
-PSKC menyediakan engine simulasi yang dirancang untuk studi kasus sistem autentikasi akademik dan pemerintahan Indonesia.
+PSKC menyediakan engine simulasi yang dirancang untuk studi kasus sistem autentikasi akademik dan pemerintahan Indonesia dengan framework enhanced yang menghasilkan benchmark realistic.
+
+### Framework Simulasi Enhanced
+
+PSKC sekarang memiliki tiga variant simulasi dengan fitur lengkap (Maret 2026):
+
+- **`enhanced_simulation.py`** — Detailed request path tracing dengan visualisasi per-request, latency breakdown, dan cache flow analysis
+- **`enhanced_simulation_v2.py`** — Persistent L1/L2 caches, log-normal KMS latency distribution, ML transition learning, dan Pareto access patterns
+- **`pskc_comparison_fast.py`** — Side-by-side PSKC vs direct KMS dengan 7 reporting sections, statistical summaries, dan impact analysis
 
 ### Skenario Simulasi yang Tersedia
 
@@ -191,6 +199,20 @@ PSKC menyediakan engine simulasi yang dirancang untuk studi kasus sistem autenti
 | **PDDikti** | Pangkalan Data Pendidikan Tinggi Nasional | Kemdikbudristek (2024) - >4.900 PT, 9,6 juta mahasiswa |
 | **Dynamic Production** | Perubahan beban kerja dan failure pattern campuran | Simulasi berbasis parameter dinamis |
 | **Cold Start** | Evolusi ML dari warmup hingga mature dengan EWMA concept drift | Analisis fase ML lifecycle |
+
+### Hasil Simulasi Terbaru (Side-by-Side Benchmark)
+
+Perbandingan PSKC vs direct KMS dengan 1000 requests per scenario:
+
+| Metric | Direct KMS | PSKC | Improvement |
+|--------|-----------|------|-------------|
+| **Avg Latency** | 21.3 ms | 8.2 ms | **61.6% lebih cepat** |
+| **Cache Hit Rate** | 79.3% | 93.1% | +13.8 pp |
+| **KMS Calls** | 602 | 0 | **100% reduction** |
+| **P99 Latency** | 134.31 ms | 122.85 ms | 8.5% improvement |
+| **Prefetch Success** | — | 96.5% | 2030 queued, 1958 processed |
+
+Hasil ini menunjukkan bahwa PSKC dengan ML predictor dan prefetch worker memberikan significant improvement terutama dalam latency reduction dan elimination of KMS roundtrips.
 
 ### Command Simulasi
 
@@ -212,6 +234,17 @@ python simulation/runner.py --scenario dynamic --requests 2000
 
 # Cold Start Analysis
 python simulation/runner.py --scenario coldstart
+
+# --- Enhanced Simulation Framework (NEW) ---
+
+# Detailed request path tracing dengan visualisasi
+python simulation/enhanced_simulation.py
+
+# Simulasi dengan persistent caches dan ML learning
+python simulation/enhanced_simulation_v2.py
+
+# Side-by-side PSKC vs direct KMS comparison dengan reporting
+python simulation/pskc_comparison_fast.py
 ```
 
 ### Machine Learning
@@ -374,9 +407,67 @@ DriftDetector(
 
 API endpoint: `GET /ml/drift`
 
-## Konfigurasi Utama
+## Fitur-Fitur Aktif dan Matang (Status Maret 2026)
 
-Variabel penting dari `.env.example`:
+### Aktif & Siap Produksi ✅
+
+| Fitur | Status | Catatan |
+|-------|--------|---------|
+| **Backend API (FastAPI)** | ✅ Aktif | Health, cache metrics, ML status, simulation endpoints semua tersambung ke frontend |
+| **Secure Cache (L1+L2)** | ✅ Aktif | LocalCache in-process + Redis encrypted L2 dengan EncryptedCacheStore |
+| **Prefetch Worker** | ✅ Aktif | Worker terpisah dengan Redis queue, retry logic, dan DLQ untuk failed jobs |
+| **ML Pipeline** | ✅ Aktif | Ensemble LSTM+RandomForest+Markov, training incremental, concept drift detection (EWMA/ADWIN/EDDM) |
+| **Incremental Model** | ✅ Aktif | Single-file model (.pskc.json) yang terus berkembang tanpa membuat file baru setiap training |
+| **Data Processor** | ✅ Aktif | Pipeline raw → processed dengan feature engineering, context window, temporal patterns |
+| **Key Rotation** | ✅ Aktif | Zero-downtime rotation dengan grace period dan atomicity |
+| **Model Governance** | ✅ Aktif | Registry, versioning, signing, provenance, promotion, rollback semua terintegrasi |
+| **Security Hardening** | ✅ Aktif | Cryptographic wrapper, audit logging, FIPS self-tests, HTTP security middleware, rate limiting |
+| **Frontend (React/Vite)** | ✅ Terhubung | Dashboard, Overview, Simulation, ML Pipeline UI semuanya sinkron dengan backend aktual |
+| **Docker & Compose** | ✅ Aktif | api, redis, prefetch-worker, dan monitoring profile semuanya dapat dijalankan dengan `docker compose` |
+| **Kubernetes Manifests** | ✅ Tersedia | HPA, network policies, persistent volumes untuk production deployment |
+| **Enhanced Simulation** | ✅ Baru | 3 framework simulasi dengan detailed tracing, realistic latency, ML learning, dan side-by-side comparison |
+| **Benchmark Validator** | ✅ Aktif | Reproducible runs dengan seed control, statistical validation (Welch's t-test, Mann-Whitney U), effect size (Cohen's d) |
+
+### Dalam Pengembangan 🔧
+
+| Fitur | Status | Rencana |
+|-------|--------|---------|
+| **Integration dengan Dashboard** | 🔧 In Progress | Simulasi hasil sekarang untuk CLI; yang perlu: integrasi ke UI untuk historical comparison PSKC vs baseline |
+| **Deployment Hardening** | 🔧 In Progress | Reverse proxy config, volume management, trusted proxy hardening, production observability |
+| **Admin/Ops Endpoints** | 🔧 In Progress | Spesifiknya: cache stats endpoint, model stats endpoint, audit summary endpoint, detailed ops debugging |
+| **Telemetry Historis** | 🔧 In Progress | Metrics sekarang in-memory; perlu persistent storage untuk historical trends dan alerting |
+
+### Backlog (Not Yet Implemented) 📋
+
+| Fitur | Alasan | Estimasi Value |
+|-------|--------|-----------------|
+| **Approval workflow antar environment** | Model deployment aman tapi belum ada formal approval pipeline | Meningkatkan kontrol governance operasional |
+| **Multi-instance distributed cache** | L2 cache sudah ada tapi belum multi-node dengan failover | Memungkinkan fault tolerance dan scaling horizontal |
+| **Replay tooling untuk prefetch** | Worker punya retry/DLQ dasar; belum ada replay orchestration | Production-ready recovery dan ops visibility |
+| **ML accuracy tuning pipeline** | Predictor dasar 85% accuracy; belum ada systematic tuning | Target >90% accuracy untuk cache hit optimization |
+| **Persistent telemetry backend** | Metrics saat ini in-memory | Observability mendekati production-grade |
+
+## Rekomendasi Pengembangan Selanjutnya
+
+Jika ingin menaikkan PSKC dari demo riset menjadi sistem production-ready, berikut adalah urutan prioritas yang disarankan:
+
+1. **Dokumentasikan simulation benchmark dengan baik** — Jelaskan bagaimana membaca hasil (latency distribution, cache hit breakdown, KMS reduction, prefetch effectiveness). Filter output untuk insight operasional yang actionable.
+
+2. **Integrasikan simulation hasil ke dashboard frontend** — Team bisa membandingkan PSKC vs baseline langsung dari UI web dan melihat historical trends.
+
+3. **Perluas validasi deployment** — Topology lebih realistis dengan reverse proxy, monitoring profile, Redis failover, dan load testing di environment staging.
+
+4. **Rapikan kontrol keamanan** — Pemisahan endpoint internal/publik yang lebih jelas dan hardening policy deployment sesuai topologi real.
+
+5. **Standarisasi test suite** — Integration tests untuk semua core paths, matrix test untuk profile deployment, CI gate untuk lint/docs/coverage.
+
+6. **Matangkan governance model** — Approval flow antar environment, audit release formal, dan compliance checklist deployment.
+
+7. **Lanjut ke observability dan tuning** — Persistent telemetry, ML accuracy tuning (>90%), hardening prefetch untuk production traffic.
+
+Untuk detail lengkap, baca [docs/project_status.md](docs/project_status.md) dan [docs/feature_roadmap.md](docs/feature_roadmap.md).
+
+## Konfigurasi Utama
 
 | Variable | Fungsi |
 | --- | --- |

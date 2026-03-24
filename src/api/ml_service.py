@@ -833,8 +833,8 @@ def generate_training_data(
     # Sort by timestamp
     events.sort(key=lambda x: x["timestamp"])
     
-    # Import events into collector
-    imported = collector.import_events(events)
+    # Import events into collector with data_source marked as "simulation"
+    imported = collector.import_events(events, data_source="simulation")
     
     # CRITICAL: Flush all events to Redis immediately so ML Worker can detect them
     # (Otherwise last 1-49 events won't be in Redis until next periodic save)

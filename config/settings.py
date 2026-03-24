@@ -140,10 +140,14 @@ class AppSettings(BaseSettings):
     ml_ensemble_min_weight: float = Field(default=0.05, alias="ML_ENSEMBLE_MIN_WEIGHT")
     
     # Data Collector Settings
-    ml_collector_max_events: int = Field(default=100000, alias="ML_COLLECTOR_MAX_EVENTS")
+    ml_collector_max_events: int = Field(
+        default=500000,
+        alias="ML_COLLECTOR_MAX_EVENTS",
+        description="Maximum number of events to keep in memory (default: 500K)"
+    )
     ml_collector_window_seconds: int = Field(default=3600, alias="ML_COLLECTOR_WINDOW_SECONDS")
     ml_collector_historical_stats_ttl_hours: int = Field(default=168, alias="ML_COLLECTOR_HISTORICAL_STATS_TTL_HOURS")
-    ml_collector_historical_stats_max_entries: int = Field(default=100000, alias="ML_COLLECTOR_HISTORICAL_STATS_MAX_ENTRIES")
+    ml_collector_historical_stats_max_entries: int = Field(default=500000, alias="ML_COLLECTOR_HISTORICAL_STATS_MAX_ENTRIES")
     
     # Feature Engineering Settings
     ml_feature_context_window: int = Field(default=10, alias="ML_FEATURE_CONTEXT_WINDOW")
@@ -162,6 +166,23 @@ class AppSettings(BaseSettings):
     # Simulation Mode
     simulation_mode: bool = Field(default=False, alias="SIMULATION_MODE")
     simulation_scenario: str = Field(default="all", alias="SIMULATION_SCENARIO")
+    
+    # ML Data Collection Settings
+    ml_collect_production_data: bool = Field(
+        default=True,
+        alias="ML_COLLECT_PRODUCTION_DATA",
+        description="Whether to collect production data for training"
+    )
+    ml_collect_simulation_data: bool = Field(
+        default=True,
+        alias="ML_COLLECT_SIMULATION_DATA",
+        description="Whether to collect simulation data for training"
+    )
+    ml_training_data_source: str = Field(
+        default="simulation",
+        alias="ML_TRAINING_DATA_SOURCE",
+        description="Data source for training: 'simulation', 'production', or 'both'"
+    )
     
     # Monitoring
     grafana_password: str = Field(default="", alias="GRAFANA_PASSWORD")

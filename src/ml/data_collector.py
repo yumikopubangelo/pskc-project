@@ -55,6 +55,7 @@ class AccessEvent:
     latency_ms: float = 0.0
     cache_hit: bool = False
     metadata: Dict[str, Any] = field(default_factory=dict)
+    data_source: str = "production"  # "production" or "simulation"
 
 
 @dataclass
@@ -133,6 +134,7 @@ class DataCollector:
         latency_ms: float = 0.0,
         cache_hit: bool = False,
         timestamp: float = None,
+        data_source: str = "production",
         **metadata
     ):
         """
@@ -145,6 +147,7 @@ class DataCollector:
             latency_ms: Request latency in milliseconds (must be >= 0)
             cache_hit: Whether access was served from cache
             timestamp: Unix timestamp (defaults to current time)
+            data_source: "production" or "simulation" (default: "production")
             **metadata: Additional event metadata
             
         Raises:
@@ -165,6 +168,10 @@ class DataCollector:
             logger.warning(f"Invalid access_type '{access_type}', defaulting to 'read'")
             access_type = "read"
         
+        if data_source not in ("production", "simulation"):
+            logger.warning(f"Invalid data_source '{data_source}', defaulting to 'production'")
+            data_source = "production"
+        
         # Use provided timestamp or current time
         event_timestamp = timestamp if timestamp is not None else time.time()
         if event_timestamp <= 0:
@@ -177,7 +184,8 @@ class DataCollector:
             access_type=access_type,
             latency_ms=latency_ms,
             cache_hit=cache_hit,
-            metadata=metadata
+            metadata=metadata,
+            data_source=data_source
         )
         
         with self._lock:
@@ -392,13 +400,14 @@ class DataCollector:
         
         logger.info(f"Exported {len(data)} events to {output_path}")
     
-    def import_events(self, events: List[Dict[str, Any]]) -> int:
+    def import_events(self, events: List[Dict[str, Any]], data_source: str = "production") -> int:
         """
         Import access events from external source.
         
         Args:
             events: List of event dicts with keys: key_id, service_id, timestamp, 
                    access_type, cache_hit, latency_ms
+            data_source: Where the events come from: "production" or "simulation" (default: "production")
         
         Returns:
             Number of events imported
@@ -412,23 +421,34 @@ class DataCollector:
                     access_type=event_data.get("access_type", "read"),
                     latency_ms=event_data.get("latency_ms", 0.0),
                     cache_hit=event_data.get("cache_hit", False),
-                    timestamp=event_data.get("timestamp")  # Pass the timestamp!
+                    timestamp=event_data.get("timestamp"),  # Pass the timestamp!
+                    data_source=data_source
                 )
                 imported += 1
             except Exception as e:
                 logger.warning(f"Failed to import event: {e}")
         
-        logger.info(f"Imported {imported} events")
+        logger.info(f"Imported {imported} events from {data_source}")
         return imported
     
     def get_stats(self) -> Dict[str, Any]:
         """Get collector statistics"""
         with self._lock:
+            # Count events by data source
+            simulation_events = sum(1 for e in self._events if e.data_source == "simulation")
+            production_events = len(self._events) - simulation_events
+            
             return {
                 "total_events": len(self._events),
                 "unique_keys": len(self._key_stats),
                 "unique_services": len(set(e.service_id for e in self._events)),
-                "window_seconds": self._window_seconds
+                "window_seconds": self._window_seconds,
+                "simulation_events": simulation_events,
+                "production_events": production_events,
+                "data_source_breakdown": {
+                    "simulation": simulation_events,
+                    "production": production_events
+                }
             }
     
     def clear_old_events(self, hours: int = 24):

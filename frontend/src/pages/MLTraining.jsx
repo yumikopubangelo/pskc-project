@@ -28,6 +28,9 @@ const MLTraining = () => {
   const [showTrainingProgress, setShowTrainingProgress] = useState(false)
   // Saved state for auto-resume
   const [savedProgressState, setSavedProgressState] = useState(null)
+  // Data generation preview
+  const [estimatedData, setEstimatedData] = useState(null)
+  const [estimatingData, setEstimatingData] = useState(false)
 
   // Scenarios and traffic profiles
   const scenarios = [
@@ -57,6 +60,42 @@ const MLTraining = () => {
       setLoadingStatus(false)
     }
   }, [])
+
+  // Estimate data generation
+  const estimateDataGeneration = useCallback(async () => {
+    if (!numEvents || !numKeys || !numServices || !durationHours) {
+      setEstimatedData(null)
+      return
+    }
+    
+    setEstimatingData(true)
+    try {
+      const response = await apiClient.get('/ml/training/generate/estimate', {
+        params: {
+          num_events: numEvents,
+          num_keys: numKeys,
+          num_services: numServices,
+          scenario: scenario,
+          traffic_profile: trafficProfile,
+          duration_hours: durationHours,
+        }
+      })
+      setEstimatedData(response)
+    } catch (err) {
+      console.error('Failed to estimate data generation:', err)
+      setEstimatedData(null)
+    } finally {
+      setEstimatingData(false)
+    }
+  }, [numEvents, numKeys, numServices, scenario, trafficProfile, durationHours])
+
+  // Trigger estimate when parameters change
+  useEffect(() => {
+    const debounceTimer = setTimeout(() => {
+      estimateDataGeneration()
+    }, 500)
+    return () => clearTimeout(debounceTimer)
+  }, [numEvents, numKeys, numServices, scenario, trafficProfile, durationHours, estimateDataGeneration])
 
   // Check for saved progress state on mount (auto-resume)
   const checkSavedProgress = useCallback(async () => {
@@ -108,8 +147,8 @@ const MLTraining = () => {
       setError('All numeric fields must be positive numbers')
       return
     }
-    if (numEvents < 100 || numKeys < 10 || numServices > 20 || durationHours > 168) {
-      setError('Events min 100, Keys min 10, Services max 20, Duration max 168')
+    if (numEvents < 100 || numKeys < 10 || numServices < 1 || durationHours < 1) {
+      setError('Events min 100, Keys min 10, Services min 1, Duration min 1 hour')
       return
     }
 
@@ -311,9 +350,9 @@ const MLTraining = () => {
                      value={numEvents || ''}
                      onChange={(e) => setNumEvents(e.target.value ? parseInt(e.target.value) : '')}
                      className="w-full bg-dark-bg border border-dark-border rounded-lg px-4 py-2 text-white focus:border-accent-blue focus:outline-none"
-                     min={0}
-                     max={10000}
+                     min={100}
                    />
+                   <p className="text-xs text-slate-400 mt-1">Min: 100, No upper limit</p>
                  </div>
                  <div>
                    <label className="block text-sm font-medium text-slate-300 mb-2">Keys</label>
@@ -322,9 +361,9 @@ const MLTraining = () => {
                      value={numKeys || ''}
                      onChange={(e) => setNumKeys(e.target.value ? parseInt(e.target.value) : '')}
                      className="w-full bg-dark-bg border border-dark-border rounded-lg px-4 py-2 text-white focus:border-accent-blue focus:outline-none"
-                     min={0}
-                     max={1000}
+                     min={10}
                    />
+                   <p className="text-xs text-slate-400 mt-1">Min: 10, No upper limit</p>
                  </div>
                  <div>
                    <label className="block text-sm font-medium text-slate-300 mb-2">Services</label>
@@ -333,9 +372,9 @@ const MLTraining = () => {
                      value={numServices || ''}
                      onChange={(e) => setNumServices(e.target.value ? parseInt(e.target.value) : '')}
                      className="w-full bg-dark-bg border border-dark-border rounded-lg px-4 py-2 text-white focus:border-accent-blue focus:outline-none"
-                     min={0}
-                     max={20}
+                     min={1}
                    />
+                   <p className="text-xs text-slate-400 mt-1">Min: 1, No upper limit</p>
                  </div>
                  <div>
                    <label className="block text-sm font-medium text-slate-300 mb-2">Duration (hours)</label>
@@ -344,13 +383,55 @@ const MLTraining = () => {
                      value={durationHours || ''}
                      onChange={(e) => setDurationHours(e.target.value ? parseInt(e.target.value) : '')}
                      className="w-full bg-dark-bg border border-dark-border rounded-lg px-4 py-2 text-white focus:border-accent-blue focus:outline-none"
-                     min={0}
-                     max={168}
+                     min={1}
                    />
+                   <p className="text-xs text-slate-400 mt-1">Min: 1, No upper limit</p>
                  </div>
                </div>
 
-              {/* Generate Button */}
+              {/* Data Generation Preview */}
+              {estimatedData && (
+                <div className="mb-6 p-4 bg-blue-500/10 border border-blue-500/30 rounded-lg">
+                  <div className="flex items-start justify-between mb-3">
+                    <div className="flex items-center gap-2">
+                      <Icon name="info" className="w-5 h-5 text-blue-400" />
+                      <span className="font-medium text-blue-300">Estimated Data Generation</span>
+                    </div>
+                    {estimatingData && (
+                      <Icon name="loader" className="w-4 h-4 animate-spin text-blue-400" />
+                    )}
+                  </div>
+                  <div className="grid grid-cols-2 md:grid-cols-3 gap-4 text-sm">
+                    <div>
+                      <span className="text-slate-400">Base Events:</span>
+                      <span className="text-white ml-2 font-medium">{numEvents?.toLocaleString() || 0}</span>
+                    </div>
+                    <div>
+                      <span className="text-slate-400">Traffic Multiplier:</span>
+                      <span className="text-white ml-2 font-medium">{estimatedData.traffic_profile_multiplier}x</span>
+                    </div>
+                    <div>
+                      <span className="text-slate-400">Estimated Total:</span>
+                      <span className="text-blue-300 ml-2 font-bold text-base">{estimatedData.estimated_events?.toLocaleString() || 0}</span>
+                    </div>
+                    <div>
+                      <span className="text-slate-400">Approx. Size:</span>
+                      <span className="text-white ml-2 font-medium">{estimatedData.estimated_size_formatted}</span>
+                    </div>
+                    <div>
+                      <span className="text-slate-400">Bytes per Event:</span>
+                      <span className="text-white ml-2 font-medium">{estimatedData.bytes_per_event} B</span>
+                    </div>
+                    <div>
+                      <span className="text-slate-400">Scenario:</span>
+                      <span className="text-white ml-2 font-medium capitalize">{estimatedData.scenario}</span>
+                    </div>
+                  </div>
+                  <p className="text-xs text-blue-400/80 mt-3">
+                    💡 This is an estimation based on traffic profile. Actual generated events may vary slightly.
+                  </p>
+                </div>
+              )}
               <button
                 onClick={handleGenerateData}
                 disabled={generating}
