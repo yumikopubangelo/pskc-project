@@ -1,11 +1,11 @@
 /**
  * WebSocket Client for Real-time Training Progress Tracking
- * 
+ *
  * Usage:
- * const client = new TrainingProgressWebSocket('localhost:8000');
+ * const client = new TrainingProgressWebSocket();
  * client.onUpdate((update) => console.log(update));
  * client.connect();
- * 
+ *
  * Update Structure:
  * {
  *   phase: "training_lstm",
@@ -18,9 +18,34 @@
  * }
  */
 
+// Get the backend URL from environment or derive from current location
+const getBackendUrl = () => {
+  // Check for explicit WebSocket URL first
+  if (import.meta.env.VITE_WS_URL) {
+    const wsUrl = import.meta.env.VITE_WS_URL;
+    // Remove protocol if present to avoid double protocol
+    return wsUrl.replace(/^wss?:\/\//, '').replace(/^https?:\/\//, '');
+  }
+  
+  // Check for API URL and convert to WebSocket URL
+  if (import.meta.env.VITE_API_URL) {
+    const apiUrl = import.meta.env.VITE_API_URL;
+    // Remove protocol if present to avoid double protocol
+    const cleanUrl = apiUrl.replace(/^wss?:\/\//, '').replace(/^https?:\/\//, '');
+    // If it's a relative path like '/api', use current host
+    if (cleanUrl.startsWith('/')) {
+      return window.location.host;
+    }
+    return cleanUrl;
+  }
+  
+  // Default: use current host
+  return window.location.host;
+};
+
 export class TrainingProgressWebSocket {
-  constructor(serverUrl = 'localhost:8000') {
-    this.serverUrl = serverUrl;
+  constructor(serverUrl = null) {
+    this.serverUrl = serverUrl || getBackendUrl();
     this.ws = null;
     this.reconnectAttempts = 0;
     this.maxReconnectAttempts = 5;
@@ -61,7 +86,7 @@ export class TrainingProgressWebSocket {
     try {
       const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws';
       const url = `${protocol}://${this.serverUrl}/ml/training/progress/stream`;
-      
+
       console.log(`Connecting to training progress WebSocket: ${url}`);
       this.ws = new WebSocket(url);
 
@@ -153,8 +178,8 @@ export class TrainingProgressWebSocket {
  * WebSocket Client for Data Generation Progress
  */
 export class DataGenerationProgressWebSocket {
-  constructor(serverUrl = 'localhost:8000') {
-    this.serverUrl = serverUrl;
+  constructor(serverUrl = null) {
+    this.serverUrl = serverUrl || getBackendUrl();
     this.ws = null;
     this.reconnectAttempts = 0;
     this.maxReconnectAttempts = 5;
@@ -195,7 +220,7 @@ export class DataGenerationProgressWebSocket {
     try {
       const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws';
       const url = `${protocol}://${this.serverUrl}/ml/training/generate-progress/stream`;
-      
+
       console.log(`Connecting to data generation progress WebSocket: ${url}`);
       this.ws = new WebSocket(url);
 
@@ -284,16 +309,15 @@ export class DataGenerationProgressWebSocket {
 }
 
 /**
- * Polling fallback for browsers that don't support WebSocket
- * or as an alternative to WebSocket
+ * Polling client for training progress (reliable fallback to WebSocket)
  */
 export class TrainingProgressPoller {
-  constructor(apiUrl = 'http://localhost:8000', pollInterval = 1000) {
-    this.apiUrl = apiUrl;
+  constructor(apiUrl = null, pollInterval = 1000) {
+    this.apiUrl = apiUrl || '/api';
     this.pollInterval = pollInterval;
     this.pollingTimer = null;
     this.callbacks = [];
-    this.lastUpdate = null;
+    this.lastSerialized = null;
   }
 
   /**
@@ -350,10 +374,11 @@ export class TrainingProgressPoller {
         }
 
         const update = await response.json();
-        
+
         // Only notify if changed
-        if (JSON.stringify(update) !== JSON.stringify(this.lastUpdate)) {
-          this.lastUpdate = update;
+        const serialized = JSON.stringify(update);
+        if (serialized !== this.lastSerialized) {
+          this.lastSerialized = serialized;
           this._notifyCallbacks(update);
         }
       } catch (error) {
@@ -361,16 +386,10 @@ export class TrainingProgressPoller {
       }
     };
 
-    // Initial poll
     poll();
-    
-    // Set up interval
     this.pollingTimer = setInterval(poll, this.pollInterval);
   }
 
-  /**
-   * Notify all callbacks of update
-   */
   _notifyCallbacks(update) {
     this.callbacks.forEach(callback => {
       try {
@@ -383,15 +402,15 @@ export class TrainingProgressPoller {
 }
 
 /**
- * Data Generation Poller (fallback for WebSocket)
+ * Data Generation Poller (reliable fallback to WebSocket)
  */
 export class DataGenerationProgressPoller {
-  constructor(apiUrl = 'http://localhost:8000', pollInterval = 1000) {
-    this.apiUrl = apiUrl;
+  constructor(apiUrl = null, pollInterval = 1000) {
+    this.apiUrl = apiUrl || '/api';
     this.pollInterval = pollInterval;
     this.pollingTimer = null;
     this.callbacks = [];
-    this.lastUpdate = null;
+    this.lastSerialized = null;
   }
 
   /**
@@ -448,10 +467,11 @@ export class DataGenerationProgressPoller {
         }
 
         const update = await response.json();
-        
+
         // Only notify if changed
-        if (JSON.stringify(update) !== JSON.stringify(this.lastUpdate)) {
-          this.lastUpdate = update;
+        const serialized = JSON.stringify(update);
+        if (serialized !== this.lastSerialized) {
+          this.lastSerialized = serialized;
           this._notifyCallbacks(update);
         }
       } catch (error) {

@@ -113,8 +113,11 @@ class AppSettings(BaseSettings):
     ml_lstm_lr_scheduler_patience: int = Field(default=3, alias="ML_LSTM_LR_SCHEDULER_PATIENCE")
     
     # Random Forest Settings
-    ml_rf_n_estimators: int = Field(default=100, alias="ML_RF_N_ESTIMATORS")
-    ml_rf_max_depth: int = Field(default=10, alias="ML_RF_MAX_DEPTH")
+    # max_depth=8 → max 511 nodes/tree, enough for 100 classes (2^8=256 leaves).
+    # max_depth=6 was too shallow (only 63 leaves < 100 classes → ~0% accuracy).
+    # n_estimators=30 keeps JSON serialization ~15 MB instead of 200 MB (1-hour hang).
+    ml_rf_n_estimators: int = Field(default=30, alias="ML_RF_N_ESTIMATORS")
+    ml_rf_max_depth: int = Field(default=8, alias="ML_RF_MAX_DEPTH")
     ml_rf_min_samples_split: int = Field(default=2, alias="ML_RF_MIN_SAMPLES_SPLIT")
     ml_rf_min_samples_leaf: int = Field(default=1, alias="ML_RF_MIN_SAMPLES_LEAF")
     ml_rf_use_class_weight: bool = Field(default=True, alias="ML_RF_USE_CLASS_WEIGHT")

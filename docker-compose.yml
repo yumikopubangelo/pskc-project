@@ -94,9 +94,9 @@ services:
     command: >
       redis-server
       --requirepass ${REDIS_PASSWORD:-pskc_redis_secret}
-      --maxmemory 256mb
+      --maxmemory 512mb
       --maxmemory-policy allkeys-lru
-      --save 60 1000
+      --save 300 1000
       --loglevel notice
     volumes:
       - redis-data:/data

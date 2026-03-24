@@ -1,6 +1,8 @@
 import React, { useState, useEffect, useCallback } from 'react'
 import Icon from '../components/Icon'
 import apiClient from '../utils/apiClient'
+import TrainingProgress from '../components/TrainingProgress'
+import DataGenerationProgress from '../components/DataGenerationProgress'
 
 const MLTraining = () => {
   // Form state
@@ -21,6 +23,11 @@ const MLTraining = () => {
   const [mlStatus, setMlStatus] = useState(null)
   const [loadingStatus, setLoadingStatus] = useState(true)
   const [evaluating, setEvaluating] = useState(false)
+  // Progress tracking state
+  const [showGenerationProgress, setShowGenerationProgress] = useState(false)
+  const [showTrainingProgress, setShowTrainingProgress] = useState(false)
+  // Saved state for auto-resume
+  const [savedProgressState, setSavedProgressState] = useState(null)
 
   // Scenarios and traffic profiles
   const scenarios = [
@@ -51,64 +58,127 @@ const MLTraining = () => {
     }
   }, [])
 
-  useEffect(() => {
+  // Check for saved progress state on mount (auto-resume)
+  const checkSavedProgress = useCallback(async () => {
+    try {
+      const response = await apiClient.get('/ml/training/state')
+      if (response.state) {
+        setSavedProgressState(response.state)
+        console.log('Found saved progress state:', response.state)
+        // Auto-show training progress if there's ongoing training
+        const phase = response.state.phase
+        if (phase && phase !== 'idle' && phase !== 'completed' && phase !== 'failed') {
+          setShowTrainingProgress(true)
+        }
+      }
+    } catch (err) {
+      console.debug('No saved progress state found:', err)
+    }
+  }, [])
+
+  // Stable callbacks — inline arrows would recreate on every render and
+  // trigger the WebSocket useEffect to disconnect/reconnect constantly.
+  // Defined after loadMLStatus so the reference is available.
+  const handleGenerationComplete = useCallback(() => setShowGenerationProgress(false), [])
+  const handleTrainingComplete = useCallback((result) => {
+    setShowTrainingProgress(false)
+    // If WS delivered final metrics, update trainResult so the summary shows real values
+    if (result?.details && Object.keys(result.details).length > 0) {
+      setTrainResult(prev => ({
+        ...(prev || {}),
+        model_accepted: result.details.model_accepted,
+        val_accuracy: result.details.val_accuracy,
+        val_top_10_accuracy: result.details.val_top_10_accuracy,
+        training_time_s: result.details.training_time_s,
+        sample_count: result.details.sample_count,
+      }))
+    }
     loadMLStatus()
   }, [loadMLStatus])
 
-  // Generate training data
-  const handleGenerateData = async () => {
-  // Validate all fields are positive numbers
-  if (!numEvents || numEvents <= 0 || !numKeys || numKeys <= 0 || !numServices || numServices <= 0 || !durationHours || durationHours <= 0) {
-    setError('All numeric fields must be positive numbers')
-    return
-  }
-  if (numEvents < 100 || numKeys < 10 || numServices > 20 || durationHours > 168) {
-    setError('Events min 100, Keys min 10, Services max 20, Duration max 168')
-    return
-  }
+  useEffect(() => {
+    loadMLStatus()
+    checkSavedProgress()
+  }, [loadMLStatus, checkSavedProgress])
 
-  setGenerating(true)
-  setError(null)
-  setGenerateResult(null)
+    // Generate training data
+    const handleGenerateData = async () => {
+    // Validate all fields are positive numbers
+    if (!numEvents || numEvents <= 0 || !numKeys || numKeys <= 0 || !numServices || numServices <= 0 || !durationHours || durationHours <= 0) {
+      setError('All numeric fields must be positive numbers')
+      return
+    }
+    if (numEvents < 100 || numKeys < 10 || numServices > 20 || durationHours > 168) {
+      setError('Events min 100, Keys min 10, Services max 20, Duration max 168')
+      return
+    }
 
-  try {
-    const response = await apiClient.generateTrainingData({
-      num_events: numEvents,
-      num_keys: numKeys,
-      num_services: numServices,
-      scenario: scenario,
-      traffic_profile: trafficProfile,
-      duration_hours: durationHours,
-    })
-    setGenerateResult(response)
-    await loadMLStatus()
-  } catch (err) {
-    console.error('Failed to generate training data:', err)
-    setError(err.message || 'Failed to generate training data')
-  } finally {
-    setGenerating(false)
-  }
-}
-
-  // Train model
-  const handleTrainModel = async () => {
-    setTraining(true)
+    setShowGenerationProgress(true)
+    setGenerating(true)
     setError(null)
-    setTrainResult(null)
+    setGenerateResult(null)
 
     try {
-      const response = await apiClient.trainModel({
-        force: true,
-        reason: 'manual',
+      const response = await apiClient.generateTrainingData({
+        num_events: numEvents,
+        num_keys: numKeys,
+        num_services: numServices,
+        scenario: scenario,
+        traffic_profile: trafficProfile,
+        duration_hours: durationHours,
       })
-      setTrainResult(response)
-      // Refresh ML status after training
+      setGenerateResult(response)
       await loadMLStatus()
     } catch (err) {
-      console.error('Failed to train model:', err)
-      setError(err.message || 'Failed to train model')
+      console.error('Failed to generate training data:', err)
+      setError(err.message || 'Failed to generate training data')
     } finally {
-      setTraining(false)
+      setGenerating(false)
+      // Keep progress component visible - it will be hidden when WebSocket sends completion signal
+    }
+  }
+
+    // Train model
+    const handleTrainModel = async () => {
+      setShowTrainingProgress(true)
+      setTraining(true)
+      setError(null)
+      setTrainResult(null)
+
+      try {
+        const response = await apiClient.trainModel({
+          force: true,
+          reason: 'manual',
+        })
+        setTrainResult(response)
+        // Refresh ML status after training
+        await loadMLStatus()
+      } catch (err) {
+        console.error('Failed to train model:', err)
+        setError(err.message || 'Failed to train model')
+      } finally {
+        setTraining(false)
+        // Keep progress component visible - it will be hidden when WebSocket sends completion signal
+      }
+    }
+
+  const handleResetModel = async () => {
+    if (!window.confirm(
+      'Reset model state?\n\n' +
+      'Ini akan menghapus model yang aktif saat ini (termasuk yang bermasalah dengan akurasi 100%) ' +
+      'sehingga training berikutnya akan selalu diterima sebagai model awal.\n\n' +
+      'Data event di Redis TIDAK akan dihapus.'
+    )) return
+
+    setError(null)
+    try {
+      await apiClient.post('/ml/training/reset-model')
+      setTrainResult(null)
+      await loadMLStatus()
+      alert('Model berhasil direset. Silakan klik "Train Model" untuk melatih ulang dari awal.')
+    } catch (err) {
+      console.error('Failed to reset model:', err)
+      setError(err.message || 'Failed to reset model')
     }
   }
 
@@ -303,30 +373,37 @@ const MLTraining = () => {
                 )}
               </button>
 
-              {/* Generate Result */}
-              {generateResult && (
-                <div className="mt-4 p-4 bg-green-500/10 border border-green-500/30 rounded-lg">
-                  <div className="flex items-center gap-2 text-green-400 mb-2">
-                    <Icon name="check" className="w-5 h-5" />
-                    <span className="font-medium">Data Generated Successfully</span>
-                  </div>
-                  <div className="grid grid-cols-3 gap-4 text-sm">
-                    <div>
-                      <span className="text-slate-400">Events Generated:</span>
-                      <span className="text-white ml-2">{generateResult.events_generated}</span>
-                    </div>
-                    <div>
-                      <span className="text-slate-400">Events Imported:</span>
-                      <span className="text-white ml-2">{generateResult.events_imported}</span>
-                    </div>
-                    <div>
-                      <span className="text-slate-400">Scenario:</span>
-                      <span className="text-white ml-2">{generateResult.scenario}</span>
-                    </div>
-                  </div>
-                </div>
-              )}
-            </div>
+               {/* Generate Result */}
+               {generateResult && (
+                 <div className="mt-4 p-4 bg-green-500/10 border border-green-500/30 rounded-lg">
+                   <div className="flex items-center gap-2 text-green-400 mb-2">
+                     <Icon name="check" className="w-5 h-5" />
+                     <span className="font-medium">Data Generated Successfully</span>
+                   </div>
+                   <div className="grid grid-cols-3 gap-4 text-sm">
+                     <div>
+                       <span className="text-slate-400">Events Generated:</span>
+                       <span className="text-white ml-2">{generateResult.events_generated}</span>
+                     </div>
+                     <div>
+                       <span className="text-slate-400">Events Imported:</span>
+                       <span className="text-white ml-2">{generateResult.events_imported}</span>
+                     </div>
+                     <div>
+                       <span className="text-slate-400">Scenario:</span>
+                       <span className="text-white ml-2">{generateResult.scenario}</span>
+                     </div>
+                   </div>
+                 </div>
+               )}
+             </div>
+
+             {/* Progress Components */}
+             {showGenerationProgress && (
+               <DataGenerationProgress
+                 onComplete={handleGenerationComplete}
+               />
+             )}
 
             {/* Model Training Card */}
             <div className="bg-dark-card border border-dark-border rounded-xl p-6">
@@ -353,82 +430,99 @@ const MLTraining = () => {
                 </div>
               </div>
 
-              {/* Train Button */}
-              <button
-                onClick={handleTrainModel}
-                disabled={training}
-                className={`w-full flex items-center justify-center gap-2 px-6 py-3 rounded-lg font-medium transition-all ${
-                  training
-                    ? 'bg-slate-600 cursor-not-allowed'
-                    : 'bg-accent-purple hover:bg-accent-purple/80'
-                }`}
-              >
-                {training ? (
-                  <>
-                    <Icon name="loader" className="w-5 h-5 animate-spin" />
-                    <span>Training...</span>
-                  </>
-                ) : (
-                  <>
-                    <Icon name="cpu" className="w-5 h-5" />
-                    <span>Train Model</span>
-                  </>
-                )}
-              </button>
-
-              {/* Train Result */}
-              {trainResult && (
-                <div className={`mt-4 p-4 border rounded-lg ${
-                  trainResult.model_accepted
-                    ? 'bg-green-500/10 border-green-500/30'
-                    : 'bg-yellow-500/10 border-yellow-500/30'
-                }`}>
-                  <div className={`flex items-center gap-2 mb-2 ${
-                    trainResult.model_accepted ? 'text-green-400' : 'text-yellow-400'
-                  }`}>
-                    <Icon name={trainResult.model_accepted ? 'check' : 'info'} className="w-5 h-5" />
-                    <span className="font-medium">
-                      {trainResult.model_accepted
-                        ? 'Training Completed and Model Updated'
-                        : 'Training Evaluated, Existing Version Retained'}
-                    </span>
-                  </div>
-                  <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
-                    <div>
-                      <span className="text-slate-400">Model Version:</span>
-                      <span className="text-white ml-2">{trainResult.model_version || 'N/A'}</span>
-                    </div>
-                    <div>
-                      <span className="text-slate-400">Samples Used:</span>
-                      <span className="text-white ml-2">{trainResult.sample_count || 'N/A'}</span>
-                    </div>
-                    <div>
-                      <span className="text-slate-400">Accuracy:</span>
-                      <span className="text-white ml-2">
-                        {trainResult.val_accuracy != null ? `${(trainResult.val_accuracy * 100).toFixed(1)}%` : 'N/A'}
-                      </span>
-                    </div>
-                    <div>
-                      <span className="text-slate-400">Top-10:</span>
-                      <span className="text-white ml-2">
-                        {trainResult.val_top_10_accuracy != null ? `${(trainResult.val_top_10_accuracy * 100).toFixed(1)}%` : 'N/A'}
-                      </span>
-                    </div>
-                    <div>
-                      <span className="text-slate-400">Training Time:</span>
-                      <span className="text-white ml-2">
-                        {trainResult.training_time_s != null ? `${trainResult.training_time_s.toFixed(2)}s` : 'N/A'}
-                      </span>
-                    </div>
-                  </div>
-                  {!trainResult.model_accepted && (
-                    <div className="mt-3 text-sm text-yellow-300/90">
-                      Active version tetap dipakai karena model baru belum menunjukkan peningkatan yang cukup.
-                    </div>
+              {/* Train Button + Reset */}
+              <div className="flex gap-3">
+                <button
+                  onClick={handleTrainModel}
+                  disabled={training}
+                  className={`flex-1 flex items-center justify-center gap-2 px-6 py-3 rounded-lg font-medium transition-all ${
+                    training
+                      ? 'bg-slate-600 cursor-not-allowed'
+                      : 'bg-accent-purple hover:bg-accent-purple/80'
+                  }`}
+                >
+                  {training ? (
+                    <>
+                      <Icon name="loader" className="w-5 h-5 animate-spin" />
+                      <span>Training...</span>
+                    </>
+                  ) : (
+                    <>
+                      <Icon name="cpu" className="w-5 h-5" />
+                      <span>Train Model</span>
+                    </>
                   )}
-                </div>
-              )}
-            </div>
+                </button>
+                <button
+                  onClick={handleResetModel}
+                  disabled={training}
+                  title="Reset model state (hapus model aktif yang bermasalah, training berikutnya selalu diterima)"
+                  className="px-4 py-3 rounded-lg font-medium transition-all bg-red-900/40 hover:bg-red-700/60 text-red-300 border border-red-700/50 disabled:opacity-40 disabled:cursor-not-allowed"
+                >
+                  <Icon name="trash" className="w-5 h-5" />
+                </button>
+              </div>
+
+               {/* Train Result */}
+               {trainResult && (
+                 <div className={`mt-4 p-4 border rounded-lg ${
+                   trainResult.model_accepted
+                     ? 'bg-green-500/10 border-green-500/30'
+                     : 'bg-yellow-500/10 border-yellow-500/30'
+                 }`}>
+                   <div className={`flex items-center gap-2 mb-2 ${
+                     trainResult.model_accepted ? 'text-green-400' : 'text-yellow-400'
+                   }`}>
+                     <Icon name={trainResult.model_accepted ? 'check' : 'info'} className="w-5 h-5" />
+                     <span className="font-medium">
+                       {trainResult.model_accepted
+                         ? 'Training Completed and Model Updated'
+                         : 'Training Evaluated, Existing Version Retained'}
+                     </span>
+                   </div>
+                   <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
+                     <div>
+                       <span className="text-slate-400">Model Version:</span>
+                       <span className="text-white ml-2">{trainResult.model_version || 'N/A'}</span>
+                     </div>
+                     <div>
+                       <span className="text-slate-400">Samples Used:</span>
+                       <span className="text-white ml-2">{trainResult.sample_count || 'N/A'}</span>
+                     </div>
+                     <div>
+                       <span className="text-slate-400">Accuracy:</span>
+                       <span className="text-white ml-2">
+                         {trainResult.val_accuracy != null ? `${(trainResult.val_accuracy * 100).toFixed(1)}%` : 'N/A'}
+                       </span>
+                     </div>
+                     <div>
+                       <span className="text-slate-400">Top-10:</span>
+                       <span className="text-white ml-2">
+                         {trainResult.val_top_10_accuracy != null ? `${(trainResult.val_top_10_accuracy * 100).toFixed(1)}%` : 'N/A'}
+                       </span>
+                     </div>
+                     <div>
+                       <span className="text-slate-400">Training Time:</span>
+                       <span className="text-white ml-2">
+                         {trainResult.training_time_s != null ? `${trainResult.training_time_s.toFixed(2)}s` : 'N/A'}
+                       </span>
+                     </div>
+                   </div>
+                   {!trainResult.model_accepted && (
+                     <div className="mt-3 text-sm text-yellow-300/90">
+                       Active version tetap dipakai karena model baru belum menunjukkan peningkatan yang cukup.
+                     </div>
+                   )}
+                 </div>
+               )}
+             </div>
+
+             {/* Progress Components */}
+             {showTrainingProgress && (
+               <TrainingProgress
+                 onComplete={handleTrainingComplete}
+               />
+             )}
           </div>
 
           {/* Right Column - Model Status */}

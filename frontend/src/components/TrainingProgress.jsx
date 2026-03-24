@@ -9,7 +9,7 @@
  * - Per-model accuracy display
  */
 
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { TrainingProgressWebSocket, TrainingProgressPoller } from '../utils/progressClient';
 
 const PHASE_NAMES = {
@@ -46,7 +46,7 @@ const PHASE_COLORS = {
   'failed': 'bg-red-600'
 };
 
-export default function TrainingProgress({ onComplete, useWebSocket = true }) {
+export default function TrainingProgress({ onComplete, useWebSocket = false }) {
   const [progress, setProgress] = useState({
     current_phase: 'idle',
     progress_percent: 0,
@@ -66,43 +66,115 @@ export default function TrainingProgress({ onComplete, useWebSocket = true }) {
   });
 
   const [isConnected, setIsConnected] = useState(false);
+  // true once we receive a non-idle phase — prevents rendering before training starts
+  const [trainingStarted, setTrainingStarted] = useState(false);
   const progressClientRef = useRef(null);
+  const elapsedTimerRef = useRef(null);
+  const isActiveRef = useRef(false);
+  const timeoutRef = useRef(null);
+  const hasSeenProgressRef = useRef(false);
+  // Only fire onComplete(failed) if training started but no completion received after 10 min
+  const MAX_WAIT_TIME_MS = 600000;
+
+  // Start local 1s interval to smoothly increment elapsed time between WS messages
+  const startElapsedTimer = useCallback(() => {
+    if (elapsedTimerRef.current) return;
+    isActiveRef.current = true;
+    elapsedTimerRef.current = setInterval(() => {
+      if (!isActiveRef.current) return;
+      setProgress(prev => {
+        const phase = prev.current_phase;
+        if (phase === 'completed' || phase === 'failed' || phase === 'idle') return prev;
+        return { ...prev, elapsed_seconds: prev.elapsed_seconds + 1 };
+      });
+    }, 1000);
+  }, []);
+
+  const stopElapsedTimer = useCallback(() => {
+    isActiveRef.current = false;
+    if (elapsedTimerRef.current) {
+      clearInterval(elapsedTimerRef.current);
+      elapsedTimerRef.current = null;
+    }
+  }, []);
 
   useEffect(() => {
+    // Set a timeout to handle cases where WebSocket doesn't connect or doesn't receive updates
+    timeoutRef.current = setTimeout(() => {
+      if (!hasSeenProgressRef.current) {
+        console.log('Training progress timeout - calling onComplete');
+        setIsConnected(false);
+        stopElapsedTimer();
+        if (onComplete) {
+          onComplete({
+            success: false,
+            phase: 'failed',
+            progress: 0,
+            details: { error: 'WebSocket connection timeout' },
+          });
+        }
+      }
+    }, MAX_WAIT_TIME_MS);
+
     // Initialize progress tracking (WebSocket or polling)
     if (useWebSocket) {
       const wsClient = new TrainingProgressWebSocket();
       progressClientRef.current = wsClient;
 
       wsClient.onUpdate((update) => {
-        setProgress(prev => ({
-          ...prev,
-          current_phase: update.phase,
-          progress_percent: update.progress_percent,
-          latest_update: update,
-          elapsed_seconds: prev.elapsed_seconds + 0.5, // Approximate
-          estimated_remaining_seconds: calculateETA(update.progress_percent, prev.elapsed_seconds)
-        }));
+        if (update._source === 'saved_state') return;
 
-        // Update metrics from details
-        if (update.details) {
-          setProgress(prev => ({
-            ...prev,
-            metrics: {
-              ...prev.metrics,
-              ...update.details
-            }
-          }));
+        hasSeenProgressRef.current = true;
+        if (update.phase && update.phase !== 'idle') {
+          setTrainingStarted(true);
         }
 
-        // Check completion
-        if (update.phase === 'completed' || update.phase === 'failed') {
+        const elapsed = typeof update.elapsed_seconds === 'number'
+          ? update.elapsed_seconds
+          : null;
+
+        setProgress(prev => {
+          const elapsedVal = elapsed !== null ? elapsed : prev.elapsed_seconds;
+
+          let newMetrics = { ...prev.metrics };
+          if (update.details) {
+            newMetrics = { ...newMetrics, ...update.details };
+          }
+          if (update.train_accuracy !== undefined) newMetrics.train_accuracy = update.train_accuracy;
+          if (update.val_accuracy !== undefined) newMetrics.val_accuracy = update.val_accuracy;
+          if (update.train_loss !== undefined) newMetrics.train_loss = update.train_loss;
+          if (update.val_loss !== undefined) newMetrics.val_loss = update.val_loss;
+          if (update.epoch !== undefined) newMetrics.epoch = update.epoch;
+          if (update.total_epochs !== undefined) newMetrics.total_epochs = update.total_epochs;
+          if (update.samples_processed !== undefined) newMetrics.samples_processed = update.samples_processed;
+          if (update.total_samples !== undefined) newMetrics.total_samples = update.total_samples;
+
+          return {
+            ...prev,
+            current_phase: update.phase || prev.current_phase,
+            progress_percent: update.progress_percent ?? prev.progress_percent,
+            latest_update: update,
+            elapsed_seconds: elapsedVal,
+            estimated_remaining_seconds: calculateETA(update.progress_percent ?? prev.progress_percent, elapsedVal),
+            metrics: newMetrics,
+          };
+        });
+
+        const phase = update.phase;
+        if (phase && phase !== 'idle' && phase !== 'completed' && phase !== 'failed') {
+          startElapsedTimer();
+        }
+
+        if (phase === 'completed' || phase === 'failed') {
+          stopElapsedTimer();
           setIsConnected(false);
+          clearTimeout(timeoutRef.current);
           if (onComplete) {
             onComplete({
-              success: update.phase === 'completed',
-              phase: update.phase,
-              progress: update.progress_percent
+              success: phase === 'completed',
+              phase: phase,
+              progress: update.progress_percent,
+              details: update.details || {},
             });
           }
         }
@@ -112,6 +184,8 @@ export default function TrainingProgress({ onComplete, useWebSocket = true }) {
       setIsConnected(true);
 
       return () => {
+        clearTimeout(timeoutRef.current);
+        stopElapsedTimer();
         wsClient.disconnect();
       };
     } else {
@@ -122,10 +196,26 @@ export default function TrainingProgress({ onComplete, useWebSocket = true }) {
       poller.onUpdate((update) => {
         const latestUpdate = update.latest_update;
         if (latestUpdate) {
-          setProgress(update);
-          
+          hasSeenProgressRef.current = true;
+          if (latestUpdate.phase && latestUpdate.phase !== 'idle') {
+            setTrainingStarted(true);
+            setIsConnected(true);
+          }
+
+          const pct = latestUpdate.progress_percent ?? 0;
+          const details = latestUpdate.details || {};
+          setProgress(prev => ({
+            ...prev,
+            ...update,
+            current_phase: latestUpdate.phase || 'idle',
+            progress_percent: pct,
+            estimated_remaining_seconds: calculateETA(pct, update.elapsed_seconds ?? 0),
+            metrics: { ...prev.metrics, ...details },
+          }));
+
           if (latestUpdate.phase === 'completed' || latestUpdate.phase === 'failed') {
             poller.stop();
+            clearTimeout(timeoutRef.current);
             if (onComplete) {
               onComplete({
                 success: latestUpdate.phase === 'completed',
@@ -138,13 +228,14 @@ export default function TrainingProgress({ onComplete, useWebSocket = true }) {
       });
 
       poller.start();
-      setIsConnected(true);
 
       return () => {
+        clearTimeout(timeoutRef.current);
+        stopElapsedTimer();
         poller.stop();
       };
     }
-  }, [onComplete, useWebSocket]);
+  }, [onComplete, useWebSocket, startElapsedTimer, stopElapsedTimer]);
 
   const calculateETA = (percent, elapsed) => {
     if (percent === 0 || elapsed === 0) return null;
@@ -161,9 +252,26 @@ export default function TrainingProgress({ onComplete, useWebSocket = true }) {
   };
 
   const formatPercent = (val) => {
-    if (val === null || val === undefined) return '--';
-    return `${(val * 100).toFixed(1)}%`;
+    if (val === null || val === undefined || isNaN(val)) return '--';
+    // If val is already a percentage (0-100), don't multiply
+    // If val is a decimal (0-1), multiply by 100
+    const numVal = Number(val);
+    if (numVal <= 1) {
+      return `${(numVal * 100).toFixed(1)}%`;
+    }
+    return `${numVal.toFixed(1)}%`;
   };
+
+  if (!trainingStarted) {
+    return (
+      <div className="w-full bg-white rounded-lg shadow-lg p-6 border border-gray-200">
+        <div className="flex items-center gap-3 text-gray-500 py-4">
+          <div className="w-4 h-4 border-2 border-gray-300 border-t-blue-500 rounded-full animate-spin" />
+          <span>Waiting for training to start...</span>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="w-full bg-white rounded-lg shadow-lg p-6 border border-gray-200">
@@ -171,8 +279,8 @@ export default function TrainingProgress({ onComplete, useWebSocket = true }) {
       <div className="flex justify-between items-center mb-6">
         <h2 className="text-2xl font-bold text-gray-800">Training Progress</h2>
         <div className="flex items-center gap-2">
-          <div className={`w-3 h-3 rounded-full ${isConnected ? 'bg-green-500' : 'bg-red-500'}`} />
-          <span className="text-sm text-gray-600">{isConnected ? 'Connected' : 'Disconnected'}</span>
+          <div className={`w-3 h-3 rounded-full ${isConnected ? 'bg-green-500' : 'bg-gray-400'}`} />
+          <span className="text-sm text-gray-600">{isConnected ? 'Live' : 'Polling'}</span>
         </div>
       </div>
 
@@ -192,12 +300,12 @@ export default function TrainingProgress({ onComplete, useWebSocket = true }) {
       <div className="mb-6">
         <div className="flex justify-between items-center mb-2">
           <span className="text-gray-700 font-medium">Progress</span>
-          <span className="text-lg font-bold text-blue-600">{progress.progress_percent.toFixed(1)}%</span>
+          <span className="text-lg font-bold text-blue-600">{(progress.progress_percent || 0).toFixed(1)}%</span>
         </div>
         <div className="w-full bg-gray-200 rounded-full h-4 overflow-hidden">
           <div
             className={`h-full ${PHASE_COLORS[progress.current_phase] || 'bg-blue-500'} transition-all duration-300 ease-out`}
-            style={{ width: `${progress.progress_percent}%` }}
+            style={{ width: `${progress.progress_percent || 0}%` }}
           />
         </div>
       </div>
@@ -245,7 +353,7 @@ export default function TrainingProgress({ onComplete, useWebSocket = true }) {
         )}
 
         {/* Accuracy & Loss */}
-        {(progress.metrics.train_accuracy !== null || progress.metrics.train_loss !== null) && (
+        {(progress.metrics.train_accuracy !== null || progress.metrics.val_accuracy !== null || progress.metrics.train_loss !== null) && (
           <div className="grid grid-cols-2 gap-4">
             {progress.metrics.train_accuracy !== null && (
               <div className="bg-green-50 p-4 rounded-lg">
@@ -283,7 +391,7 @@ export default function TrainingProgress({ onComplete, useWebSocket = true }) {
         )}
 
         {/* No metrics yet */}
-        {progress.metrics.train_accuracy === null && progress.metrics.train_loss === null && (
+        {progress.metrics.train_accuracy === null && progress.metrics.val_accuracy === null && progress.metrics.train_loss === null && (
           <div className="text-center text-gray-500 py-4">
             Waiting for training metrics...
           </div>

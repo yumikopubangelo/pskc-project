@@ -38,6 +38,11 @@ export default defineConfig(({ mode }) => {
                 changeOrigin: true,
                 rewrite: (path) => path.replace(/^\/api/, ''),
               },
+              '/ml/training': {
+                target: proxyTarget,
+                changeOrigin: true,
+                ws: true,
+              },
             }
           : undefined,
     },

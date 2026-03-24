@@ -1,991 +1,1026 @@
-# Feature Roadmap
+# Feature Roadmap PSKC
 
-Dokumen ini adalah backlog pengembangan yang lebih detail daripada `project_status.md`.
+Backlog pengembangan fitur yang **belum dikerjakan atau belum selesai**.
+Untuk fitur yang sudah selesai, lihat [`comprehensive_features.md`](comprehensive_features.md).
 
-Tujuannya bukan hanya mencatat apa yang masih kurang, tetapi juga:
-
-1. menjelaskan fitur apa yang sebenarnya perlu dibangun
-2. menunjukkan kenapa fitur itu penting
-3. memetakan area kode yang kemungkinan terdampak
-4. memberikan definisi selesai yang cukup konkret untuk eksekusi engineering
+---
 
 ## Cara Menggunakan Dokumen Ini
 
-- Gunakan `project_status.md` jika Anda ingin melihat gambaran singkat gap proyek.
-- Gunakan dokumen ini jika Anda ingin memecah gap itu menjadi backlog kerja yang bisa dieksekusi.
-- Jangan membaca semua bagian sebagai pekerjaan paralel. Banyak item di sini punya dependensi dan harus dikerjakan berurutan.
-
-## Update Terbaru (Maret 2026)
-
-### ✅ Completed: Enhanced Simulation Framework
-
-Selesai dikembangkan 3 versi simulation engine dengan fitur lengkap:
-- **enhanced_simulation.py**: Detailed path tracing (L1→L2→ML→KMS visualization)
-- **enhanced_simulation_v2.py**: Persistent cache + log-normal latency + ML transition learning + Pareto distribution
-- **pskc_comparison_fast.py**: Side-by-side comparison dengan 7 reporting sections
-
-**Key Results**:
-- Latency improvement: 61.6% (21.3ms → 8.2ms average)
-- Cache hit rate boost: +13.8% (79.3% → 93.1%)
-- KMS fetch reduction: 100% (602 → 0 per 1000 requests)
-- Prefetch worker success: 96.5% (96.5% job completion)
-- P99 latency improvement: 8.5% (134.31ms → 122.85ms)
-
-**Components Working**:
-- ML Predictor (85% base accuracy + transition learning)
-- L1 In-Memory Cache (1000 entries, <1ms, 3600s TTL)
-- L2 Redis Cache (10,000 entries, 3-7ms, 86400s TTL)
-- KMS Service (log-normal latency, realistic failure modes)
-- Prefetch Worker (async job queueing, 95%+ success)
-
-**What's Next**:
-1. Dokumentasi metodologi dan cara membaca hasil simulasi
-2. Integrasi visualization ke UI dashboard
-3. Real-world validation dengan production traffic
-4. CI gate untuk regression detection
+- Setiap item menjelaskan **apa yang perlu dibangun**, **mengapa penting**, **file yang terdampak**, dan **definisi selesai**.
+- Item memiliki dependensi — jangan dikerjakan paralel sembarangan.
+- Prioritas: `P0` = blocker deploy, `P1` = operasional, `P2` = maturitas produk, `P3` = jangka menengah.
 
 ---
-
-## Prioritas
-
-| Prioritas | Makna |
-| --- | --- |
-| `P0` | penting untuk kestabilan, keamanan, atau kemampuan deploy yang masuk akal |
-| `P1` | penting untuk operasional sistem setelah fondasi stabil |
-| `P2` | penting untuk kematangan produk, observability, dan ergonomi operator |
-| `P3` | nilai tambah jangka menengah, tetapi bukan blocker utama |
 
 ## Ringkasan Backlog
 
-| Area | Prioritas | Status singkat |
-| --- | --- | --- |
-| Deployment dan topologi runtime | `P0` | stack sudah hidup, tetapi policy deployment nyata masih kurang rinci |
-| Observability historis | `P0` | ✅ Selesai - metrics endpoint sekarang dengan persistence ke Redis, ML training metrics, drift events, model lifecycle, key rotation events |
-| Prefetch orchestration yang matang | `P1` | queue, retry, DLQ sudah ada, tetapi replay dan rate control belum matang |
-| Concept drift EWMA maturation | `P1` | ada di desain, implementasi belum matang, perlu diselesaikan agar konsisten dengan klaim paper |
-| Benchmark validation suite | `P1` | ✅ SEBAGIAN SELESAI - Enhanced simulation dengan 3 versi (detailed tracing, persistent cache dengan log-normal latency, fast comparison). Demo menunjukkan 61.6% latency improvement, 93.1% cache hit rate, dan realistic metrics. Perlu: dokumentasi formal, UI integration, dan real-world validation |
-| Zero-downtime key rotation | `P1` | ✅ Selesai - rotation dengan grace period dan atomicity sudah tersedia |
-| Governance model release | `P1` | ✅ Selesai - signing, provenance, promotion, rollback aktif, ensemble LSTM+RF+Markov berjalan |
-| Key lifecycle management | `P1` | ✅ Selesai - cache access, secure store, rotate, revoke, expire semua terintegrasi dalam workflow lengkap dengan API endpoints |
-| Admin dan ops control plane | `P1` | ✅ Selesai - Admin API dengan auth, cache management, model management, dan security endpoints tersedia |
-| River online learning integration | `P2` | ✅ Selesai - River dengan Adaptive Random Forest, Hoeffding Tree, dan drift handling terintegrasi |
-| Frontend productization | `P2` | ✅ Selesai - Production Dockerfile, nginx config, production build config, admin API clients tersedia |
-| Test matrix dan CI yang lebih lengkap | `P2` | CI backend minimum sudah ada, tetapi belum mencakup topology matrix dan failure path penuh |
-| Multi-environment artifacts | `P3` | Docker Compose demo sudah ada, tetapi staging/production manifest belum rapi |
+| Area | Item | Prioritas | Status |
+|------|------|-----------|--------|
+| **Runtime** | Deployment & topologi reverse proxy | P0 | Belum ada |
+| **Runtime** | Production config profile | P0 | Belum ada |
+| **Runtime** | Startup dependency policy | P0 | Belum ada |
+| **ML — Model** | LSTM input sekuensial (bukan tabular) | P0 | Bug arsitektur |
+| **ML — Model** | River tersambung ke `predict_top_n()` | P0 | Terputus |
+| **ML — Model** | Adaptive ensemble weights (Markov dinamis) | P1 | Statis 20% |
+| **ML — Model** | Stratified train/val split | P1 | Belum ada |
+| **ML — Feature** | Fitur N-gram sequence-aware | P1 | Belum ada |
+| **ML — Feature** | Fitur kontekstual service embedding | P1 | Belum ada |
+| **ML — Feature** | Graph-based features dari Markov matrix | P2 | Belum ada |
+| **ML — Feature** | Perbaikan temporal encoding | P2 | Partial |
+| **ML — Training** | HPO dengan Optuna | P2 | Belum ada |
+| **ML — Training** | Class imbalance handling yang lebih baik | P1 | Partial |
+| **ML — Training** | LSTM attention mechanism | P2 | Belum ada |
+| **ML — Drift** | Drift characterization (tipe drift) | P1 | Belum ada |
+| **ML — Drift** | Drift aktif di request path (runtime integration) | P1 | Belum terhubung |
+| **ML — Drift** | Cold-start handling untuk key baru | P1 | Belum ada |
+| **ML — Online** | Feedback loop ke River dari event aktual | P1 | Belum ada |
+| **ML — Eval** | Per-key accuracy tracking | P2 | Belum ada |
+| **ML — Eval** | Prediction confidence estimation | P2 | Belum ada |
+| **ML — Eval** | Automated model health check | P2 | Belum ada |
+| **ML — Governance** | Approval flow antar stage | P1 | Belum ada |
+| **ML — Governance** | Release criteria yang eksplisit | P1 | Belum ada |
+| **ML — Governance** | External provenance (commit SHA) | P2 | Belum ada |
+| **Data Pipeline** | Validasi kualitas data training | P1 | Partial |
+| **Data Pipeline** | Long-term time-series metrics storage | P2 | Belum ada |
+| **Security** | Fine-grained ACL per key_id / service_id | P1 | Belum ada |
+| **Security** | Token-based auth (bukan hanya API key hardcoded) | P1 | Belum ada |
+| **Security** | Multi-tenant key isolation | P2 | Belum ada |
+| **Security** | Incident response hooks (emergency mode) | P1 | Belum ada |
+| **Auth** | AdminAuthManager terintegrasi ke endpoint guard | P1 | Partial |
+| **Observability** | Alert rules (Redis down, DLQ growth, drift, dll.) | P1 | Belum ada |
+| **Observability** | Dashboard operator (health, queue, model state) | P2 | Belum ada |
+| **Observability** | SLA tracking dashboard | P2 | Belum ada |
+| **Observability** | Metrics retention policy + roll-up strategy | P2 | Belum ada |
+| **Prefetch** | DLQ replay workflow yang aman | P1 | Partial |
+| **Prefetch** | Rate control dan backpressure per service | P1 | Belum ada |
+| **Prefetch** | Budgeting dan prioritization per confidence band | P2 | Belum ada |
+| **Benchmark** | Dokumentasi metodologi simulasi formal | P1 | Belum ada |
+| **Benchmark** | UI integration untuk visualisasi benchmark | P2 | Belum ada |
+| **Benchmark** | Confidence interval dan statistical validation | P2 | Belum ada |
+| **Benchmark** | Regression gate di CI | P2 | Belum ada |
+| **Frontend** | Halaman operator (drift, DLQ, registry, lifecycle) | P1 | Partial |
+| **Frontend** | Error handling yang membedakan jenis error | P2 | Partial |
+| **Frontend** | Simulasi visualization di dashboard | P2 | Belum ada |
+| **Testing** | Integration test untuk core request paths | P1 | Belum ada |
+| **Testing** | Topology matrix test (local, Docker, proxy) | P2 | Belum ada |
+| **Testing** | Failure-path suite (Redis down, drift trigger, dll.) | P2 | Belum ada |
+| **Deploy** | Multi-environment manifest (staging, production) | P3 | Belum ada |
+| **Deploy** | Secret management (bukan hanya `.env`) | P2 | Belum ada |
 
 ---
 
-## 1. Deployment dan Topologi Runtime
+## Area 1 — Machine Learning: Model
+
+### ML-1.1 Perbaiki LSTM agar Menerima Input Sekuensial
 
 **Prioritas:** `P0`
 
-### Tujuan
+**Masalah:**
+LSTM saat ini menerima tensor tabular `(batch, 30_features)` — identik dengan input Random Forest. Kemampuan temporal LSTM tidak dimanfaatkan sama sekali, sehingga LSTM hanya berfungsi sebagai RF kedua yang lebih lambat.
 
-Membuat stack PSKC bisa dideploy dengan asumsi yang lebih realistis daripada mode demo lokal.
+**Yang perlu dikerjakan:**
+- Ubah input LSTM menjadi `(batch, sequence_length=10, features=30)` menggunakan `context_window` yang sudah di-extract di `trainer.py`
+- Tambahkan/refactor layer `LSTM → Dropout → Dense → Softmax` untuk prediksi key
+- Update training loop di `trainer.py` agar melempar data sekuensial ke LSTM, bukan tabular flatten
+- Naikkan bobot LSTM di ensemble (dari ~0% efektif ke 25–30%)
+- Pastikan model lama tetap bisa di-load (backward compatibility via version check)
 
-### Kondisi saat ini
+**File terdampak:**
+- [`src/ml/incremental_model.py`](src/ml/incremental_model.py)
+- [`src/ml/trainer.py`](src/ml/trainer.py)
 
-- `api`, `redis`, `prefetch-worker`, `prometheus`, dan `grafana` sudah bisa dijalankan.
-- startup backend, smoke test live, dan focused CI minimum sudah ada.
-- middleware HTTP security, self-test FIPS-style, audit log, dan Redis queue sudah aktif.
-- policy reverse proxy, pemisahan endpoint internal/publik, dan readiness production belum benar-benar dibakukan.
+**Definisi selesai:**
+- LSTM menerima input 3D, bukan 2D
+- Accuracy LSTM lebih tinggi dari RF pada pola temporal dalam test
+- Training pipeline tidak rusak untuk data non-sekuensial
 
-### Fitur yang perlu dikembangkan
-
-1. **Reference deployment dengan reverse proxy**
-   - Tambahkan contoh topologi `reverse-proxy -> api -> redis/prefetch-worker`.
-   - Dokumentasikan `TRUSTED_PROXIES`, header forwarding, dan HSTS/CSP behavior.
-   - Pisahkan contoh dev vs contoh production.
-
-2. **Health vs readiness vs dependency health**
-   - `GET /health` saat ini terlalu sederhana.
-   - Tambahkan endpoint readiness yang benar-benar memeriksa dependency penting.
-   - Tetapkan mana dependency yang fail-open dan mana yang fail-closed.
-
-3. **Pemisahan endpoint publik dan endpoint operasional**
-   - Tentukan endpoint mana yang boleh diakses publik.
-   - Kelompokkan endpoint ops seperti metrics, audit, lifecycle, dan DLQ inspection.
-   - Tambahkan kontrol akses yang konsisten untuk endpoint sensitif.
-
-4. **Policy startup dependency**
-   - Saat ini sebagian dependency diprime secara best-effort.
-   - Perlu policy eksplisit untuk Redis down, audit log unavailable, atau registry model corrupt.
-   - Hasil akhirnya harus terdokumentasi dan terukur.
-
-5. **Production config profile**
-   - Saat ini konfigurasi masih lebih dekat ke development.
-   - Perlu preset atau contoh production untuk timeout, rate limit, secret handling, dan retention.
-
-### Area kode yang kemungkinan terdampak
-
-- `src/api/routes.py`
-- `src/security/security_headers.py`
-- `src/runtime/bootstrap.py`
-- `config/settings.py`
-- `docker-compose.yml`
-- `docs/operations.md`
-
-### Definisi selesai
-
-- ada contoh deployment reverse proxy yang jelas
-- endpoint readiness terpisah dari health sederhana
-- policy akses endpoint sensitif terdokumentasi dan enforced
-- startup behavior untuk dependency failure tidak ambigu
-- smoke test topology yang lebih realistis tersedia
-
-### Validasi minimum
-
-- integration test untuk proxy header dan host validation
-- smoke test Docker dengan proxy nyata
-- negative test untuk Redis unavailable saat startup dan runtime
+**Potensi gain:** +15–30% accuracy pada pola temporal
 
 ---
 
-## 2. Observability Historis
+### ML-1.2 Sambungkan River ke Jalur Prediksi Utama
 
 **Prioritas:** `P0`
 
-### Tujuan
+**Masalah:**
+`RiverOnlineLearner` diimplementasikan dan dilatih, tetapi tidak dipanggil di `predict_top_n()`. Semua kerja online learning diabaikan saat prediksi.
 
-Membuat operator bisa membaca kondisi sistem dari histori, bukan hanya snapshot runtime proses yang sedang hidup.
+**Yang perlu dikerjakan:**
+- Ikutkan River sebagai komponen ke-4 di `EnsembleModel.predict_top_n()`
+- Bobot awal River: 15%, adaptif berdasarkan akurasi
+- Feedback loop: setiap key yang benar-benar diakses di-`partial_fit` ke River secara async via `ml_worker`
+- Fallback aman: jika River error, ensemble tetap berjalan tanpa River
 
-### Kondisi saat ini
+**File terdampak:**
+- [`src/ml/river_online_learning.py`](src/ml/river_online_learning.py)
+- [`src/ml/incremental_model.py`](src/ml/incremental_model.py)
+- [`src/workers/ml_worker.py`](src/workers/ml_worker.py)
 
-- `/metrics`, `/metrics/prefetch`, `/metrics/prometheus`, audit log, dan lifecycle log sudah ada.
-- sebagian metrics frontend masih berasal dari state in-memory proses API.
-- lifecycle model sudah persisten, tetapi latency/cache/training telemetry belum terarsip dengan rapi.
+**Definisi selesai:**
+- River ikut berkontribusi dalam prediksi akhir `predict_top_n()`
+- `partial_fit` dipanggil async setiap ada akses key aktual
+- Error River tidak propagate ke request path
 
-### Fitur yang perlu dikembangkan
-
-1. **Persistensi metrics utama**
-   - simpan seri waktu penting seperti request count, cache hit rate, latency bucket, dan training outcome
-   - pisahkan metrics operasional dengan metrics untuk dashboard demo
-
-2. **Prometheus coverage yang lebih lengkap**
-   - tambahkan queue depth history, retry saturation, worker activity, dan registry state yang lebih lengkap
-   - tentukan label yang stabil agar tidak menimbulkan cardinality berlebihan
-
-3. **Alerting dasar**
-   - Redis unavailable
-   - DLQ growth
-   - audit recovery event
-   - model integrity failure
-   - worker stagnation
-
-4. **Dashboard operasional**
-   - dashboard utama frontend saat ini masih lebih cocok untuk demo
-   - perlu dashboard operator yang fokus ke health, queue, error rate, dan model state
-
-5. **Retention dan cleanup**
-   - audit log dan lifecycle log butuh policy rotasi
-   - metric snapshot lokal butuh retention atau roll-up strategy
-
-### Area kode yang kemungkinan terdampak
-
-- `src/observability/prometheus_exporter.py`
-- `src/api/routes.py`
-- `src/prefetch/queue.py`
-- `src/workers/prefetch_worker.py`
-- `frontend/src/pages/`
-- `docs/operations.md`
-
-### Definisi selesai
-
-- metrik inti tidak lagi hilang hanya karena proses API restart
-- operator punya sinyal yang cukup untuk membedakan error cache, error queue, error model, dan error security
-- ada dashboard atau query operasional yang terdokumentasi
-
-### Validasi minimum
-
-- test endpoint metrics
-- smoke test dengan Prometheus aktif
-- simulasi DLQ/retry untuk memastikan alert condition benar-benar terlihat
+**Potensi gain:** +5–10% accuracy pada pola terkini
 
 ---
 
-## 3. Prefetch Orchestration yang Matang
+### ML-1.3 Adaptive Ensemble Weights (Markov Dinamis)
 
 **Prioritas:** `P1`
 
-### Tujuan
+**Masalah:**
+Bobot Markov terkunci statis di 20% tidak peduli performanya. Jika Markov buruk, dia tetap dapat 20%.
 
-Menjadikan prefetch worker bukan sekadar background task yang hidup, tetapi subsistem yang dapat dioperasikan.
+**Yang perlu dikerjakan:**
+- Extend `EnsembleWeightTracker` untuk tracking sliding-window accuracy Markov dan River
+- Update bobot Markov dan River setiap N prediksi (default N=500) dengan normalisasi softmax
+- Jika akurasi model < threshold minimum → kurangi bobot otomatis
+- Log weight change ke observability layer
 
-### Kondisi saat ini
+**File terdampak:**
+- [`src/ml/incremental_model.py`](src/ml/incremental_model.py)
 
-- request path sudah enqueue job prefetch ke Redis
-- worker sudah konsumsi queue, retry, dan DLQ dasar
-- predictor sudah terhubung ke jalur request utama
+**Definisi selesai:**
+- Semua 4 model (RF, LSTM, Markov, River) memiliki bobot dinamis
+- Weight history bisa di-query via API
 
-### Fitur yang perlu dikembangkan
-
-1. **DLQ replay workflow**
-   - endpoint atau script untuk requeue item dari DLQ
-   - audit trail untuk replay manual
-   - guard agar job berbahaya tidak direplay tanpa filter
-
-2. **Rate control dan backpressure**
-   - batasi jumlah prefetch per service
-   - batasi ukuran queue yang sehat
-   - fallback policy saat worker tertinggal terlalu jauh
-
-3. **Concurrency control worker**
-   - saat ini worker masih sederhana
-   - perlu concurrency policy yang eksplisit agar tidak menyebabkan cache thrashing atau KMS pressure
-
-4. **Failure classification**
-   - bedakan fetch failure, secure store failure, queue failure, dan security rejection
-   - gunakan klasifikasi itu untuk retry policy yang lebih tepat
-
-5. **Budgeting dan prioritization**
-   - jangan semua prediksi diperlakukan sama
-   - perlu budget per service, per priority, atau per confidence band
-
-### Area kode yang kemungkinan terdampak
-
-- `src/api/ml_service.py`
-- `src/prefetch/queue.py`
-- `src/workers/prefetch_worker.py`
-- `src/cache/redis_cache.py`
-- `src/ml/predictor.py`
-
-### Definisi selesai
-
-- operator bisa melihat job gagal, tahu penyebabnya, dan melakukan replay aman
-- worker tidak mem-banjiri cache atau dependency upstream saat load tinggi
-- retry policy tidak lagi seragam untuk semua jenis kegagalan
-
-### Validasi minimum
-
-- test replay DLQ
-- test retry classification
-- load test queue depth vs worker throughput
+**Potensi gain:** +5–10% accuracy
 
 ---
 
-## 4. Concept Drift EWMA Maturation
+### ML-1.4 Stratified Train/Val Split
 
 **Prioritas:** `P1`
 
-> **Catatan konsistensi paper:** Section 2.4 Tinjauan Pustaka mengklaim mekanisme drift detection berbasis EWMA sudah diimplementasikan di PSKC. Item ini memastikan klaim tersebut benar-benar terpenuhi secara fungsional, bukan hanya ada di desain.
+**Masalah:**
+Split temporal murni 70/30 tidak menjaga distribusi kelas — key yang jarang bisa absen dari val set sehingga metrik validasi menipu.
 
-### Tujuan
+**Yang perlu dikerjakan:**
+- Implementasi stratified split yang mempertahankan proporsi per key di train dan val
+- Warning jika ada key dengan < 10 sample di training set
+- Naikkan `min_samples` dari 100 ke 300–500
 
-Menyelesaikan implementasi EWMA drift detection agar model prediksi PSKC dapat beradaptasi secara otomatis ketika distribusi pola akses kunci berubah di lingkungan produksi.
+**File terdampak:**
+- [`src/ml/trainer.py`](src/ml/trainer.py)
 
-### Kondisi saat ini
+**Definisi selesai:**
+- Val set selalu merepresentasikan semua key yang ada di train set
+- Warning tersedia di log jika key under-represented
 
-- konsep drift detection EWMA sudah ada di desain dan sebagian kode
-- integrasi ke request path dan model selection belum matang
-- tidak ada event drift yang terekam di audit log saat ini
-
-### Fitur yang perlu dikembangkan
-
-1. **EWMA window yang terkonfigurasi**
-   - parameter alpha (smoothing factor) dapat dikonfigurasi via `config/settings.py`
-   - window size dapat disesuaikan per skenario beban kerja
-   - dokumentasikan nilai default yang direkomendasikan
-
-2. **Drift detection aktif di request path**
-   - setiap event akses digunakan untuk memperbarui statistik EWMA
-   - saat metric EWMA melampaui threshold, drift flag aktif
-   - model selection fallback ke versi lebih konservatif saat drift terdeteksi
-
-3. **Tiga status drift sesuai desain**
-   - status `stable`: distribusi normal, prediksi penuh aktif
-   - status `warning`: sinyal awal perubahan, prediksi diperlambat
-   - status `active_drift`: perubahan signifikan, fallback ke hot keys dari collector
-   - transisi antar status terekam di audit log
-
-4. **Integrasi dengan model registry**
-   - saat drift aktif, catat konteks drift di lifecycle log
-   - trigger retraining otomatis jika drift berlangsung lebih dari threshold waktu
-   - rollback ke versi model sebelumnya jika akurasi turun drastis pasca-drift
-
-5. **Metrics untuk drift**
-   - ekspor status drift saat ini ke Prometheus (`pskc_drift_status`, `pskc_drift_score`)
-   - tampilkan di dashboard operator
-
-### Area kode yang kemungkinan terdampak
-
-- `src/ml/model.py`
-- `src/ml/predictor.py`
-- `src/ml/trainer.py`
-- `src/ml/data_collector.py`
-- `src/observability/prometheus_exporter.py`
-- `config/settings.py`
-
-### Definisi selesai
-
-- EWMA window aktif dan terkonfigurasi
-- tiga status drift terimplementasi dan dapat di-observe
-- drift event terekam di audit log dan diekspor ke Prometheus
-- model fallback beroperasi saat drift aktif
-- retraining otomatis dapat di-trigger dari kondisi drift
-
-### Validasi minimum
-
-- unit test untuk transisi status stable → warning → active_drift
-- integration test untuk fallback prediksi saat drift aktif
-- smoke test dengan distribusi akses yang sengaja diubah drastis
-- verifikasi bahwa drift event muncul di audit log dan metrics endpoint
+**Potensi gain:** +3–5% accuracy (terutama key jarang)
 
 ---
 
-## 5. Benchmark Validation Suite
+## Area 2 — Machine Learning: Feature Engineering
+
+### ML-2.1 Fitur Sequence-Aware (N-gram)
 
 **Prioritas:** `P1`
 
-> **Catatan konsistensi paper:** Paper mengklaim reduksi latensi 86.8% (Spotify), 85.9% (AWS KMS), dan 86.0% (Netflix) berdasarkan simulasi dengan parameter dari sumber primer. Item ini memastikan angka-angka tersebut dapat direproduksi dan diverifikasi secara independen.
+**Masalah:**
+Fitur saat ini tidak menangkap urutan akses secara eksplisit. Bigram dan trigram patterns diabaikan.
 
-### Tujuan
+**Yang perlu dikerjakan:**
+- Bigram frequency: `P(key_b | key_a)` untuk top-50 key pairs
+- Trigram entropy: ketidakpastian dari 3 akses terakhir
+- Autocorrelation inter-arrival (deteksi pola periodik)
+- Position-in-cycle: posisi event dalam pola berulang yang terdeteksi
 
-Membuat klaim performa PSKC dapat divalidasi ulang dengan satu command, menggunakan parameter yang terdokumentasi dan metodologi yang transparan.
+**File terdampak:**
+- [`src/ml/data_collector.py`](src/ml/data_collector.py)
+- [`src/ml/trainer.py`](src/ml/trainer.py)
 
-### Kondisi saat ini
-
-- **✅ SELESAI**: Enhanced simulation framework dengan 3 versi:
-  1. `enhanced_simulation.py` - Detailed request path tracing dengan visualisasi per-request
-  2. `enhanced_simulation_v2.py` - Persistent L1/L2 caches + log-normal KMS latency + ML transition learning + Pareto distribution
-  3. `pskc_comparison_fast.py` - Side-by-side comparison dengan 7 reporting sections
-- **✅ SELESAI**: Realistic latency modeling menggunakan log-normal distribution (~4.5ms KMS average)
-- **✅ SELESAI**: Comprehensive metrics: latency (P50, P95, P99), cache hit rates, KMS reduction, prefetch effectiveness
-- **✅ SELESAI**: Demo hasil menunjukkan:
-  - Average latency: 61.6% improvement (21.3ms → 8.2ms)
-  - Cache hit rate: +13.8% (79.3% → 93.1%)
-  - KMS fetches: 100% reduction (602 → 0 per 1000 requests)
-  - Prefetch success: 96.5% (2030 queued, 1958 processed)
-  - P99 latency: 8.5% improvement
-
-### Fitur yang masih perlu dikembangkan
-
-1. **Dokumentasi metodologi formal** ⏳
-   - jelaskan secara eksplisit bagaimana parameter diterjemahkan ke simulasi
-   - tambahkan catatan tentang asumsi dan batasan model log-normal
-   - perbarui `simulation/references/README.md` dengan cara mengutip hasil benchmark
-
-2. **UI integration untuk benchmark visualization** ⏳
-   - tampilkan hasil simulasi di frontend dashboard
-   - buat comparison chart PSKC vs baseline yang interaktif
-   - simpan historical comparison results
-
-3. **Real-world validation dengan production traffic** ⏳
-   - benchmark dengan traffic pattern aktual dari Spotify/AWS/Netflix jika data tersedia
-   - validasi bahwa asumsi simulasi sejalan dengan behavior real-world
-
-4. **Confidence interval dan statistical validation** ⏳
-   - hitung confidence interval untuk klaim reduksi latensi
-   - tambahkan significance testing jika ada multiple runs
-   - dokumentasikan sample size dan distribution assumptions
-
-5. **Regression gate di CI** ⏳
-   - tambahkan smoke benchmark ke pipeline CI
-   - gagalkan CI jika reduksi latensi turun lebih dari threshold tertentu
-   - perbarui `.github/workflows/` dengan benchmark validation
-
-### Area kode yang kemungkinan terdampak
-
-- `simulation/enhanced_simulation.py`
-- `simulation/enhanced_simulation_v2.py`
-- `simulation/pskc_comparison_fast.py`
-- `simulation/references/README.md`
-- `frontend/src/pages/Simulation.tsx` atau similar
-- `.github/workflows/` (untuk benchmark gate)
-- `docs/simulation_and_ml.md`
-
-### Status implementasi per komponen
-
-| Komponen | Status | Detail |
-| --- | --- | --- |
-| ML Predictor | ✅ Selesai | 85% base accuracy + transition learning |
-| L1 Cache | ✅ Selesai | 1000 entries, <1ms latency, 3600s TTL |
-| L2 Cache | ✅ Selesai | 10,000 entries, 3-7ms latency, 86400s TTL |
-| KMS Service | ✅ Selesai | Log-normal latency distribution, 2% error rate |
-| Prefetch Worker | ✅ Selesai | Async job queueing, 95%+ success rate |
-| Request Path Tracing | ✅ Selesai | L1→L2→ML→KMS flow visibility |
-| Side-by-side Comparison | ✅ Selesai | 7-section report (latency, cache, KMS, prefetch, visual, summary) |
-| Realistic Latency Model | ✅ Selesai | Log-normal distribution untuk KMS (~90ms avg, scaled for demo) |
-| Pareto Access Pattern | ✅ Selesai | 80/20 rule untuk realistic scenario |
-| **Formal Documentation** | ⏳ Pending | Metodologi dan interpretasi hasil |
-| **UI Integration** | ⏳ Pending | Dashboard visualization |
-| **Real-world Validation** | ⏳ Pending | Production traffic benchmark |
-| **CI Gate** | ⏳ Pending | Regression detection |
-
-### Definisi selesai
-
-- **Immediate (DONE)**:
-  - benchmark dapat dijalankan ulang dan menghasilkan hasil yang konsisten
-  - simulasi menunjukkan latency improvement dan cache effectiveness yang signifikan
-  - comparable results antara 3 versi simulasi
-
-- **Near-term (IN PROGRESS)**:
-  - metodologi terdokumentasi dengan jelas di `simulation/references/README.md`
-  - hasil simulasi terintegrasi di frontend dashboard
-  - confidence interval dan statistical validation tersedia
-
-- **Future**:
-  - CI gate untuk regresi performa
-  - real-world validation dengan production data
-
-### Validasi minimum
-
-- jalankan benchmark dan verifikasi output format yang konsisten
-- bandingkan output dengan angka yang diklaim di paper (86.8% Spotify, 85.9% AWS, 86.0% Netflix)
-- verifikasi bahwa latency improvement tercapai dalam range yang diharapkan
-- smoke test simulation files untuk memastikan dapat dijalankan ulang
+**Potensi gain:** +5–10% accuracy
 
 ---
 
-## 6. Zero-Downtime Key Rotation
+### ML-2.2 Fitur Kontekstual Service Embedding
 
 **Prioritas:** `P1`
 
-> **Catatan konsistensi paper:** Section 2.7 Tinjauan Pustaka menyebutkan "rotasi kunci tanpa downtime" sebagai salah satu fitur pembeda PSKC. Item ini memastikan klaim tersebut terimplementasi secara eksplisit.
+**Masalah:**
+Service hanya dihitung agregat. Identitas service tidak direpresentasikan secara eksplisit.
 
-### Tujuan
+**Yang perlu dikerjakan:**
+- `service_id` embedding: one-hot top-N service, bucket sisanya sebagai "other"
+- `time_since_service_last_access`: detik sejak service ini terakhir akses key ini
+- `service_key_affinity_score`: frekuensi service ini akses key tertentu
 
-Memastikan rotasi kunci kriptografi dapat dilakukan tanpa menyebabkan cache miss spike, service disruption, atau jendela kerentanan antara kunci lama dan kunci baru.
-
-### Kondisi saat ini
-
-- `src/security/secret_rotation.py` sudah ada
-- rotation tersedia secara teknis tetapi tidak memiliki grace period yang terkonfigurasi
-- atomicity antara invalidasi kunci lama dan aktivasi kunci baru belum dijamin
-- tidak ada audit trail khusus untuk siklus rotasi
-
-### Fitur yang perlu dikembangkan
-
-1. **Grace period yang terkonfigurasi**
-   - kunci lama tetap valid selama grace period setelah kunci baru aktif
-   - grace period dapat dikonfigurasi per service atau secara global
-   - setelah grace period habis, kunci lama dihapus dari semua layer cache secara atomik
-
-2. **Dual-key validation window**
-   - selama rotasi, sistem menerima validasi dari kunci lama maupun kunci baru
-   - request yang sedang berjalan tidak terganggu oleh rotasi
-   - tidak ada window di mana kedua kunci tidak tersedia
-
-3. **Atomik invalidasi lintas layer**
-   - invalidasi kunci lama harus terjadi di L1 (LocalCache) dan L2 (Redis) secara konsisten
-   - jika invalidasi L2 gagal, L1 tetap valid sampai retry berhasil
-   - event invalidasi terekam di audit log dengan timestamp yang tepat
-
-4. **Audit trail rotasi**
-   - setiap rotasi menghasilkan chain event: rotation_initiated → new_key_active → old_key_grace → old_key_expired
-   - chain event ini terintegrasi dengan tamper-evident audit logger yang sudah ada
-
-5. **Integrasi dengan window of vulnerability mitigation**
-   - mengacu pada temuan Ozcelik & Skjellum (2021) tentang window of vulnerability pada CRL
-   - pastikan waktu antara keputusan rotasi dan efektivitas rotasi di cache seminimal mungkin
-
-### Area kode yang kemungkinan terdampak
-
-- `src/security/secret_rotation.py`
-- `src/security/rotate_encryption_key.py`
-- `src/cache/encrypted_store.py`
-- `src/cache/local_cache.py`
-- `src/cache/redis_cache.py`
-- `src/security/tamper_evident_logger.py`
-- `src/api/routes.py`
-- `config/settings.py`
-
-### Definisi selesai
-
-- rotasi tidak menyebabkan cache miss spike yang terukur
-- grace period dapat dikonfigurasi dan berfungsi sesuai spesifikasi
-- audit trail mencatat seluruh siklus rotasi dengan timestamp akurat
-- tidak ada window di mana kedua kunci tidak tersedia selama rotasi
-
-### Validasi minimum
-
-- test rotasi dengan traffic aktif dan ukur cache miss rate sebelum/selama/sesudah
-- test grace period: kunci lama masih valid sebelum grace period habis
-- test atomicity: simulasikan Redis failure selama invalidasi dan verifikasi konsistensi
-- verifikasi audit trail mencatat semua event rotasi
+**Potensi gain:** +3–5% accuracy
 
 ---
 
-## 7. Governance Model Release
-
-**Prioritas:** `P1`
-
-### Tujuan
-
-Membawa pipeline model dari sekadar "aman dimuat" menjadi "aman dirilis dan dioperasikan".
-
-### Kondisi saat ini
-
-- training script menghasilkan artefak `.pskc.json`
-- registry memverifikasi checksum dan signature metadata
-- provenance dasar, active version, promote, rollback, dan lifecycle log sudah aktif
-- runtime trainer/predictor memuat active version dari registry
-- **Ensemble Model (LSTM + RandomForest + Markov Chain) sudah aktif dan berjalan di runtime**
-- **LSTM sudah terintegrasi penuh dalam pipeline prediksi**
-- Online learning dengan concept drift EWMA ada di desain, tapi masih belum matang penuh (lihat item 4)
-
-### Fitur yang perlu dikembangkan
-
-1. **Approval flow antar stage**
-   - promotion saat ini masih bisa dilakukan langsung
-   - perlu workflow approval untuk pindah dari `development → staging → production`
-
-2. **Release criteria yang eksplisit**
-   - threshold akurasi minimum
-   - data volume minimum
-   - tidak ada integrity issue
-   - bukti evaluasi yang terdokumentasi
-
-3. **External provenance**
-   - ikat model ke commit SHA
-   - simpan metadata environment training
-   - jika memungkinkan, tambahkan attestation atau manifest supply-chain
-
-4. **Registry retention dan cleanup**
-   - policy untuk jumlah versi yang disimpan
-   - policy untuk versi yang boleh dihapus
-   - perlindungan agar active version atau version production tidak terhapus sembarangan
-
-5. **Release playbook**
-   - kapan promote
-   - kapan rollback
-   - bagaimana menilai drift
-   - bagaimana menangani signature mismatch
-
-### Area kode yang kemungkinan terdampak
-
-- `scripts/train_model.py`
-- `src/ml/model_registry.py`
-- `src/ml/trainer.py`
-- `src/api/ml_service.py`
-- `src/api/routes.py`
-- `docs/simulation_and_ml.md`
-
-### Definisi selesai
-
-- setiap perubahan stage model punya jejak approval atau alasan release
-- rollback bukan hanya fitur teknis, tetapi juga prosedur operasional yang terdokumentasi
-- provenance model cukup untuk melacak asal artefak dan konteks training
-
-### Validasi minimum
-
-- regression test untuk approval gate
-- test integritas registry setelah promote/rollback
-- smoke test runtime load setelah promotion
-
----
-
-## 8. Key Lifecycle Management
-
-**Prioritas:** `P1`
-
-### Tujuan
-
-Membuat PSKC terasa seperti sistem manajemen key yang lebih lengkap, bukan hanya secure cache. Mencakup revokasi responsif sesuai temuan tentang window of vulnerability (Ozcelik & Skjellum, 2021).
-
-### Kondisi saat ini
-
-- key bisa disimpan, diakses, dan di-cache dengan jalur yang aman
-- IDS, audit, dan cache policy sudah aktif
-- endpoint `/keys/invalidate` sudah ada
-- revoke, rotate, expire, consume, dan ACL per service belum menjadi workflow utuh
-- parameter `ttl` di `/keys/store` belum diteruskan ke secure store
-
-### Fitur yang perlu dikembangkan
-
-1. **Revocation yang responsif**
-   - key yang ditarik harus bisa dihapus dari seluruh layer cache (L1 dan L2) secara instan
-   - event revocation harus terekam di audit log dengan timestamp akurat
-   - meminimalkan window of vulnerability antara keputusan revokasi dan efektivitas di cache
-
-2. **TTL forwarding di `/keys/store`**
-   - perbaiki implementasi endpoint agar parameter `ttl` benar-benar diteruskan ke `secure_set()`
-   - TTL dinamis dari `CachePolicyManager` tetap berlaku sebagai fallback
-
-3. **Rotation workflow** (lihat juga item 6)
-   - versi key lama dan baru
-   - graceful transition
-   - invalidation policy untuk material lama
-
-4. **Expiration and consume semantics**
-   - tidak semua key cocok dengan TTL sederhana
-   - beberapa material mungkin one-time use atau bounded use
-
-5. **Service-level authorization**
-   - service mana boleh akses key apa
-   - audit jika service keluar dari scope
-
-6. **Incident response hooks**
-   - purge cepat
-   - denylist service
-   - emergency mode untuk access throttling
-
-### Area kode yang kemungkinan terdampak
-
-- `src/security/intrusion_detection.py`
-- `src/cache/encrypted_store.py`
-- `src/api/routes.py`
-- `src/auth/`
-- `docs/security_model.md`
-
-### Definisi selesai
-
-- lifecycle key punya event dan aturan yang eksplisit
-- revoke/rotate tidak bergantung pada intervensi manual di cache
-- service authorization bisa dipaksa di jalur request utama
-- parameter `ttl` di `/keys/store` berfungsi sesuai schema
-
-### Validasi minimum
-
-- test revoke ke semua layer cache (L1 dan L2)
-- test TTL forwarding di `/keys/store`
-- test rotation rollout
-- test authorization violation dan audit trail
-
----
-
-## 9. Admin dan Ops Control Plane
-
-**Prioritas:** `P1`
-
-### Tujuan
-
-Memberikan operator kontrol yang cukup tanpa harus masuk langsung ke file system atau Redis.
-
-### Kondisi saat ini
-
-- beberapa endpoint observability sudah tersedia
-- audit dan intrusion inspection sudah ada
-- belum ada admin API yang rapi untuk control plane operasional
-
-### Fitur yang perlu dikembangkan
-
-1. **Admin endpoints untuk cache**
-   - cache summary per service
-   - invalidate by prefix
-   - inspect TTL
-   - warmup status
-
-2. **Admin endpoints untuk model**
-   - versi model per stage
-   - active version history
-   - compare registry entries
-   - export lifecycle summary
-
-3. **Admin endpoints untuk security**
-   - intrusion summary
-   - current blocked IP list
-   - reputation view
-   - audit recovery history
-
-4. **AuthN/AuthZ untuk control plane**
-   - endpoint admin tidak boleh sekadar bergantung pada topologi jaringan
-   - perlu auth yang konsisten
-
-### Area kode yang kemungkinan terdampak
-
-- `src/api/routes.py`
-- `src/api/schemas.py`
-- `src/security/intrusion_detection.py`
-- `src/security/tamper_evident_logger.py`
-- `docs/api_reference.md`
-
-### Definisi selesai
-
-- operator bisa melakukan inspeksi dan tindakan dasar tanpa akses shell langsung
-- endpoint admin dibedakan jelas dari endpoint aplikasi biasa
-- access control untuk admin endpoint tidak ambigu
-
-### Validasi minimum
-
-- test authorization admin endpoint
-- test destructive-control safeguard
-- smoke test cache/model/security admin flows
-
----
-
-## 10. River Online Learning Integration
+### ML-2.3 Graph-Based Features dari Markov Transition Matrix
 
 **Prioritas:** `P2`
 
-> **Catatan konsistensi paper:** README dan dokumentasi teknis awal menyebut River sebagai komponen online learning. Saat ini RF+Markov sudah stabil. Item ini mengintegrasikan River untuk true incremental learning tanpa mengganggu ensemble yang sudah ada.
+**Masalah:**
+Markov menyimpan transition matrix tetapi informasinya tidak dimanfaatkan sebagai fitur untuk RF/LSTM.
 
-### Tujuan
+**Yang perlu dikerjakan:**
+- `in_degree`: jumlah key yang mengarah ke key ini
+- `out_degree`: jumlah key yang biasanya diakses setelah key ini
+- `pagerank_score`: "kepentingan" key dalam access graph
+- `key_community_id`: cluster ID dari community detection
 
-Mengintegrasikan library River agar model PSKC dapat diperbarui secara inkremental per event akses, tanpa memerlukan full retraining yang membutuhkan batch data.
+**File terdampak:**
+- [`src/ml/pattern_analyzer.py`](src/ml/pattern_analyzer.py)
 
-### Kondisi saat ini
-
-- `EnsembleModel` mendukung LSTM + RandomForest + Markov Chain
-- retraining saat ini memerlukan batch data yang cukup via `/ml/retrain`
-- River belum ada di `requirements.txt` atau pipeline training
-
-### Fitur yang perlu dikembangkan
-
-1. **River model wrapper**
-   - bungkus River classifier atau regressor yang kompatibel dengan interface `EnsembleModel`
-   - River component menjadi member keempat ensemble, bukan pengganti
-
-2. **Incremental update per event**
-   - setiap event akses yang direkam oleh `DataCollector` juga men-trigger River update
-   - update River tidak memblokir request path (async atau background)
-
-3. **Kompatibilitas dengan model registry**
-   - artefak River dapat disimpan dan dimuat melalui `ModelRegistry` yang sudah ada
-   - checksum dan signature berlaku untuk artefak River
-
-4. **Fallback yang aman**
-   - jika River update gagal, ensemble tetap berfungsi dengan RF+Markov
-   - error River tidak propagate ke request path utama
-
-5. **Kontribusi River ke prediksi ensemble**
-   - tentukan bobot kontribusi River vs RF vs Markov dalam ensemble vote
-   - bobot dapat dikonfigurasi dan didokumentasikan
-
-### Area kode yang kemungkinan terdampak
-
-- `src/ml/model.py`
-- `src/ml/trainer.py`
-- `src/ml/data_collector.py`
-- `src/ml/model_registry.py`
-- `requirements.txt`
-
-### Definisi selesai
-
-- River terintegrasi sebagai komponen ensemble keempat
-- update inkremental berjalan tanpa memblokir request path
-- artefak River kompatibel dengan model registry yang sudah ada
-- fallback ke ensemble tanpa River berjalan dengan benar
-
-### Validasi minimum
-
-- unit test untuk River wrapper
-- test incremental update tanpa memblokir latency request
-- test fallback saat River update gagal
-- smoke test artefak River di model registry
+**Potensi gain:** +4–6% accuracy
 
 ---
 
-## 11. Frontend Productization
+### ML-2.4 Perbaiki Temporal Encoding
 
 **Prioritas:** `P2`
 
-### Tujuan
+**Masalah:**
+Encoding jam/hari hanya sin/cos dasar. Tidak ada pola transisi jam atau konteks minggu.
 
-Mengurangi jejak demo-heavy yang tersisa dan membuat UI lebih cocok sebagai client operasional.
+**Yang perlu dikerjakan:**
+- `hour_transition_frequency`: frekuensi historis akses saat jam berganti
+- `day_of_month` cyclical, `week_of_year` cyclical
+- `is_business_hour`: boolean
+- `minutes_from_hour_boundary`: posisi dalam jam berjalan
 
-### Kondisi saat ini
-
-- overview, dashboard, simulation, dan ML pipeline sudah membaca backend
-- beberapa area UI masih menyisakan pola presentasional atau state demo lama
-- frontend Docker masih berupa Vite dev server
-
-### Fitur yang perlu dikembangkan
-
-1. **Pembersihan mode demo**
-   - pastikan area UI yang tersisa tidak kembali ke dataset lokal diam-diam
-   - audit utilitas fallback yang masih tersisa
-
-2. **Halaman operator**
-   - registry model
-   - lifecycle model
-   - prefetch queue/DLQ
-   - audit dan intrusion overview
-   - status drift EWMA (terintegrasi dengan item 4)
-
-3. **Error handling frontend**
-   - tampilkan perbedaan antara no data, backend down, security denied, dan worker lag
-
-4. **Frontend build production**
-   - Docker image production
-   - static serving yang benar
-   - env strategy yang konsisten
-
-### Area kode yang kemungkinan terdampak
-
-- `frontend/src/pages/`
-- `frontend/src/utils/`
-- `frontend/vite.config.js`
-- `docker-compose.yml`
-- `docs/getting_started.md`
-
-### Definisi selesai
-
-- UI utama tidak bergantung pada data demo lokal
-- operator bisa melihat state backend penting dari UI termasuk status drift
-- container frontend tidak lagi hanya dev server
-
-### Validasi minimum
-
-- build frontend production
-- smoke test UI terhadap backend live
-- regression test untuk API error states di halaman utama
+**Potensi gain:** +2–3% accuracy
 
 ---
 
-## 12. Test Matrix dan CI yang Lebih Lengkap
+## Area 3 — Machine Learning: Training & Model Improvements
+
+### ML-3.1 Hyperparameter Optimization dengan Optuna
 
 **Prioritas:** `P2`
 
-### Tujuan
+**Masalah:**
+RF menggunakan 100 trees dan depth tetap — belum tentu optimal untuk distribusi data yang berubah-ubah.
 
-Membuat perubahan besar di repository ini bisa divalidasi tanpa banyak tebakan manual, termasuk memastikan klaim performa di paper tidak mengalami regresi.
+**Yang perlu dikerjakan:**
+- Integrasikan Optuna (budget: max 10 menit per training run)
+- Parameter yang di-tune: `n_estimators`, `max_depth`, `min_samples_split`, `feature_selection_k`, LSTM hidden size
+- Simpan best params ke config, dipakai pada scheduled training berikutnya
+- Hanya jalan saat scheduled training, tidak saat drift-triggered training
 
-### Kondisi saat ini
+**File baru:** [`src/ml/hpo_optuna.py`](src/ml/hpo_optuna.py)
 
-- focused backend tests sudah ada
-- smoke backend live via Docker sudah ada
-- seluruh repo belum bisa dijadikan sinyal hijau tunggal karena masih ada jejak legacy
-
-### Fitur yang perlu dikembangkan
-
-1. **Pisahkan test legacy vs current architecture**
-   - tandai mana test yang memang obsolete
-   - jangan biarkan `pytest` penuh ambigu selamanya
-
-2. **Topology matrix**
-   - local runtime
-   - Docker runtime
-   - monitoring profile
-   - proxy-enabled topology
-
-3. **Failure-path suite**
-   - Redis unavailable
-   - audit log recovery
-   - model integrity failure
-   - queue backlog
-   - drift detection trigger
-
-4. **Performance and load validation**
-   - baseline latency
-   - prefetch throughput
-   - cache hit behavior
-   - benchmark regression gate (terintegrasi dengan item 5)
-
-5. **Docs gate minimum**
-   - perubahan endpoint harus memicu review docs terkait
-   - perubahan env/deploy harus memicu review operations docs
-
-### Area kode yang kemungkinan terdampak
-
-- `.github/workflows/`
-- `tests/`
-- `scripts/smoke_backend_runtime.py`
-- `docs/`
-
-### Definisi selesai
-
-- ada subset test yang jelas untuk health repo saat ini
-- ada smoke matrix minimum untuk topology utama
-- kegagalan production-critical punya coverage otomatis
-- benchmark regression gate aktif di CI
-
-### Validasi minimum
-
-- workflow CI baru
-- test failure-path yang benar-benar dapat dipicu
-- dokumentasi matrix test di `docs/development.md`
+**Potensi gain:** +3–5% accuracy
 
 ---
 
-## 13. Multi-Environment Artifacts
+### ML-3.2 Perbaiki Class Imbalance Handling
+
+**Prioritas:** `P1`
+
+**Masalah:**
+Balancing ke median class size bisa menipu metrik validasi dan menyebabkan overfit pada key jarang.
+
+**Yang perlu dikerjakan:**
+- Ganti ke `class_weight='balanced'` di RF (weighted loss, bukan oversampling)
+- Hanya oversample class dengan sample < 10% dari mean
+- Stratified sampling di `DataBalancer`
+
+**File terdampak:**
+- [`src/ml/model_improvements.py`](src/ml/model_improvements.py)
+
+**Potensi gain:** +3–5% accuracy (metrik lebih jujur)
+
+---
+
+### ML-3.3 Attention Mechanism pada LSTM
+
+**Prioritas:** `P2` *(dependensi: ML-1.1 harus selesai dulu)*
+
+**Yang perlu dikerjakan:**
+- Self-attention layer setelah LSTM output untuk meningkatkan kemampuan menangkap dependensi jangka panjang
+- Attention weights bisa divisualisasikan untuk debugging
+- Multi-head attention opsional jika ukuran model memungkinkan
+
+**Potensi gain:** +3–5% accuracy pada pola temporal kompleks
+
+---
+
+## Area 4 — Machine Learning: Drift & Online Learning
+
+### ML-4.1 Drift Characterization (Klasifikasi Tipe Drift)
+
+**Prioritas:** `P1`
+
+**Masalah:**
+Drift hanya terdeteksi ya/tidak. Tidak ada klasifikasi tipe sehingga strategi respons tidak bisa dibedakan.
+
+**Tipe drift yang perlu dibedakan:**
+
+| Tipe | Karakteristik | Respons |
+|------|--------------|---------|
+| Gradual | Penurunan perlahan selama beberapa jam | Adjust learning rate |
+| Sudden | Perubahan mendadak dalam satu window | Retrain segera dengan data terbaru |
+| Recurring | Pola musiman/periodik | Gunakan seasonal model historis |
+| Emerging keys | Key baru muncul yang tidak ada di training | Cold-start handling khusus |
+
+**File terdampak:**
+- [`src/ml/pattern_analyzer.py`](src/ml/pattern_analyzer.py)
+- [`src/ml/auto_retrainer.py`](src/ml/auto_retrainer.py)
+
+---
+
+### ML-4.2 Drift Detection Aktif di Request Path
+
+**Prioritas:** `P1`
+
+**Masalah:**
+`DriftDetector` sudah diimplementasikan di `trainer.py` tetapi tidak dipanggil di request path `/keys/access`. Drift hanya terdeteksi saat training cycle, bukan saat runtime.
+
+**Yang perlu dikerjakan:**
+- Update statistik EWMA setiap event akses (non-blocking, via background queue)
+- Saat drift flag aktif, ubah behavior prediksi ke mode konservatif (fallback ke hot keys)
+- Tiga status drift terimplementasi di runtime: `stable` → `warning` → `active_drift`
+- Transisi antar status terekam di audit log
+- Ekspor status drift ke Prometheus: `pskc_drift_status`, `pskc_drift_score`
+
+**File terdampak:**
+- [`src/ml/predictor.py`](src/ml/predictor.py)
+- [`src/ml/trainer.py`](src/ml/trainer.py)
+- [`src/observability/prometheus_exporter.py`](src/observability/prometheus_exporter.py)
+- [`config/settings.py`](config/settings.py)
+
+**Definisi selesai:**
+- Drift event terekam di audit log saat status berubah
+- Model fallback beroperasi saat `active_drift`
+- Status drift tampil di `/ml/drift` endpoint dan Prometheus
+
+---
+
+### ML-4.3 Cold-Start Handling untuk Key Baru
+
+**Prioritas:** `P1`
+
+**Masalah:**
+Key baru tidak punya history — akurasi sangat rendah sampai 50–100 event terkumpul. Tidak ada fallback bermakna.
+
+**Yang perlu dikerjakan:**
+- Deteksi otomatis key baru (belum ada di training data)
+- Similarity-based fallback: cari key paling mirip secara fitur (cosine distance)
+- Pinjam distribusi prediksi dari key serupa selama cold-start phase
+- Tambahkan flag `is_cold_start: true` di response prediksi
+- River model sebagai learner utama untuk key baru (belajar lebih cepat dari RF)
+
+**Potensi gain:** +5–8% accuracy pada key baru
+
+---
+
+### ML-4.4 Feedback Loop ke River dari Event Aktual
+
+**Prioritas:** `P1`
+
+**Masalah:**
+River tidak pernah mendapat konfirmasi prediksi yang benar — tidak belajar dari kesalahan di production.
+
+**Yang perlu dikerjakan:**
+- Cache prediksi terakhir per session/request
+- Saat key berikutnya diakses, bandingkan dengan prediksi sebelumnya
+- Panggil `river_model.partial_fit(X_prev, y_actual)` secara async via `ml_worker`
+- Rate limiting untuk partial_fit agar tidak membebani worker
+
+**File terdampak:**
+- [`src/ml/river_online_learning.py`](src/ml/river_online_learning.py)
+- [`src/workers/ml_worker.py`](src/workers/ml_worker.py)
+
+---
+
+## Area 5 — Machine Learning: Evaluasi & Observabilitas
+
+### ML-5.1 Per-Key Accuracy Tracking
+
+**Prioritas:** `P2`
+
+**Masalah:**
+Hanya ada global top-1 dan top-10 accuracy. Tidak diketahui key mana yang prediksinya buruk.
+
+**Yang perlu dikerjakan:**
+- Confusion matrix ringkas (top-50 key) per training run
+- Tracking per-key accuracy: hot keys (>1000 akses), medium, cold
+- Expose via endpoint `GET /ml/metrics/per-key`
+
+**File baru/terdampak:** [`src/ml/evaluation.py`](src/ml/evaluation.py)
+
+---
+
+### ML-5.2 Prediction Confidence Estimation
+
+**Prioritas:** `P2`
+
+**Yang perlu dikerjakan:**
+- Hitung ensemble variance: jika RF, LSTM, Markov sepakat → confidence tinggi
+- Temperature scaling untuk kalibrasi probabilitas
+- Expose `confidence_score` di response prediksi
+- Abstention threshold: jika confidence < X, tambahkan flag `low_confidence`
+
+---
+
+### ML-5.3 Automated Model Health Check
+
+**Prioritas:** `P2`
+
+**Yang perlu dikerjakan:**
+- Cek rutin setiap 1 jam: bandingkan prediksi vs actual dari event yang masuk ke `data_collector`
+- Jika online accuracy drop > 10% → trigger drift check segera
+- Alert ke log dan Prometheus jika model health buruk
+
+---
+
+## Area 6 — Machine Learning: Governance & Deployment Safety
+
+### ML-6.1 Approval Flow Antar Stage
+
+**Prioritas:** `P1`
+
+**Masalah:**
+Promotion model bisa dilakukan langsung tanpa approval. Tidak ada gate antara `development → staging → production`.
+
+**Yang perlu dikerjakan:**
+- Workflow approval: promotion perlu dikonfirmasi dengan alasan dan authorizer
+- Release criteria yang eksplisit: threshold accuracy minimum, volume data minimum, tidak ada integrity issue
+- Log approval trail sebagai bagian dari lifecycle event
+
+**File terdampak:**
+- [`src/ml/model_registry.py`](src/ml/model_registry.py)
+- [`src/api/route_ml.py`](src/api/route_ml.py)
+
+---
+
+### ML-6.2 External Provenance (Commit SHA & Environment)
+
+**Prioritas:** `P2`
+
+**Yang perlu dikerjakan:**
+- Ikat artefak model ke git commit SHA saat training
+- Simpan metadata environment training (Python version, package versions)
+- Tambahkan ke model signature/manifest
+
+**File terdampak:**
+- [`src/ml/trainer.py`](src/ml/trainer.py)
+- [`src/ml/model_registry.py`](src/ml/model_registry.py)
+
+---
+
+### ML-6.3 Registry Retention & Cleanup Policy
+
+**Prioritas:** `P2`
+
+**Yang perlu dikerjakan:**
+- Policy: jumlah maksimum versi yang disimpan per model
+- Perlindungan: versi active/production tidak boleh dihapus sembarangan
+- Script cleanup otomatis dengan dry-run mode
+
+---
+
+## Area 7 — Data Pipeline
+
+### DP-1 Validasi Kualitas Data Training
+
+**Prioritas:** `P1`
+
+**Masalah:**
+Validasi data hanya di level event individual. Tidak ada validasi kualitas dataset sebelum training dimulai.
+
+**Yang perlu dikerjakan:**
+- Cek distribusi label sebelum training: warning jika satu key dominasi >50%
+- Cek coverage: minimal X unique key ada di dataset
+- Cek temporal coverage: data mencakup distribusi jam/hari yang cukup
+- Reject training jika data quality score < threshold
+
+**File terdampak:**
+- [`src/ml/trainer.py`](src/ml/trainer.py)
+- [`src/ml/data_collector.py`](src/ml/data_collector.py)
+
+---
+
+### DP-2 Long-Term Time-Series Metrics Storage
+
+**Prioritas:** `P2`
+
+**Masalah:**
+Metrics hanya disimpan di Redis dengan retensi 24 jam. Tidak ada cara melihat tren minggu atau bulan lalu.
+
+**Yang perlu dikerjakan:**
+- Pilihan: Prometheus remote write, InfluxDB, atau TimescaleDB
+- Metrics agregasi/roll-up untuk historical analysis (hourly → daily → weekly)
+- Dashboard multi-week trend di frontend
+- Retention policy yang terdokumentasi
+
+**File terdampak:**
+- [`src/observability/metrics_persistence.py`](src/observability/metrics_persistence.py)
+- [`src/observability/prometheus_exporter.py`](src/observability/prometheus_exporter.py)
+
+---
+
+## Area 8 — Security & Auth
+
+### SEC-1 Fine-Grained ACL per key_id / service_id
+
+**Prioritas:** `P1`
+
+**Masalah:**
+Access control saat ini berbasis role global. Tidak ada ACL yang menyatakan "service X boleh akses key Y".
+
+**Yang perlu dikerjakan:**
+- ACL rule: `(service_id, key_id_prefix) → allowed/denied`
+- Enforcement di `SecureCacheManager.secure_get()` dan `secure_set()`
+- Audit log jika service mencoba akses di luar scope
+- Admin endpoint untuk manage ACL rules
+
+**File terdampak:**
+- [`src/security/access_control.py`](src/security/access_control.py)
+- [`src/cache/encrypted_store.py`](src/cache/encrypted_store.py)
+- [`src/api/route_admin_pipeline.py`](src/api/route_admin_pipeline.py)
+
+---
+
+### SEC-2 Token-Based Auth yang Proper
+
+**Prioritas:** `P1`
+
+**Masalah:**
+Auth admin saat ini menggunakan hardcoded API key untuk dev. Tidak ada token lifecycle (expiry, revocation, rotation).
+
+**Yang perlu dikerjakan:**
+- Token-based auth: JWT atau opaque token dengan expiry
+- Token revocation list
+- Token rotation tanpa downtime
+- Integration test untuk expired/revoked token
+
+**File terdampak:**
+- [`src/api/admin_control_plane.py`](src/api/admin_control_plane.py)
+- [`src/security/access_control.py`](src/security/access_control.py)
+
+---
+
+### SEC-3 AdminAuthManager Terintegrasi ke Semua Endpoint Guard
+
+**Prioritas:** `P1`
+
+**Masalah:**
+`AdminAuthManager` sudah ada di `admin_control_plane.py` tetapi tidak semua endpoint sensitif menggunakannya secara konsisten.
+
+**Yang perlu dikerjakan:**
+- Audit semua endpoint yang butuh auth
+- Terapkan `AdminAuthManager` dependency di semua endpoint sensitif secara konsisten
+- Test: request tanpa token ke endpoint sensitif harus 401/403
+
+---
+
+### SEC-4 Multi-Tenant Key Isolation
+
+**Prioritas:** `P2`
+
+**Yang perlu dikerjakan:**
+- Namespace key per tenant di cache (prefix strategy)
+- Isolasi enkripsi: tenant berbeda tidak bisa dekripsi key milik tenant lain
+- Metrics per-tenant
+
+---
+
+### SEC-5 Incident Response Hooks (Emergency Mode)
+
+**Prioritas:** `P1`
+
+**Yang perlu dikerjakan:**
+- `POST /admin/security/emergency-purge` — purge semua key dari cache satu service
+- `POST /admin/security/denylist-service` — blokir service dari akses
+- Emergency mode: throttle semua akses ke rate sangat rendah
+- Semua operasi ini terekam di audit log dengan justifikasi
+
+**File terdampak:**
+- [`src/api/admin_control_plane.py`](src/api/admin_control_plane.py)
+- [`src/security/intrusion_detection.py`](src/security/intrusion_detection.py)
+
+---
+
+## Area 9 — Observability
+
+### OBS-1 Alert Rules
+
+**Prioritas:** `P1`
+
+**Masalah:**
+Tidak ada alert rule. Operator tidak tahu ada masalah kecuali aktif memantau.
+
+**Alert yang perlu diimplementasikan:**
+
+| Kondisi | Severity | Channel |
+|---------|---------|---------|
+| Redis unavailable > 30 detik | Critical | Log + Prometheus alert |
+| DLQ size > threshold | Warning | Log + Prometheus |
+| Worker stagnation (no heartbeat > 60s) | Critical | Log + Prometheus |
+| Model integrity failure saat load | Critical | Log + audit |
+| Drift status = `active_drift` | Warning | Log + Prometheus |
+| Audit log recovery event | Warning | Log |
+| Cache hit rate drop > 20% | Warning | Prometheus |
+
+**File terdampak:**
+- [`src/observability/prometheus_exporter.py`](src/observability/prometheus_exporter.py)
+- [`src/prefetch/queue.py`](src/prefetch/queue.py)
+- [`src/workers/prefetch_worker.py`](src/workers/prefetch_worker.py)
+
+---
+
+### OBS-2 Dashboard Operator
+
+**Prioritas:** `P2`
+
+**Masalah:**
+Dashboard frontend saat ini demo-focused. Tidak ada operator view yang fokus ke health sistem.
+
+**Yang perlu dikerjakan:**
+- Panel: status Redis, worker heartbeat, DLQ depth, request rate
+- Panel: model state (stage, version, last accuracy, drift status)
+- Panel: cache hit rate trend, latency histogram
+- Panel: security — blocked IPs, IDS alert rate
+- Gunakan data dari Prometheus/MetricsPersistence
+
+**File terdampak:**
+- [`frontend/src/pages/`](frontend/src/pages/)
+- [`frontend/src/utils/apiClient.js`](frontend/src/utils/apiClient.js)
+
+---
+
+### OBS-3 Metrics Retention & Roll-up Strategy
+
+**Prioritas:** `P2`
+
+**Yang perlu dikerjakan:**
+- Audit log: rotation policy (max size, age-based cleanup)
+- Model lifecycle log: tetap tersimpan (tidak di-rotate)
+- Metric snapshot: roll-up hourly → daily dengan aggregation
+- Konfigurasi retention via env var, bukan hardcode
+
+---
+
+## Area 10 — Prefetch Orchestration
+
+### PF-1 DLQ Replay Workflow yang Aman
+
+**Prioritas:** `P1`
+
+**Masalah:**
+Endpoint `/prefetch/replay` ada tetapi tidak memiliki safety guard. Job berbahaya bisa di-replay tanpa filter.
+
+**Yang perlu dikerjakan:**
+- Filter replay: hanya item dengan `failure_reason` yang diizinkan
+- Audit trail untuk setiap replay manual
+- Dry-run mode: tampilkan apa yang akan di-replay tanpa eksekusi
+- Rate limit untuk replay (tidak boleh flood worker)
+
+**File terdampak:**
+- [`src/prefetch/queue.py`](src/prefetch/queue.py)
+- [`src/api/route_prefetch.py`](src/api/route_prefetch.py)
+
+---
+
+### PF-2 Rate Control dan Backpressure per Service
+
+**Prioritas:** `P1`
+
+**Masalah:**
+Tidak ada batasan prefetch per service. Satu service bisa menguras kapasitas worker.
+
+**Yang perlu dikerjakan:**
+- Token bucket per service ID untuk enqueue prefetch job
+- Max queue depth per service (configurable)
+- Backpressure: jika worker tertinggal terlalu jauh, drop low-confidence jobs
+- Metrics: queue depth per service di Prometheus
+
+**File terdampak:**
+- [`src/prefetch/queue.py`](src/prefetch/queue.py)
+- [`src/api/ml_service.py`](src/api/ml_service.py)
+
+---
+
+### PF-3 Budgeting dan Prioritization per Confidence Band
+
+**Prioritas:** `P2`
+
+**Yang perlu dikerjakan:**
+- Kategorikan prefetch job: high confidence (>80%), medium (50–80%), low (<50%)
+- Budget: X% kapasitas worker untuk high, Y% untuk medium, Z% untuk low
+- Low confidence jobs dibuang saat queue penuh
+- Metrics per confidence band
+
+---
+
+## Area 11 — Runtime & Deployment
+
+### RT-1 Reference Deployment dengan Reverse Proxy
+
+**Prioritas:** `P0`
+
+**Masalah:**
+Stack Docker berjalan tapi tidak ada panduan deployment realistis dengan reverse proxy.
+
+**Yang perlu dikerjakan:**
+- Contoh topologi `nginx/traefik → api → redis/prefetch-worker`
+- Dokumentasikan `TRUSTED_PROXIES`, header forwarding, HSTS/CSP behavior
+- Pisahkan contoh dev vs production
+- README untuk deployment yang tidak ambigu
+
+**File terdampak:**
+- [`docker-compose.yml`](docker-compose.yml)
+- [`docs/operations.md`](docs/operations.md)
+
+---
+
+### RT-2 Production Config Profile
+
+**Prioritas:** `P0`
+
+**Masalah:**
+Konfigurasi saat ini lebih dekat ke development (timeout longgar, rate limit permisif, debug mode).
+
+**Yang perlu dikerjakan:**
+- Preset production untuk: timeout, rate limit, secret handling, log level, retention
+- Dokumentasi nilai yang direkomendasikan per variabel
+- Env validation saat startup: panic jika env production tapi `APP_ENV=development`
+
+**File terdampak:**
+- [`config/settings.py`](config/settings.py)
+- [`docker-compose.yml`](docker-compose.yml)
+
+---
+
+### RT-3 Startup Dependency Policy
+
+**Prioritas:** `P0`
+
+**Masalah:**
+Policy saat startup tidak jelas — mana yang fail-open, mana yang fail-closed.
+
+**Yang perlu dikerjakan:**
+- Dokumentasikan policy per dependency:
+  - Redis: fail-closed (API tidak bisa jalan tanpa Redis)
+  - Audit log: fail-open (tetap jalan tapi alert)
+  - Model registry: fail-open (jalan tanpa ML, prediksi dinonaktifkan)
+  - FIPS self-test: fail-closed (tidak bisa jalan jika KAT gagal)
+- Readiness endpoint `GET /ready` harus benar-benar cek semua dependency
+- Test startup dengan setiap dependency dimatikan satu per satu
+
+**File terdampak:**
+- [`src/runtime/bootstrap.py`](src/runtime/bootstrap.py)
+- [`src/api/route_health.py`](src/api/route_health.py)
+
+---
+
+### RT-4 Multi-Environment Manifests
 
 **Prioritas:** `P3`
 
-### Tujuan
-
-Mengurangi jarak antara environment demo dan environment yang lebih serius.
-
-### Kondisi saat ini
-
-- Docker Compose dev/demo sudah ada
-- belum ada manifest yang benar-benar dirancang untuk staging/production
-
-### Fitur yang perlu dikembangkan
-
-1. **Compose override atau manifest per environment**
-   - dev
-   - staging
-   - production-like
-
-2. **Secret handling yang lebih matang**
-   - jangan hanya mengandalkan `.env`
-   - dokumentasikan integrasi ke secret manager atau injection environment yang lebih aman
-
-3. **Storage dan retention policy**
-   - log
-   - model registry
-   - audit backup
-   - metrics
-
-### Definisi selesai
-
-- environment demo tidak lagi diperlakukan seolah sama dengan staging/production
-- operator punya contoh manifest yang masuk akal untuk lebih dari satu environment
+**Yang perlu dikerjakan:**
+- `docker-compose.override.yml` untuk dev (volume mounts, debug ports)
+- `docker-compose.staging.yml` dengan resource limits
+- `docker-compose.production.yml` template (tanpa hardcoded secrets)
+- Dokumentasi cara switch antar environment
 
 ---
 
-## Urutan Implementasi yang Masuk Akal
+### RT-5 Secret Management yang Lebih Aman
 
-Jika hanya satu tim kecil yang mengerjakan repo ini, urutan yang paling pragmatis adalah:
+**Prioritas:** `P2`
 
-1. deployment dan topologi runtime
-2. observability historis
-3. concept drift EWMA maturation ← **kritis untuk konsistensi paper**
-4. benchmark validation suite ← **kritis untuk validasi klaim performa**
-5. zero-downtime key rotation ← **kritis untuk konsistensi paper**
-6. prefetch orchestration yang matang
-7. key lifecycle management
-8. governance model release yang lebih formal
-9. admin dan ops control plane
-10. river online learning integration
-11. frontend productization
-12. test matrix dan CI yang lebih lengkap
-13. multi-environment artifacts
+**Masalah:**
+Secrets hanya via `.env` file. Tidak ada integrasi ke secret manager.
 
-Item 3, 4, dan 5 dinaikkan prioritasnya dalam urutan ini karena ketiganya berkaitan langsung dengan klaim yang dibuat di paper akademis PSKC. Konsistensi antara implementasi dan narasi paper adalah hal yang tidak bisa ditunda.
+**Yang perlu dikerjakan:**
+- Dokumentasikan cara integrasi ke Docker secrets, Vault, atau AWS Secrets Manager
+- Minimal: contoh docker-compose yang menggunakan Docker secrets (bukan env var plain)
+- Validasi: pastikan secrets tidak ter-log atau ter-expose di health endpoint
+
+---
+
+## Area 12 — Benchmark Validation
+
+### BM-1 Dokumentasi Metodologi Formal
+
+**Prioritas:** `P1`
+
+**Masalah:**
+Simulasi menghasilkan angka bagus tapi metodologi tidak terdokumentasi secara formal. Tidak jelas bagaimana parameter diterjemahkan ke simulasi.
+
+**Yang perlu dikerjakan:**
+- Jelaskan secara eksplisit bagaimana parameter (latency distribution, cache sizes, Pareto ratio) dipilih
+- Catatan asumsi dan batasan model log-normal
+- Perbarui `simulation/references/README.md` dengan cara mengutip hasil
+
+---
+
+### BM-2 Confidence Interval dan Statistical Validation
+
+**Prioritas:** `P2`
+
+**Yang perlu dikerjakan:**
+- Jalankan simulasi N kali (N=30) dan hitung confidence interval 95%
+- Significance testing untuk klaim latency improvement
+- Dokumentasikan sample size dan distribusi asumsi
+
+---
+
+### BM-3 Regression Gate di CI
+
+**Prioritas:** `P2`
+
+**Yang perlu dikerjakan:**
+- Tambahkan smoke benchmark ke pipeline CI
+- Gagalkan CI jika latency improvement turun > 10% dari baseline
+- Perbarui `.github/workflows/` dengan benchmark validation step
+
+---
+
+### BM-4 UI Integration Benchmark Visualization
+
+**Prioritas:** `P2`
+
+**Yang perlu dikerjakan:**
+- Halaman simulasi di frontend: pilih skenario, jalankan, lihat hasil
+- Comparison chart PSKC vs baseline yang interaktif
+- Simpan historical comparison results
+
+---
+
+## Area 13 — Frontend
+
+### FE-1 Halaman Operator
+
+**Prioritas:** `P1`
+
+**Masalah:**
+Tidak ada halaman yang khusus untuk operator memonitor state sistem.
+
+**Yang perlu dikerjakan:**
+- Halaman Model Registry: list versions, promote/rollback UI
+- Halaman ML Lifecycle: history training, accuracy trend
+- Halaman Prefetch: queue depth, DLQ items, replay UI
+- Halaman Audit: recent events, intrusion alerts
+- Status drift EWMA: current state, history
+
+**File terdampak:**
+- [`frontend/src/pages/`](frontend/src/pages/)
+- [`frontend/src/utils/apiClient.js`](frontend/src/utils/apiClient.js)
+
+---
+
+### FE-2 Error Handling yang Membedakan Jenis Error
+
+**Prioritas:** `P2`
+
+**Masalah:**
+Saat ini error dari backend tidak dibedakan di UI — semua terlihat sama.
+
+**Yang perlu dikerjakan:**
+- Bedakan di UI: `no data`, `backend down`, `security denied`, `worker lag`, `model not ready`
+- Tampilkan status yang jelas dengan aksi yang bisa dilakukan user
+- Retry logic dengan exponential backoff di API client
+
+---
+
+### FE-3 Simulasi Visualization di Dashboard
+
+**Prioritas:** `P2`
+
+**Yang perlu dikerjakan:**
+- Integrasi hasil simulasi ke frontend dashboard
+- Chart: latency comparison, cache hit rate, KMS reduction
+- Tombol "Run Simulation" dari UI dengan progress indicator
+
+---
+
+## Area 14 — Testing & CI
+
+### TEST-1 Integration Test Core Request Paths
+
+**Prioritas:** `P1`
+
+**Masalah:**
+Belum ada integration test yang menguji alur lengkap dari request masuk sampai response keluar.
+
+**Yang perlu dikerjakan:**
+- Test `/keys/access`: cache miss → KMS fetch → cache store → response
+- Test `/keys/access`: cache hit L1 → langsung response
+- Test `/keys/access` dengan Redis down (fail-open behavior)
+- Test `/ml/retrain` → training selesai → model tersimpan
+
+---
+
+### TEST-2 Topology Matrix Test
+
+**Prioritas:** `P2`
+
+**Yang perlu dikerjakan:**
+- Test di local runtime (tanpa Docker)
+- Test di Docker runtime (semua container)
+- Test dengan monitoring profile (Prometheus + Grafana aktif)
+- Test dengan proxy di depan API
+
+---
+
+### TEST-3 Failure-Path Suite
+
+**Prioritas:** `P2`
+
+**Yang perlu dikerjakan:**
+- Redis unavailable saat startup
+- Redis unavailable saat runtime (setelah startup sukses)
+- Audit log tidak bisa ditulis
+- Model integrity failure saat load
+- DLQ backlog (worker tidak bisa consume)
+- Drift detection trigger (sengaja inject distribusi berbeda)
+
+---
+
+### TEST-4 Benchmark Regression Gate
+
+**Prioritas:** `P2`
+
+**Yang perlu dikerjakan:**
+- Baseline latency test (P50, P95, P99)
+- Prefetch throughput test
+- Cache hit rate minimal: harus ≥ X% setelah warmup
+- Gagal CI jika hasil di bawah threshold
+
+---
+
+## Urutan Implementasi yang Direkomendasikan
+
+Urutan berdasarkan dependensi dan impact tertinggi untuk tim kecil:
+
+**Blok 1 — Runtime & Security Foundation (P0)**
+1. RT-1: Reference deployment dengan reverse proxy
+2. RT-2: Production config profile
+3. RT-3: Startup dependency policy
+4. SEC-3: AdminAuthManager konsisten di semua endpoint
+
+**Blok 2 — ML Critical Fixes (P0–P1)**
+5. ML-1.1: LSTM input sekuensial ← bug arsitektur terbesar
+6. ML-1.2: River tersambung ke predict_top_n ← online learning terbuang sia-sia
+7. ML-4.2: Drift detection aktif di request path ← konsistensi paper
+8. ML-4.3: Cold-start handling
+9. ML-1.3: Adaptive ensemble weights
+10. ML-1.4: Stratified train/val split
+
+**Blok 3 — Operasional (P1)**
+11. OBS-1: Alert rules
+12. PF-1: DLQ replay aman
+13. PF-2: Rate control prefetch per service
+14. SEC-1: Fine-grained ACL
+15. SEC-5: Incident response hooks
+16. ML-6.1: Approval flow model
+17. TEST-1: Integration test core paths
+
+**Blok 4 — Feature Engineering ML (P1–P2)**
+18. ML-2.1: Fitur N-gram
+19. ML-2.2: Fitur service embedding
+20. ML-3.2: Class imbalance perbaikan
+21. ML-4.1: Drift characterization
+22. ML-4.4: Feedback loop River
+
+**Blok 5 — Maturitas Produk (P2)**
+23. ML-5.1–5.3: Evaluasi per-key, confidence, health check
+24. DP-2: Long-term metrics storage
+25. OBS-2: Dashboard operator
+26. FE-1: Halaman operator
+27. BM-1–3: Dokumentasi dan validasi benchmark
+28. TEST-2–4: Topology matrix dan failure tests
+
+**Blok 6 — Advanced (P2–P3)**
+29. ML-2.3: Graph-based features
+30. ML-3.1: HPO Optuna
+31. ML-3.3: LSTM attention
+32. RT-4: Multi-environment manifests
+33. SEC-4: Multi-tenant isolation
 
 ---
 
 ## Matriks Konsistensi Paper vs Roadmap
 
-Tabel ini merangkum klaim utama di paper PSKC dan status coverage-nya di roadmap ini.
-
 | Klaim di Paper | Item Roadmap | Status |
-| --- | --- | --- |
-| Ensemble LSTM+RF+Markov aktif | Item 7 (Governance) | ✅ Sudah aktif di runtime |
-| Concept drift EWMA terimplementasi | Item 4 (EWMA Maturation) | 🔄 Dalam pengembangan |
-| Rotasi kunci tanpa downtime | Item 6 (Zero-Downtime Rotation) | 🔄 Dalam pengembangan |
-| Reduksi latensi 86% terverifikasi | Item 5 (Benchmark Validation) | 🔄 Dalam pengembangan |
-| AES-256-GCM cache enkripsi | Item 1 (Deployment) | ✅ Aktif |
-| Prefetch prediktif aktif | Item 3 (Prefetch Orchestration) | ✅ Aktif, maturasi ongoing |
-| Tamper-evident audit HMAC chain | Item 9 (Admin Control Plane) | ✅ Aktif |
-| Window of vulnerability mitigation | Item 8 (Key Lifecycle) | 🔄 Dalam pengembangan |
-| Online learning inkremental (River) | Item 10 (River Integration) | 🔄 Planned |
-| TTL dinamis berbasis pola akses | Item 8 (Key Lifecycle) | 🔄 Perbaikan TTL forwarding |
-
----
-
-## Template Breakdown Pekerjaan
-
-Jika sebuah item di dokumen ini mau dipecah menjadi issue atau task implementasi, format minimalnya sebaiknya seperti ini:
-
-| Field | Isi |
-| --- | --- |
-| tujuan | capability yang ingin dicapai |
-| scope | file atau subsistem yang boleh berubah |
-| non-goal | hal yang sengaja tidak dikerjakan dulu |
-| risiko | regresi atau risiko security/ops |
-| validasi | test, smoke, atau metric yang harus lulus |
-| dokumentasi | file docs yang wajib ikut diperbarui |
+|----------------|-------------|--------|
+| Ensemble LSTM+RF+Markov aktif | ML-1.1, ML-1.3 | ⚠️ LSTM tidak benar-benar temporal |
+| Online learning (River) aktif | ML-1.2, ML-4.4 | ⚠️ Terhubung tapi tidak di jalur prediksi |
+| Concept drift EWMA terimplementasi | ML-4.2 | ⚠️ Ada di kode, belum aktif di runtime |
+| Rotasi kunci tanpa downtime | Selesai | ✅ Aktif |
+| Reduksi latensi 86% terverifikasi | BM-1, BM-2 | ⚠️ Simulasi 61.6%, metodologi belum formal |
+| AES-256-GCM cache enkripsi | Selesai | ✅ Aktif |
+| Prefetch prediktif aktif | PF-1, PF-2 | ✅ Aktif, maturasi ongoing |
+| Tamper-evident audit HMAC chain | Selesai | ✅ Aktif |
+| TTL dinamis berbasis pola akses | Selesai | ✅ Aktif |
 
 ---
 
 ## Dokumen Terkait
 
-- [project_status.md](project_status.md)
-- [architecture.md](architecture.md)
-- [api_reference.md](api_reference.md)
-- [security_model.md](security_model.md)
-- [simulation_and_ml.md](simulation_and_ml.md)
-- [operations.md](operations.md)
-- [development.md](development.md)
+- [comprehensive_features.md](comprehensive_features.md) — Inventaris fitur yang sudah selesai
+- [project_status.md](project_status.md) — Ringkasan status proyek
+- [architecture.md](architecture.md) — Arsitektur detail
+- [security_model.md](security_model.md) — Model keamanan
+- [simulation_and_ml.md](simulation_and_ml.md) — Detail ML dan simulasi
+- [operations.md](operations.md) — Panduan operasional
