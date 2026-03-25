@@ -7,13 +7,19 @@ import threading
 import time
 from typing import Dict, List, Optional, Tuple, Any
 import logging
+import numpy as np
 
+from src.database.connection import DatabaseConnection
 from src.ml.data_collector import get_data_collector
 from src.ml.feature_engineering import get_feature_engineer
 from src.ml.model import EnsembleModel
 from src.ml.model_registry import SecurityError, get_model_registry
 from src.ml.algorithm_improvements import EWMACalculator, DriftDetector, DynamicMarkovChain
 from src.ml.river_online_learning import RiverOnlineLearner, is_river_available
+from src.observability.enhanced_observability import (
+    EnhancedObservabilityService,
+    get_observability_service,
+)
 from src.auth.key_fetcher import get_key_fetcher
 from config.settings import settings
 
@@ -75,6 +81,9 @@ class KeyPredictor:
         self._last_key_by_service: Dict[str, str] = {}
         self._last_drift_retrain_time = 0.0
         self._outcome_count = 0
+        self._online_learning_lock = threading.Lock()
+        self._last_online_learning_at = 0.0
+        self._last_online_learning_result: Dict[str, Any] = {}
 
         # River online learner — lightweight drift-triggered learning
         # (separate from scheduled full retraining)
@@ -417,26 +426,54 @@ class KeyPredictor:
         cache_hit: bool,
     ) -> None:
         """Best-effort persistence of prediction outcome to database."""
+        db = None
         try:
-            from src.observability.enhanced_observability import get_observability_service
             obs = get_observability_service()
             if obs is None:
-                return
+                db = DatabaseConnection.get_session()
+                obs = EnhancedObservabilityService(db_session=db)
 
             top_pred = predicted_keys[0] if predicted_keys else ""
             confidence = None  # Not available in this context
+            resolver = getattr(obs, "resolve_version_id", None)
+            resolved_version_id = 0
+            if callable(resolver):
+                candidate = resolver(
+                    version_id=0,
+                    model_name=settings.ml_model_name,
+                    runtime_version=self._model_version,
+                )
+                if isinstance(candidate, int):
+                    resolved_version_id = candidate
+            if resolved_version_id <= 0:
+                return
 
             obs.record_prediction(
-                version_id=0,  # Will use active version
+                version_id=resolved_version_id,
                 key=actual_key,
                 predicted_value=top_pred,
                 actual_value=actual_key,
                 confidence=confidence,
             )
+            log_recorder = getattr(obs, "record_prediction_log", None)
+            if callable(log_recorder):
+                log_recorder(
+                    version_id=resolved_version_id,
+                    key=actual_key,
+                    predicted_value=top_pred,
+                    actual_value=actual_key,
+                    confidence=confidence,
+                )
             obs.record_cache_operation(actual_key, cache_hit)
             obs.record_drift(actual_key, is_correct)
+            per_key_updater = getattr(obs, "update_per_key_metrics", None)
+            if callable(per_key_updater):
+                per_key_updater(resolved_version_id, actual_key)
         except Exception as e:
             logger.debug(f"Outcome persistence skipped: {e}")
+        finally:
+            if db is not None:
+                db.close()
 
     # ----------------------------------------------------------
     # Main prediction
@@ -619,6 +656,136 @@ class KeyPredictor:
             logger.error(f"Prefetch failed: {e}")
             return 0
 
+    def _build_online_learning_batch(
+        self,
+        *,
+        window_seconds: int,
+        max_events: int,
+    ) -> Tuple[np.ndarray, np.ndarray, Dict[str, Any]]:
+        recent_data = self._collector.get_access_sequence(
+            window_seconds=window_seconds,
+            max_events=max_events,
+        )
+        metadata = {
+            "event_count": len(recent_data),
+            "window_seconds": window_seconds,
+            "max_events": max_events,
+        }
+        if len(recent_data) < 2:
+            return np.empty((0, 0), dtype=np.float32), np.empty((0,), dtype=object), metadata
+
+        X_features: List[np.ndarray] = []
+        y_labels: List[str] = []
+        for idx in range(1, len(recent_data)):
+            context = recent_data[max(0, idx - 10): idx + 1]
+            X_features.append(np.asarray(self._engineer.extract_features(context), dtype=np.float32))
+            y_labels.append(str(recent_data[idx]["key_id"]))
+
+        metadata["sample_count"] = len(X_features)
+        if not X_features:
+            return np.empty((0, 0), dtype=np.float32), np.empty((0,), dtype=object), metadata
+
+        return np.vstack(X_features), np.asarray(y_labels, dtype=object), metadata
+
+    def run_online_learning(
+        self,
+        *,
+        reason: str = "drift_detected",
+        window_seconds: int = 600,
+        max_events: int = 500,
+        min_samples: int = 10,
+        enforce_cooldown: bool = False,
+    ) -> Dict[str, Any]:
+        """
+        Apply River-based incremental learning without creating a new persisted model version.
+        """
+        now = time.time()
+        if enforce_cooldown and now - self._last_drift_retrain_time < _DRIFT_RETRAIN_COOLDOWN:
+            result = {
+                "success": False,
+                "reason": "cooldown",
+                "training_path": "online",
+                "cooldown_seconds": int(_DRIFT_RETRAIN_COOLDOWN - (now - self._last_drift_retrain_time)),
+            }
+            self._last_online_learning_result = result
+            return result
+
+        if self._river_learner is None:
+            result = {"success": False, "reason": "river_unavailable", "training_path": "online"}
+            self._last_online_learning_result = result
+            return result
+
+        if not self._online_learning_lock.acquire(blocking=False):
+            result = {"success": False, "reason": "online_learning_busy", "training_path": "online"}
+            self._last_online_learning_result = result
+            return result
+
+        try:
+            if enforce_cooldown:
+                self._last_drift_retrain_time = now
+
+            X, y, metadata = self._build_online_learning_batch(
+                window_seconds=window_seconds,
+                max_events=max_events,
+            )
+            sample_count = int(metadata.get("sample_count", 0) or 0)
+            if sample_count < min_samples or X.size == 0:
+                result = {
+                    "success": False,
+                    "reason": "insufficient_online_samples",
+                    "training_path": "online",
+                    "sample_count": sample_count,
+                    "event_count": metadata.get("event_count", 0),
+                }
+                self._last_online_learning_result = result
+                return result
+
+            self._river_learner.partial_fit(X, y)
+            self._river_learn_count += sample_count
+            self._last_online_learning_at = now
+            result = {
+                "success": True,
+                "reason": reason,
+                "training_path": "online",
+                "sample_count": sample_count,
+                "event_count": metadata.get("event_count", 0),
+                "learn_count": self._river_learn_count,
+                "completed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now)),
+            }
+            self._last_online_learning_result = result
+            logger.info(
+                "River online learning completed: reason=%s samples=%d total=%d",
+                reason,
+                sample_count,
+                self._river_learn_count,
+            )
+            return result
+        except Exception as e:
+            result = {
+                "success": False,
+                "reason": "online_learning_failed",
+                "training_path": "online",
+                "detail": str(e),
+            }
+            self._last_online_learning_result = result
+            logger.error(f"River online learning failed: {e}")
+            return result
+        finally:
+            self._online_learning_lock.release()
+
+    def _try_drift_retrain(self) -> bool:
+        """
+        Override drift handling to use River online learning only.
+        """
+        result = self.run_online_learning(
+            reason="predictor_drift",
+            window_seconds=600,
+            max_events=500,
+            min_samples=10,
+            enforce_cooldown=True,
+        )
+        return bool(result.get("success"))
+
     def get_prediction_stats(self) -> Dict[str, Any]:
         """Get prediction statistics including ensemble component health."""
         drift_score = self._drift.get_drift_score("global")
@@ -659,6 +826,8 @@ class KeyPredictor:
             "river_online": {
                 **river_stats,
                 "learn_count": self._river_learn_count,
+                "last_online_learning_at": self._last_online_learning_at,
+                "last_online_learning_result": self._last_online_learning_result,
             },
         }
 
@@ -681,6 +850,11 @@ def get_key_predictor() -> KeyPredictor:
             threshold=settings.ml_prediction_threshold
         )
     return _predictor_instance
+
+
+def get_predictor() -> KeyPredictor:
+    """Backward-compatible alias used by model/dashboard routes."""
+    return get_key_predictor()
 
 
 def predict_next_keys(service_id: str = "default", n: int = 10) -> List[Tuple[str, float]]:

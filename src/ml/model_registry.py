@@ -158,6 +158,37 @@ class PortableRandomForestModel:
             "trees": self._trees,
         }
 
+    def expected_feature_count(self) -> int:
+        """Infer the feature width expected by the stored forest."""
+        max_feature_index = -1
+        for tree in self._trees:
+            for feature_index in tree.get("feature", []):
+                if feature_index is not None and int(feature_index) >= 0:
+                    max_feature_index = max(max_feature_index, int(feature_index))
+        return max_feature_index + 1 if max_feature_index >= 0 else 0
+
+    def _align_features(self, X: np.ndarray) -> np.ndarray:
+        X_arr = np.atleast_2d(np.asarray(X, dtype=np.float64))
+        expected = self.expected_feature_count()
+        if expected <= 0 or X_arr.shape[1] == expected:
+            return X_arr
+        if X_arr.shape[1] > expected:
+            logger.warning(
+                "PortableRandomForestModel: truncating feature width from %d to %d for compatibility.",
+                X_arr.shape[1],
+                expected,
+            )
+            return X_arr[:, :expected]
+
+        logger.warning(
+            "PortableRandomForestModel: padding feature width from %d to %d for compatibility.",
+            X_arr.shape[1],
+            expected,
+        )
+        padded = np.zeros((len(X_arr), expected), dtype=np.float64)
+        padded[:, : X_arr.shape[1]] = X_arr
+        return padded
+
     def _predict_tree_proba(self, tree: Dict[str, Any], row: np.ndarray) -> np.ndarray:
         children_left = tree["children_left"]
         children_right = tree["children_right"]
@@ -181,7 +212,7 @@ class PortableRandomForestModel:
         return leaf_counts / total
 
     def predict_proba(self, X: np.ndarray) -> np.ndarray:
-        X_arr = np.atleast_2d(np.asarray(X, dtype=np.float64))
+        X_arr = self._align_features(X)
         if not self._trees:
             return np.zeros((len(X_arr), len(self.label_encoder.classes_)), dtype=np.float64)
 

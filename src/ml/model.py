@@ -717,7 +717,34 @@ class EnsembleModel:
         """Apply fitted RF preprocessor (normalize, drop constant, select features)."""
         if self.rf_preprocessor is not None and self.rf_preprocessor.is_fitted:
             return self.rf_preprocessor.transform(X_rf)
-        return X_rf
+
+        X_arr = np.atleast_2d(np.asarray(X_rf, dtype=np.float32))
+        expected = None
+        rf_model = getattr(self.rf, "model", None)
+        if rf_model is not None and hasattr(rf_model, "n_features_in_"):
+            expected = int(rf_model.n_features_in_)
+        elif self.rf is not None and hasattr(self.rf, "expected_feature_count"):
+            expected = int(self.rf.expected_feature_count())
+
+        if expected is None or expected <= 0 or X_arr.shape[1] == expected:
+            return X_arr
+
+        if X_arr.shape[1] > expected:
+            logger.warning(
+                "EnsembleModel: truncating RF features from %d to %d for compatibility.",
+                X_arr.shape[1],
+                expected,
+            )
+            return X_arr[:, :expected]
+
+        logger.warning(
+            "EnsembleModel: padding RF features from %d to %d for compatibility.",
+            X_arr.shape[1],
+            expected,
+        )
+        padded = np.zeros((X_arr.shape[0], expected), dtype=X_arr.dtype)
+        padded[:, : X_arr.shape[1]] = X_arr
+        return padded
 
     def predict_proba(
         self,

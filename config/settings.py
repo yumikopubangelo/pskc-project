@@ -145,7 +145,7 @@ class AppSettings(BaseSettings):
         alias="ML_COLLECTOR_MAX_EVENTS",
         description="Maximum number of events to keep in memory (default: 500K)"
     )
-    ml_collector_window_seconds: int = Field(default=3600, alias="ML_COLLECTOR_WINDOW_SECONDS")
+    ml_collector_window_seconds: int = Field(default=21600, alias="ML_COLLECTOR_WINDOW_SECONDS")
     ml_collector_historical_stats_ttl_hours: int = Field(default=168, alias="ML_COLLECTOR_HISTORICAL_STATS_TTL_HOURS")
     ml_collector_historical_stats_max_entries: int = Field(default=500000, alias="ML_COLLECTOR_HISTORICAL_STATS_MAX_ENTRIES")
     
@@ -155,7 +155,7 @@ class AppSettings(BaseSettings):
     ml_feature_regular_min_seconds: float = Field(default=10.0, alias="ML_FEATURE_REGULAR_MIN_SECONDS")
     ml_feature_regular_max_seconds: float = Field(default=60.0, alias="ML_FEATURE_REGULAR_MAX_SECONDS")
     ml_feature_recent_window_seconds: int = Field(default=3600, alias="ML_FEATURE_RECENT_WINDOW_SECONDS")
-    ml_feature_expected_size: int = Field(default=30, alias="ML_FEATURE_EXPECTED_SIZE")
+    ml_feature_expected_size: int = Field(default=36, alias="ML_FEATURE_EXPECTED_SIZE")
     
     # Predictor Settings
     ml_predictor_cache_ttl_seconds: int = Field(default=10, alias="ML_PREDICTOR_CACHE_TTL_SECONDS")

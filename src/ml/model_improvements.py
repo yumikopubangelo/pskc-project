@@ -513,6 +513,43 @@ class RFPreprocessor:
     def is_fitted(self) -> bool:
         return self._is_fitted
 
+    def get_input_feature_count(self) -> Optional[int]:
+        """Return the raw feature width expected before normalization/selection."""
+        if self._mean is not None:
+            return int(len(self._mean))
+        if self._non_constant_mask is not None:
+            return int(len(self._non_constant_mask))
+        return None
+
+    def _align_input_features(self, X: np.ndarray) -> np.ndarray:
+        """
+        Align runtime features with the shape used when this preprocessor was fitted.
+
+        This preserves compatibility with older artifacts that were trained before the
+        feature vector expanded from 30 to 36 dimensions.
+        """
+        X_arr = np.atleast_2d(np.asarray(X, dtype=np.float32))
+        expected = self.get_input_feature_count()
+        if expected is None or X_arr.shape[1] == expected:
+            return X_arr
+
+        if X_arr.shape[1] > expected:
+            logger.warning(
+                "RFPreprocessor: truncating runtime features from %d to %d for legacy artifact compatibility.",
+                X_arr.shape[1],
+                expected,
+            )
+            return X_arr[:, :expected]
+
+        logger.warning(
+            "RFPreprocessor: padding runtime features from %d to %d for legacy artifact compatibility.",
+            X_arr.shape[1],
+            expected,
+        )
+        padded = np.zeros((X_arr.shape[0], expected), dtype=X_arr.dtype)
+        padded[:, : X_arr.shape[1]] = X_arr
+        return padded
+
     # ---- fit / transform ----
 
     def fit(self, X: np.ndarray, y: np.ndarray) -> None:
@@ -556,7 +593,8 @@ class RFPreprocessor:
         """Apply the fitted pipeline to new data."""
         if not self._is_fitted:
             return X
-        X_norm = (X - self._mean) / self._scale
+        X_arr = self._align_input_features(X)
+        X_norm = (X_arr - self._mean) / self._scale
         X_reduced = X_norm[:, self._non_constant_mask]
         return X_reduced[:, self._selected_indices]
 

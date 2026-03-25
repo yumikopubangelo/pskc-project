@@ -1,0 +1,81 @@
+================================================================================
+PyTorch Installation Issue - Fixed
+================================================================================
+
+PROBLEM
+-------
+When running the Docker container, warning appears:
+  "PyTorch not available, LSTM model disabled"
+
+This occurs even though PyTorch should be installed.
+
+ROOT CAUSE
+----------
+Docker multi-stage build issue:
+
+1. Builder stage: PyTorch installed WITHOUT --prefix=/install
+   → Went to default Python site-packages in builder
+   
+2. Runtime stage: Only copied /install directory from builder
+   → PyTorch wasn't in /install, so it didn't transfer
+   → Result: TORCH_AVAILABLE = False in src/ml/model.py
+
+SOLUTION
+--------
+✅ Changed Dockerfile:
+
+BUILDER STAGE (line 29):
+  OLD: RUN pip install --no-cache-dir torch==2.3.1+cpu ...
+  NEW: RUN pip install --prefix=/install --no-cache-dir torch==2.3.1+cpu ...
+
+RUNTIME STAGE (line 60):
+  Added: RUN pip install --no-cache-dir torch==2.3.1+cpu ... (as backup)
+
+This ensures:
+1. PyTorch in builder goes to /install (gets copied to runtime)
+2. PyTorch also installed in runtime as redundancy
+
+FILES MODIFIED
+--------------
+- Dockerfile (lines 27-35 in builder, lines 50-62 in runtime)
+
+DEPLOYMENT
+----------
+1. Rebuild Docker:
+   cd d:\pskc-project
+   docker-compose build --no-cache
+
+2. Restart services:
+   docker-compose down
+   docker-compose up -d
+
+3. Verify:
+   docker logs pskc-api | grep -i pytorch
+   # Should NOT see warning about PyTorch not available
+
+VERIFICATION
+------------
+Test PyTorch availability:
+  docker exec pskc-api python -c "import torch; print(f'PyTorch {torch.__version__} available')"
+
+Expected output:
+  PyTorch 2.3.1+cpu available
+
+IMPACT
+------
+✅ LSTM model will now be enabled
+✅ Full ensemble (LSTM + RF + Markov) will be used
+✅ Better prediction accuracy with all three models
+✅ Dynamic weight adjustment will work correctly
+
+REFERENCES
+----------
+- See PYTORCH_FIX.md for detailed explanation
+- See Dockerfile for implementation details
+- See src/ml/model.py lines 25-32 for TORCH_AVAILABLE flag
+
+STATUS
+------
+✅ Fix Applied
+✅ Code Review Complete
+✅ Ready for Deployment

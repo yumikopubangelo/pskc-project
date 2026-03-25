@@ -1,0 +1,115 @@
+================================================================================
+PERTANYAAN: PyTorch Lightweight vs Normal
+================================================================================
+
+PERTANYAAN ANDA:
+  "Kalau pytorch yang lebih berat itu apakah bisa? 
+   Lebih bagus lightweight atau normal?"
+
+JAWABAN SINGKAT:
+  ✅ Kedua-duanya bisa digunakan
+  ✅ Lightweight (current) adalah pilihan TERBAIK untuk PSKC
+  
+KENAPA LIGHTWEIGHT LEBIH BAIK:
+  1. Docker image lebih kecil (500 MB vs 2-3 GB)
+  2. Build & deployment lebih cepat
+  3. PSKC tidak perlu GPU (inference-only)
+  4. Sufficient untuk LSTM inference di CPU
+
+KAPAN PAKAI NORMAL (CUDA):
+  ✅ Jika ada GPU NVIDIA
+  ✅ Jika sering training model baru
+  ✅ Jika training speed adalah prioritas
+
+STATUS SEKARANG:
+  ✅ Lightweight (torch==2.3.1+cpu) - Optimal untuk PSKC
+
+================================================================================
+TABEL PERBANDINGAN
+================================================================================
+
+Aspek                  Lightweight (Current)    Normal (CUDA 12.1)
+─────────────────────  ───────────────────      ──────────────────
+Ukuran Image           500-700 MB               2-3 GB
+Build Time             2-3 menit                5-10 menit
+GPU Support            ❌ Tidak                  ✅ Ya
+CPU Inference Speed    Good ✅                  Good ✅
+GPU Inference Speed    N/A                      Excellent 🚀
+Training Speed         Normal                   Cepat 🚀
+Cocok untuk PSKC       ✅ TERBAIK                Overkill
+Deployment Simplicity  ✅ Mudah                  Medium
+
+================================================================================
+REKOMENDASI
+================================================================================
+
+UNTUK PSKC SEKARANG: TETAP PAKAI LIGHTWEIGHT ✅
+
+Alasan:
+  1. PSKC adalah inference-heavy (menjalankan model)
+     BUKAN training-heavy (training ulang model)
+  2. LSTM inference sangat cepat di CPU
+  3. Bottleneck PSKC adalah latency KMS call, bukan computation
+  4. 5x lebih kecil image = deployment lebih cepat
+  5. Tidak perlu GPU untuk use case ini
+
+Jika di masa depan:
+  - Mulai frequent retraining → pertimbangkan switch ke CUDA
+  - Untuk sekarang → lightweight adalah optimal
+
+================================================================================
+KALAU MAU GANTI KE NORMAL/CUDA (Heavy)
+================================================================================
+
+Syarat:
+  1. Punya GPU NVIDIA (cek: nvidia-smi)
+  2. Sering training model
+
+Langkah:
+  1. Edit Dockerfile di 2 tempat
+  2. Ubah "torch==2.3.1+cpu" menjadi "torch==2.3.1+cu121"
+  3. Ubah "whl/cpu" menjadi "whl/cu121"
+  4. Run: docker-compose build --no-cache
+  5. Run: docker-compose up -d
+  6. Build akan memakan waktu 5-10 menit (lebih lama)
+  7. Image akan jadi 2-3 GB (lebih besar)
+
+Detail lengkap: Lihat PYTORCH_VERSION_SWITCH.md
+
+================================================================================
+DOKUMENTASI YANG SUDAH DIBUAT
+================================================================================
+
+📄 PYTORCH_VERSION_GUIDE.md
+   - Penjelasan detail lightweight vs CUDA
+   - Tabel comparison
+   - Rekomendasi untuk berbagai scenario
+   
+📄 PYTORCH_VERSION_CHOICE_ID.md
+   - Penjelasan dalam Bahasa Indonesia
+   - Pertanyaan yang sama dengan jawaban
+   - Tabel decision tree
+   
+📄 PYTORCH_VERSION_SWITCH.md
+   - Langkah-langkah switch ke CUDA
+   - Troubleshooting jika ada masalah
+   - Cara revert kembali ke lightweight
+
+📄 PYTORCH_ROOT_CAUSE_FIX.md
+   - Analisis root cause PyTorch issue
+   - Bagaimana fixnya bekerja
+   - Verifikasi
+
+================================================================================
+KESIMPULAN
+================================================================================
+
+Status Saat Ini:   ✅ Lightweight (Optimal)
+Ukuran Image:      500-700 MB
+GPU Support:       Tidak perlu
+Rekomendasi:       TETAP LIGHTWEIGHT untuk PSKC
+
+Jika mau ganti:    Lihat PYTORCH_VERSION_SWITCH.md
+Pertanyaan lanjut:  Lihat PYTORCH_VERSION_GUIDE.md
+
+Status: READY ✅

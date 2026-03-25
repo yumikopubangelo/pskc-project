@@ -15,7 +15,7 @@ import logging
 from src.database.connection import get_db
 from src.database.models import (
     ModelVersion, ModelMetric, TrainingMetadata,
-    KeyPrediction, PerKeyMetric, RetrainingHistory,
+    KeyPrediction, PerKeyMetric, PredictionLog, RetrainingHistory,
 )
 from src.ml.model_version_manager import ModelVersionManager
 
@@ -358,30 +358,54 @@ async def model_intelligence_dashboard(db: Session = Depends(get_db)):
     River online learning stats, and drift info in one payload.
     """
     try:
+        from src.ml.predictor import get_key_predictor
+        from src.ml.trainer import get_model_trainer
+
         # 1. All model versions with metrics
         versions = (
             db.query(ModelVersion)
             .order_by(desc(ModelVersion.created_at))
-            .limit(20)
             .all()
         )
 
-        version_data = []
-        for v in versions:
-            # Get metrics for this version
-            metrics_rows = (
-                db.query(ModelMetric)
-                .filter(ModelMetric.version_id == v.version_id)
+        version_ids = [v.version_id for v in versions]
+        metrics_by_version = {}
+        training_by_version = {}
+        prediction_counts = {}
+        prediction_correct = {}
+
+        if version_ids:
+            for metric in db.query(ModelMetric).filter(ModelMetric.version_id.in_(version_ids)).all():
+                metrics_by_version.setdefault(metric.version_id, {})[metric.metric_name] = metric.metric_value
+
+            for training in db.query(TrainingMetadata).filter(TrainingMetadata.version_id.in_(version_ids)).all():
+                training_by_version[training.version_id] = training
+
+            pred_count_rows = (
+                db.query(KeyPrediction.version_id, func.count(KeyPrediction.id))
+                .filter(KeyPrediction.version_id.in_(version_ids))
+                .group_by(KeyPrediction.version_id)
                 .all()
             )
-            metrics_dict = {m.metric_name: m.metric_value for m in metrics_rows}
+            prediction_counts = {version_id: count for version_id, count in pred_count_rows}
+
+            correct_rows = (
+                db.query(KeyPrediction.version_id, func.count(KeyPrediction.id))
+                .filter(
+                    KeyPrediction.version_id.in_(version_ids),
+                    KeyPrediction.is_correct == True,  # noqa: E712
+                )
+                .group_by(KeyPrediction.version_id)
+                .all()
+            )
+            prediction_correct = {version_id: count for version_id, count in correct_rows}
+
+        version_data = []
+        for v in versions:
+            metrics_dict = metrics_by_version.get(v.version_id, {})
 
             # Get training metadata
-            training = (
-                db.query(TrainingMetadata)
-                .filter(TrainingMetadata.version_id == v.version_id)
-                .first()
-            )
+            training = training_by_version.get(v.version_id)
             training_info = None
             if training:
                 duration = None
@@ -397,16 +421,12 @@ async def model_intelligence_dashboard(db: Session = Depends(get_db)):
                 }
 
             # Prediction stats for this version
-            pred_count = (
-                db.query(func.count(KeyPrediction.id))
-                .filter(KeyPrediction.version_id == v.version_id)
-                .scalar()
-            ) or 0
-            correct_count = (
-                db.query(func.count(KeyPrediction.id))
-                .filter(KeyPrediction.version_id == v.version_id, KeyPrediction.is_correct == True)
-                .scalar()
-            ) or 0
+            pred_count = prediction_counts.get(v.version_id, 0) or 0
+            correct_count = prediction_correct.get(v.version_id, 0) or 0
+
+            runtime_version = None
+            if isinstance(v.metrics_json, dict):
+                runtime_version = v.metrics_json.get("runtime_version")
 
             version_data.append({
                 "version_id": v.version_id,
@@ -415,6 +435,7 @@ async def model_intelligence_dashboard(db: Session = Depends(get_db)):
                 "status": v.status,
                 "created_at": v.created_at.isoformat(),
                 "metrics": metrics_dict,
+                "metrics_json": v.metrics_json or {},
                 "training": training_info,
                 "predictions": {
                     "total": pred_count,
@@ -422,6 +443,7 @@ async def model_intelligence_dashboard(db: Session = Depends(get_db)):
                     "accuracy": round(correct_count / pred_count, 4) if pred_count > 0 else None,
                 },
                 "parent_version_id": v.parent_version_id,
+                "runtime_version": runtime_version,
             })
 
         # 2. Accuracy trend across versions
@@ -436,6 +458,7 @@ async def model_intelligence_dashboard(db: Session = Depends(get_db)):
                     "accuracy": acc,
                     "top_10_accuracy": top10,
                     "created_at": vd["created_at"],
+                    "status": vd["status"],
                 })
 
         # 3. Per-key metrics (latest version)
@@ -460,7 +483,37 @@ async def model_intelligence_dashboard(db: Session = Depends(get_db)):
                 for pk in per_key_rows
             ]
 
-        # 4. Retraining history
+        # 4. Complete training history from TrainingMetadata
+        training_rows = (
+            db.query(TrainingMetadata, ModelVersion)
+            .join(ModelVersion, ModelVersion.version_id == TrainingMetadata.version_id)
+            .order_by(desc(TrainingMetadata.training_start_time))
+            .all()
+        )
+        training_history = []
+        for training, version in training_rows:
+            duration = None
+            if training.training_end_time and training.training_start_time:
+                duration = (training.training_end_time - training.training_start_time).total_seconds()
+
+            training_history.append(
+                {
+                    "id": training.id,
+                    "version_id": training.version_id,
+                    "version_number": version.version_number,
+                    "model_name": version.model_name,
+                    "status": version.status,
+                    "training_start_time": training.training_start_time.isoformat() if training.training_start_time else None,
+                    "training_end_time": training.training_end_time.isoformat() if training.training_end_time else None,
+                    "duration_seconds": duration,
+                    "samples_count": training.samples_count,
+                    "accuracy_before": training.accuracy_before,
+                    "accuracy_after": training.accuracy_after,
+                    "runtime_version": (version.metrics_json or {}).get("runtime_version") if isinstance(version.metrics_json, dict) else None,
+                }
+            )
+
+        # 5. Retraining history
         retrain_rows = (
             db.query(RetrainingHistory)
             .order_by(desc(RetrainingHistory.created_at))
@@ -481,18 +534,97 @@ async def model_intelligence_dashboard(db: Session = Depends(get_db)):
             for r in retrain_rows
         ]
 
-        # 5. River online learning stats (from predictor)
+        # 6. River online learning stats + runtime drift status
         river_stats = {"initialized": False}
+        drift_status = {
+            "trainer": {},
+            "predictor": {},
+            "per_key": {"no_data": True},
+        }
+        training_paths = {
+            "full_training": {
+                "runs_total": len(training_history),
+                "latest_run": training_history[0] if training_history else None,
+            },
+            "online_training": {
+                "initialized": False,
+                "online_learning_count": 0,
+                "last_online_learning": None,
+                "last_online_learning_result": None,
+            },
+        }
         try:
-            from src.ml.predictor import get_predictor
-            predictor = get_predictor()
+            predictor = get_key_predictor()
+            trainer = get_model_trainer()
             if predictor:
-                stats = predictor.get_prediction_stats()
-                river_stats = stats.get("river_online", {"initialized": False})
+                predictor_stats = predictor.get_prediction_stats()
+                river_stats = predictor_stats.get("river_online", {"initialized": False})
+                drift_status["predictor"] = predictor_stats.get("ensemble", {})
+
+            if trainer:
+                trainer_stats = trainer.get_stats()
+                drift_status["trainer"] = trainer_stats.get("drift_stats", {})
+                training_paths["online_training"] = {
+                    "initialized": bool(river_stats.get("initialized")),
+                    "online_learning_count": int(trainer_stats.get("online_learning_count", 0) or 0),
+                    "last_online_learning": trainer_stats.get("last_online_learning"),
+                    "last_online_learning_result": river_stats.get("last_online_learning_result"),
+                }
         except Exception:
             pass
 
-        # 6. Summary stats
+        if latest_version_id:
+            latest_per_key_metrics = [
+                entry for entry in per_key_data if entry.get("drift_score") is not None
+            ]
+            keys_with_drift = [entry for entry in latest_per_key_metrics if float(entry.get("drift_score") or 0.0) >= 0.3]
+            drift_status["per_key"] = {
+                "version_id": latest_version_id,
+                "keys_tracked": len(latest_per_key_metrics),
+                "keys_with_drift": len(keys_with_drift),
+                "max_drift_score": max((float(entry.get("drift_score") or 0.0) for entry in latest_per_key_metrics), default=0.0),
+                "avg_drift_score": (
+                    round(
+                        sum(float(entry.get("drift_score") or 0.0) for entry in latest_per_key_metrics) / len(latest_per_key_metrics),
+                        4,
+                    )
+                    if latest_per_key_metrics else 0.0
+                ),
+                "top_drifting_keys": sorted(
+                    latest_per_key_metrics,
+                    key=lambda entry: float(entry.get("drift_score") or 0.0),
+                    reverse=True,
+                )[:5],
+            }
+
+        # 7. Recent prediction logs for debugging
+        recent_prediction_logs = []
+        prediction_logs = (
+            db.query(PredictionLog, ModelVersion)
+            .join(ModelVersion, ModelVersion.version_id == PredictionLog.version_id)
+            .order_by(desc(PredictionLog.timestamp))
+            .limit(50)
+            .all()
+        )
+        for log, version in prediction_logs:
+            recent_prediction_logs.append(
+                {
+                    "id": log.id,
+                    "version_id": log.version_id,
+                    "version_number": version.version_number,
+                    "model_name": version.model_name,
+                    "status": version.status,
+                    "key": log.key,
+                    "predicted_value": log.predicted_value,
+                    "actual_value": log.actual_value,
+                    "confidence": log.confidence,
+                    "is_correct": log.is_correct,
+                    "latency_ms": log.latency_ms,
+                    "timestamp": log.timestamp.isoformat() if log.timestamp else None,
+                }
+            )
+
+        # 8. Summary stats
         total_versions = db.query(func.count(ModelVersion.version_id)).scalar() or 0
         total_predictions = db.query(func.count(KeyPrediction.id)).scalar() or 0
         total_correct = (
@@ -500,19 +632,29 @@ async def model_intelligence_dashboard(db: Session = Depends(get_db)):
             .filter(KeyPrediction.is_correct == True)
             .scalar()
         ) or 0
+        active_version = next((item for item in version_data if str(item.get("status")).lower() == "production"), None)
+        latest_version = version_data[0] if version_data else None
 
         return {
             "summary": {
                 "total_versions": total_versions,
+                "accepted_versions": sum(1 for item in version_data if str(item.get("status")).lower() != "rejected"),
+                "rejected_versions": sum(1 for item in version_data if str(item.get("status")).lower() == "rejected"),
                 "total_predictions": total_predictions,
                 "overall_accuracy": round(total_correct / total_predictions, 4) if total_predictions > 0 else None,
-                "latest_version": version_data[0] if version_data else None,
+                "latest_version": latest_version,
+                "active_version": active_version,
+                "latest_training": training_history[0] if training_history else None,
             },
             "versions": version_data,
+            "training_history": training_history,
             "accuracy_trend": accuracy_trend,
             "per_key_metrics": per_key_data,
             "retraining_history": retrain_data,
             "river_online": river_stats,
+            "drift_status": drift_status,
+            "recent_prediction_logs": recent_prediction_logs,
+            "training_paths": training_paths,
         }
 
     except Exception as e:
@@ -520,9 +662,21 @@ async def model_intelligence_dashboard(db: Session = Depends(get_db)):
         return {
             "summary": {"total_versions": 0, "total_predictions": 0, "overall_accuracy": None},
             "versions": [],
+            "training_history": [],
             "accuracy_trend": [],
             "per_key_metrics": [],
             "retraining_history": [],
             "river_online": {"initialized": False},
+            "drift_status": {"trainer": {}, "predictor": {}, "per_key": {"no_data": True}},
+            "recent_prediction_logs": [],
+            "training_paths": {
+                "full_training": {"runs_total": 0, "latest_run": None},
+                "online_training": {
+                    "initialized": False,
+                    "online_learning_count": 0,
+                    "last_online_learning": None,
+                    "last_online_learning_result": None,
+                },
+            },
             "error": str(e),
         }

@@ -332,13 +332,12 @@ async def get_accuracy_trend(
     db: Session = Depends(get_session)
 ):
     """
-    Get accuracy trend over time with EWMA values.
+    Get accuracy trend over time for top-1 and top-10 predictions.
     
     Returns:
         - timestamps: Array of timestamps
-        - overall_accuracy: Overall accuracy over time
-        - ewma_short: Short-term EWMA trend
-        - ewma_long: Long-term EWMA trend
+        - top1_accuracy: Top-1 accuracy over time
+        - top10_accuracy: Top-10 accuracy over time
     """
     try:
         trainer_int = get_trainer_integration()
@@ -354,37 +353,45 @@ async def get_accuracy_trend(
         # Get metrics over time
         metrics = db.query(ModelMetric).filter(
             ModelMetric.version_id == current_version.version_id,
-            ModelMetric.timestamp >= time_cutoff
-        ).order_by(ModelMetric.timestamp).all()
+            ModelMetric.metric_name.in_(['accuracy', 'top_10_accuracy']),
+            ModelMetric.recorded_at >= time_cutoff
+        ).order_by(ModelMetric.recorded_at).all()
         
+        # Process metrics into timeseries
+        trend_data = {}
+        for metric in metrics:
+            ts = metric.recorded_at.isoformat()
+            if ts not in trend_data:
+                trend_data[ts] = {}
+            if metric.metric_name == 'accuracy':
+                trend_data[ts]['top1'] = metric.metric_value
+            elif metric.metric_name == 'top_10_accuracy':
+                trend_data[ts]['top10'] = metric.metric_value
+
         # Generate trend data
-        timestamps = []
-        accuracies = []
-        ewma_short = []
-        ewma_long = []
-        
-        for i, metric in enumerate(metrics):
-            timestamps.append(metric.timestamp.isoformat())
-            accuracies.append(metric.accuracy or 0.85)
-            
-            # Mock EWMA values (should be fetched from actual tracking)
-            ewma_short.append(0.85 + (i * 0.001))
-            ewma_long.append(0.84 + (i * 0.0005))
-        
+        timestamps = sorted(trend_data.keys())
+        top1_accuracies = [trend_data[ts].get('top1') for ts in timestamps]
+        top10_accuracies = [trend_data[ts].get('top10') for ts in timestamps]
+
+        # Fill in missing values with the last known value
+        for i in range(1, len(top1_accuracies)):
+            if top1_accuracies[i] is None:
+                top1_accuracies[i] = top1_accuracies[i-1]
+            if top10_accuracies[i] is None:
+                top10_accuracies[i] = top10_accuracies[i-1]
+
         # If no data, return mock data
         if not timestamps:
             now = datetime.utcnow()
             timestamps = [(now - timedelta(days=i)).isoformat() for i in range(7)]
-            accuracies = [0.85 + (i * 0.01) for i in range(7)]
-            ewma_short = [0.85 + (i * 0.015) for i in range(7)]
-            ewma_long = [0.84 + (i * 0.008) for i in range(7)]
+            top1_accuracies = [0.85 + (i * 0.01) for i in range(7)]
+            top10_accuracies = [0.95 + (i * 0.005) for i in range(7)]
         
         return {
             "status": "success",
             "timestamps": timestamps,
-            "overall_accuracy": accuracies,
-            "ewma_short": ewma_short,
-            "ewma_long": ewma_long,
+            "top1_accuracy": top1_accuracies,
+            "top10_accuracy": top10_accuracies,
             "timestamp": datetime.utcnow().isoformat()
         }
     except Exception as e:
@@ -456,6 +463,47 @@ async def get_drift_summary(
             "warning_keys_count": warning_count,
             "drift_trend": trend,
             "last_detected_time": last_time.isoformat() if last_time else None,
+            "timestamp": datetime.utcnow().isoformat()
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================================
+# 8. Prediction Live Feed
+# ============================================================
+
+@router.get("/live-feed")
+async def get_live_feed(
+    limit: int = 10,
+    db: Session = Depends(get_session)
+):
+    """
+    Get the latest prediction logs for the live feed.
+    """
+    try:
+        trainer_int = get_trainer_integration()
+        current_version = trainer_int.version_manager.get_current_version("cache_predictor")
+
+        if not current_version:
+            raise HTTPException(status_code=404, detail="Model not found")
+
+        logs = db.query(PredictionLog).filter(
+            PredictionLog.version_id == current_version.version_id
+        ).order_by(desc(PredictionLog.timestamp)).limit(limit).all()
+
+        feed = [{
+            "key": log.key,
+            "predicted_value": log.predicted_value,
+            "actual_value": log.actual_value,
+            "is_correct": log.is_correct,
+            "confidence": log.confidence,
+            "timestamp": log.timestamp.isoformat()
+        } for log in logs]
+
+        return {
+            "status": "success",
+            "live_feed": feed,
             "timestamp": datetime.utcnow().isoformat()
         }
     except Exception as e:

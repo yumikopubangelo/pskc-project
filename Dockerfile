@@ -17,8 +17,21 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
-RUN pip install --upgrade pip && \
-    pip install --prefix=/install --no-cache-dir -r requirements.txt
+
+# Upgrade pip first
+RUN pip install --upgrade pip setuptools wheel
+
+# Install typing-extensions early (required by pydantic)
+RUN pip install --no-cache-dir typing-extensions>=4.5.0
+
+# ✅ FIX: Install PyTorch with --prefix so it gets copied to runtime stage
+# CPU-only version for smaller image size
+RUN pip install --prefix=/install --no-cache-dir \
+    torch==2.3.1+cpu \
+    --index-url https://download.pytorch.org/whl/cpu
+
+# Install remaining dependencies using --prefix to /install
+RUN pip install --prefix=/install --no-cache-dir -r requirements.txt
 
 
 # ---- Stage 2: Runtime ----
@@ -34,7 +47,20 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
+# Copy everything from builder's /install to runtime's /usr/local
 COPY --from=builder /install /usr/local
+
+# ✅ CRITICAL FIX: Ensure both typing-extensions and PyTorch are available
+# Install typing-extensions again in runtime as insurance
+RUN pip install --no-cache-dir typing-extensions>=4.5.0
+
+# ✅ CRITICAL FIX: Ensure PyTorch is available in runtime
+# Install PyTorch again from PyTorch's official index as backup
+# In case the copy from builder stage didn't work properly
+RUN pip install --no-cache-dir \
+    torch==2.3.1+cpu \
+    --index-url https://download.pytorch.org/whl/cpu
+
 COPY . .
 
 RUN groupadd --gid 1001 pskc && \

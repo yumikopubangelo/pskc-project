@@ -1,4 +1,4 @@
-# Feature Roadmap PSKC
+f# Feature Roadmap PSKC
 
 Backlog pengembangan fitur yang **belum dikerjakan atau belum selesai**.
 Untuk fitur yang sudah selesai, lihat [`comprehensive_features.md`](comprehensive_features.md).
@@ -875,7 +875,7 @@ Tidak ada halaman yang khusus untuk operator memonitor state sistem.
 
 **Masalah:**
 Saat ini error dari backend tidak dibedakan di UI — semua terlihat sama.
-
+****
 **Yang perlu dikerjakan:**
 - Bedakan di UI: `no data`, `backend down`, `security denied`, `worker lag`, `model not ready`
 - Tampilkan status yang jelas dengan aksi yang bisa dilakukan user

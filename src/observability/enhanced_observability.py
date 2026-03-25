@@ -14,7 +14,13 @@ from sqlalchemy import and_, desc
 import json
 from collections import defaultdict, deque
 
-from src.database.models import KeyPrediction, PerKeyMetric, ModelMetric
+from src.database.models import (
+    KeyPrediction,
+    ModelMetric,
+    ModelVersion,
+    PerKeyMetric,
+    PredictionLog,
+)
 from src.ml.algorithm_improvements import EWMACalculator, DriftDetector
 
 logger = logging.getLogger(__name__)
@@ -71,6 +77,74 @@ class EnhancedObservabilityService:
         
         # Baseline for benchmark (stored in config)
         self.baseline_latency_ms = None
+
+    def resolve_version_id(
+        self,
+        version_id: Optional[int] = None,
+        *,
+        model_name: Optional[str] = None,
+        runtime_version: Optional[str] = None,
+    ) -> int:
+        """
+        Resolve a runtime version to a concrete ModelVersion row.
+
+        Runtime prediction logging often only knows the active runtime label
+        (for example ``v12`` or a registry timestamp). This helper maps that
+        label back to the database row used by the intelligence dashboard.
+        """
+        try:
+            if version_id and int(version_id) > 0:
+                return int(version_id)
+        except (TypeError, ValueError):
+            pass
+
+        query = self.db.query(ModelVersion)
+        if model_name:
+            query = query.filter(ModelVersion.model_name == model_name)
+
+        versions = query.order_by(desc(ModelVersion.created_at)).limit(100).all()
+        if not versions:
+            return 0
+
+        runtime_candidates = set()
+        if runtime_version:
+            runtime_label = str(runtime_version).strip()
+            runtime_candidates.add(runtime_label)
+            if runtime_label.lower().startswith("v") and runtime_label[1:].isdigit():
+                runtime_candidates.add(runtime_label[1:])
+
+        if runtime_candidates:
+            for version in versions:
+                metrics_json = version.metrics_json or {}
+                db_candidates = {
+                    str(version.version_number),
+                    str(metrics_json.get("runtime_version") or ""),
+                }
+                if db_candidates & runtime_candidates:
+                    return int(version.version_id)
+
+        preferred_statuses = (
+            "production",
+            "staging",
+            "development",
+            "active",
+            "trained",
+            "accepted",
+            "archived",
+        )
+        for desired_status in preferred_statuses:
+            for version in versions:
+                if str(version.status or "").lower() == desired_status:
+                    return int(version.version_id)
+
+        non_rejected = next(
+            (version for version in versions if str(version.status or "").lower() != "rejected"),
+            None,
+        )
+        if non_rejected is not None:
+            return int(non_rejected.version_id)
+
+        return int(versions[0].version_id)
     
     def record_prediction(
         self,
@@ -124,6 +198,39 @@ class EnhancedObservabilityService:
             self.db.rollback()
             logger.error(f"Failed to record prediction: {e}")
             return False
+
+    def record_prediction_log(
+        self,
+        *,
+        version_id: int,
+        key: str,
+        predicted_value: str,
+        actual_value: Optional[str] = None,
+        confidence: Optional[float] = None,
+        latency_ms: Optional[float] = None,
+    ) -> bool:
+        """Persist a detailed runtime prediction log for debugging and audit."""
+        try:
+            if not version_id:
+                return False
+
+            log_entry = PredictionLog(
+                version_id=version_id,
+                key=key,
+                predicted_value=predicted_value,
+                actual_value=actual_value,
+                confidence=confidence,
+                is_correct=(predicted_value == actual_value) if actual_value is not None else None,
+                latency_ms=latency_ms,
+                timestamp=datetime.utcnow(),
+            )
+            self.db.add(log_entry)
+            self.db.commit()
+            return True
+        except Exception as e:
+            self.db.rollback()
+            logger.error(f"Failed to record prediction log: {e}")
+            return False
     
     def update_per_key_metrics(
         self,
@@ -171,6 +278,11 @@ class EnhancedObservabilityService:
             
             # Update in database
             try:
+                avg_confidence = sum(
+                    float(p.confidence or 0.0) for p in recent_predictions
+                ) / len(recent_predictions)
+                error_count = sum(1 for p in recent_predictions if p.is_correct is False)
+
                 existing = self.db.query(PerKeyMetric).filter(
                     and_(
                         PerKeyMetric.version_id == version_id,
@@ -182,7 +294,11 @@ class EnhancedObservabilityService:
                     existing.accuracy = accuracy
                     existing.drift_score = drift_score
                     existing.cache_hit_rate = cache_hit_rate
-                    existing.updated_at = datetime.utcnow()
+                    existing.hit_rate = cache_hit_rate
+                    existing.total_predictions = len(recent_predictions)
+                    existing.error_count = error_count
+                    existing.avg_confidence = avg_confidence
+                    existing.timestamp = datetime.utcnow()
                 else:
                     metric = PerKeyMetric(
                         version_id=version_id,
@@ -190,7 +306,11 @@ class EnhancedObservabilityService:
                         accuracy=accuracy,
                         drift_score=drift_score,
                         cache_hit_rate=cache_hit_rate,
-                        updated_at=datetime.utcnow()
+                        hit_rate=cache_hit_rate,
+                        total_predictions=len(recent_predictions),
+                        error_count=error_count,
+                        avg_confidence=avg_confidence,
+                        timestamp=datetime.utcnow(),
                     )
                     self.db.add(metric)
                 
@@ -262,7 +382,7 @@ class EnhancedObservabilityService:
             if key:
                 query = query.filter(PerKeyMetric.key == key)
             
-            metrics = query.order_by(desc(PerKeyMetric.updated_at)).all()
+            metrics = query.order_by(desc(PerKeyMetric.timestamp)).all()
             
             return [
                 {
@@ -270,12 +390,46 @@ class EnhancedObservabilityService:
                     "accuracy": m.accuracy,
                     "drift_score": m.drift_score,
                     "cache_hit_rate": m.cache_hit_rate,
-                    "updated_at": m.updated_at.isoformat()
+                    "updated_at": m.timestamp.isoformat() if m.timestamp else None,
                 }
                 for m in metrics
             ]
         except Exception as e:
             logger.error(f"Failed to get per-key metrics: {e}")
+            return []
+
+    def get_recent_prediction_logs(
+        self,
+        *,
+        limit: int = 50,
+        version_id: Optional[int] = None,
+        key: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """Return recent detailed prediction logs for debugging."""
+        try:
+            query = self.db.query(PredictionLog)
+            if version_id:
+                query = query.filter(PredictionLog.version_id == version_id)
+            if key:
+                query = query.filter(PredictionLog.key == key)
+
+            logs = query.order_by(desc(PredictionLog.timestamp)).limit(limit).all()
+            return [
+                {
+                    "id": log.id,
+                    "version_id": log.version_id,
+                    "key": log.key,
+                    "predicted_value": log.predicted_value,
+                    "actual_value": log.actual_value,
+                    "confidence": log.confidence,
+                    "is_correct": log.is_correct,
+                    "latency_ms": log.latency_ms,
+                    "timestamp": log.timestamp.isoformat() if log.timestamp else None,
+                }
+                for log in logs
+            ]
+        except Exception as e:
+            logger.error(f"Failed to get recent prediction logs: {e}")
             return []
     
     def get_latency_metrics(

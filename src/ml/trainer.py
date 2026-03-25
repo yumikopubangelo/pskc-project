@@ -24,7 +24,7 @@ import numpy as np
 from collections import deque
 from typing import Dict, List, Optional, Tuple, Any, Union
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 import math
 
 from config.settings import settings
@@ -470,6 +470,8 @@ class ModelTrainer:
         # Reset to False when a new model is successfully trained.
         self._load_failed: bool = False
         self._last_drift_retrain_time: float = 0
+        self._online_learning_count: int = 0
+        self._last_online_learning_result: Dict[str, Any] = {}
         
         # Training locks - allow concurrent scheduled/automatic but serialize within each type
         self._scheduled_lock = threading.Lock()
@@ -698,6 +700,127 @@ class ModelTrainer:
             "attempt_count": result.get("attempt_count"),
         }
 
+    def _record_training_run_in_database(
+        self,
+        *,
+        metrics: Dict[str, float],
+        training_info: Dict[str, Any],
+        reason: str,
+        runtime_version: Optional[str],
+        accepted: bool,
+        decision_reason: Optional[str],
+        training_time_s: float,
+        completed_at: str,
+    ) -> Dict[str, Any]:
+        """
+        Persist full-training history to SQL tables used by Model Intelligence.
+        """
+        try:
+            from src.database.connection import DatabaseConnection
+            from src.database.models import ModelMetric, ModelVersion, TrainingMetadata
+
+            db = DatabaseConnection.get_session()
+            try:
+                version_label = str(runtime_version or f"candidate-{int(time.time())}")
+                if accepted and version_label.lower().startswith("v") and version_label[1:].isdigit():
+                    version_label = version_label[1:]
+                elif not accepted and version_label == runtime_version:
+                    version_label = f"candidate-{int(time.time())}"
+
+                version_status = "production" if accepted else "rejected"
+                if accepted:
+                    (
+                        db.query(ModelVersion)
+                        .filter(
+                            ModelVersion.model_name == self._model_name,
+                            ModelVersion.status == "production",
+                        )
+                        .update({"status": "archived"}, synchronize_session=False)
+                    )
+
+                model_version = ModelVersion(
+                    model_name=self._model_name,
+                    version_number=version_label,
+                    status=version_status,
+                    metrics_json={
+                        **(metrics or {}),
+                        "reason": reason,
+                        "accepted": accepted,
+                        "decision_reason": decision_reason,
+                        "runtime_version": runtime_version,
+                    },
+                )
+                db.add(model_version)
+                db.flush()
+
+                for metric_name, metric_value in (metrics or {}).items():
+                    try:
+                        numeric_value = float(metric_value)
+                    except (TypeError, ValueError):
+                        continue
+                    db.add(
+                        ModelMetric(
+                            version_id=model_version.version_id,
+                            metric_name=str(metric_name),
+                            metric_value=numeric_value,
+                            recorded_at=datetime.utcnow(),
+                        )
+                    )
+
+                completed_dt = datetime.fromisoformat(completed_at)
+                started_dt = completed_dt - timedelta(seconds=float(training_time_s or 0.0))
+                db.add(
+                    TrainingMetadata(
+                        version_id=model_version.version_id,
+                        training_start_time=started_dt,
+                        training_end_time=completed_dt,
+                        samples_count=int(training_info.get("sample_count", 0) or 0),
+                        accuracy_before=None,
+                        accuracy_after=float((metrics or {}).get("accuracy", 0.0) or 0.0),
+                    )
+                )
+
+                db.commit()
+                return {
+                    "success": True,
+                    "version_id": model_version.version_id,
+                    "version_number": model_version.version_number,
+                    "status": model_version.status,
+                }
+            except Exception:
+                db.rollback()
+                raise
+            finally:
+                db.close()
+        except Exception as exc:
+            logger.error("Failed to persist training run to database: %s", exc)
+            return {"success": False, "reason": str(exc)}
+
+    def train_online(self, reason: str = "drift_detected") -> Dict[str, Any]:
+        """
+        Lightweight drift-triggered online learning path.
+        Uses River incremental updates and does not create a new persisted model version.
+        """
+        if self._is_training_automatic:
+            return {"success": False, "reason": "already_training", "training_path": "online"}
+
+        if not self._automatic_lock.acquire(blocking=False):
+            return {"success": False, "reason": "already_training", "training_path": "online"}
+
+        try:
+            self._is_training_automatic = True
+            from src.ml.predictor import get_key_predictor
+
+            predictor = get_key_predictor()
+            result = predictor.run_online_learning(reason=reason, enforce_cooldown=False)
+            if result.get("success"):
+                self._online_learning_count += 1
+            self._last_online_learning_result = result
+            return result
+        finally:
+            self._is_training_automatic = False
+            self._automatic_lock.release()
+
     # ----------------------------------------------------------
     # Feature Extraction (with context window)
     # ----------------------------------------------------------
@@ -755,6 +878,9 @@ class ModelTrainer:
         Returns:
             Training results dict
         """
+        if reason in ("drift_detected", "predictor_drift", "online_learning", "drift"):
+            return self.train_online(reason=reason)
+
         # Determine training type
         is_automatic = reason in ("drift_detected", "automatic", "online_learning")
         
@@ -994,6 +1120,16 @@ class ModelTrainer:
                     status="rejected_threshold",
                     detail="accuracy_below_threshold",
                 )
+                db_training_record = self._record_training_run_in_database(
+                    metrics=val_metrics,
+                    training_info=training_info,
+                    reason=reason,
+                    runtime_version=f"candidate-{attempt_result.get('attempt_count')}",
+                    accepted=False,
+                    decision_reason="accuracy_below_threshold",
+                    training_time_s=round(training_time, 2),
+                    completed_at=completed_at,
+                )
                 result = {
                     "success": True,
                     "reason": "accuracy_below_threshold",
@@ -1010,6 +1146,8 @@ class ModelTrainer:
                     "active_version": self._active_model_version,
                     "artifact_path": self._active_artifact_path,
                     "attempt_count": attempt_result.get("attempt_count"),
+                    "db_version_id": db_training_record.get("version_id"),
+                    "db_version_number": db_training_record.get("version_number"),
                 }
                 self._training_history.append(result)
                 self._record_training_metrics(
@@ -1070,6 +1208,17 @@ class ModelTrainer:
                 self._training_count += 1
                 self._load_failed = False  # Allow re-loading on next startup
 
+            db_training_record = self._record_training_run_in_database(
+                metrics=val_metrics,
+                training_info=training_info,
+                reason=reason,
+                runtime_version=persist_result.get("version"),
+                accepted=accepted,
+                decision_reason=persist_result.get("decision_reason"),
+                training_time_s=round(training_time, 2),
+                completed_at=completed_at,
+            )
+
             result = {
                 "success": True,
                 "reason": reason if accepted else str(persist_result.get("decision_reason") or "not_promoted"),
@@ -1089,6 +1238,8 @@ class ModelTrainer:
                 "version_bumped": accepted,
                 "attempt_count": persist_result.get("attempt_count"),
                 "decision_reason": persist_result.get("decision_reason"),
+                "db_version_id": db_training_record.get("version_id"),
+                "db_version_number": db_training_record.get("version_number"),
             }
 
             self._training_history.append(result)
@@ -1208,20 +1359,19 @@ class ModelTrainer:
         """
         Record a real cache outcome.
         - Updates drift detector
-        - If drift detected, triggers immediate retrain (rate-limited to 1/5min)
+        - If drift detected, triggers lightweight River online learning (non-blocking)
         """
         status = self._drift_detector.record(cache_hit)
 
         if status == "drift":
-            # Rate limit: don't retrain more than once per 5 minutes from drift
+            # Rate limit: don't adapt more than once per 5 minutes from drift
             time_since_last = time.time() - self._last_drift_retrain_time
             if time_since_last > 300:
-                logger.info("Triggering drift-based retrain...")
+                logger.info("Triggering drift-based online learning...")
                 self._last_drift_retrain_time = time.time()
-                # Run in background thread to not block the caller
                 t = threading.Thread(
-                    target=self.train,
-                    kwargs={"force": True, "reason": "drift"},
+                    target=self.train_online,
+                    kwargs={"reason": "drift_detected"},
                     daemon=True,
                 )
                 t.start()
@@ -1231,7 +1381,7 @@ class ModelTrainer:
         Incremental update — full retrain on latest collected data.
         (River/online learning could be used here in future upgrade)
         """
-        return self.train(force=True, reason="incremental")
+        return self.train_online(reason="incremental_online")
 
     # ----------------------------------------------------------
     # Background Auto-Training
@@ -1355,6 +1505,8 @@ class ModelTrainer:
             "model_source":    self._model_source,
             "incremental_info": incremental_info,
             "last_evaluation": self._last_evaluation,
+            "online_learning_count": self._online_learning_count,
+            "last_online_learning": self._last_online_learning_result,
         }
 
     def get_training_history(self) -> List[Dict]:
