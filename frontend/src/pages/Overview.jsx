@@ -329,14 +329,14 @@ function Overview() {
           >
             <h2 className="text-3xl md:text-4xl font-display font-bold text-white mb-4">Ready to Inspect Real Backend State?</h2>
             <p className="text-slate-400 mb-8 max-w-xl mx-auto">
-              Simulation, dashboard, dan ML pipeline sekarang memakai backend sebagai sumber data utama, bukan angka demo lokal.
+              Simulation realtime, dashboard, dan model intelligence sekarang memakai backend sebagai sumber data utama, bukan angka demo lokal.
             </p>
             <div className="flex flex-col sm:flex-row gap-4 justify-center">
               <a href="/dashboard" className="btn-primary px-8 py-3">
                 View Dashboard
               </a>
-              <a href="/ml-pipeline" className="btn-secondary px-8 py-3">
-                Explore ML Pipeline
+              <a href="/simulation" className="btn-secondary px-8 py-3">
+                Open Realtime Simulation
               </a>
             </div>
           </motion.div>

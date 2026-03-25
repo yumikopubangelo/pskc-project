@@ -3,11 +3,9 @@ import { Routes, Route, NavLink } from 'react-router-dom'
 import Overview from './pages/Overview'
 import DashboardPage from './pages/DashboardPage'
 import Simulation from './pages/Simulation'
-import MLPipeline from './pages/MLPipeline'
 import ModelIntelligence from './pages/ModelIntelligence'
 import MLTraining from './pages/MLTraining'
 import SecurityTesting from './pages/SecurityTesting'
-import MLPipelineBuilder from './pages/MLPipelineBuilder'
 import Icon from './components/Icon'
 
 function App() {
@@ -15,7 +13,6 @@ function App() {
 
   const navItems = [
     { path: '/', label: 'Overview', icon: 'grid' },
-    { path: '/node-graph', label: 'Pipeline', icon: 'layers' },
     { path: '/dashboard', label: 'Dashboard', icon: 'trend' },
     { path: '/simulation', label: 'Simulation', icon: 'play' },
     { path: '/ml-training', label: 'ML Training', icon: 'cpu' },
@@ -94,10 +91,8 @@ function App() {
       <main className="pt-16">
         <Routes>
           <Route path="/" element={<Overview />} />
-          <Route path="/node-graph" element={<MLPipelineBuilder />} />
           <Route path="/simulation" element={<Simulation />} />
           <Route path="/dashboard" element={<DashboardPage />} />
-          <Route path="/ml-pipeline" element={<MLPipeline />} />
           <Route path="/ml-training" element={<MLTraining />} />
           <Route path="/model-intelligence" element={<ModelIntelligence />} />
           <Route path="/security-testing" element={<SecurityTesting />} />

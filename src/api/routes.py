@@ -10,15 +10,32 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from src.security.fips_self_tests import run_power_on_self_tests, FipsSelfTestFailure
-from src.api.ml_service import initialize_ml_runtime, shutdown_ml_runtime
+from src.api.ml_service import (
+    initialize_ml_runtime,
+    shutdown_ml_runtime,
+    record_runtime_access,
+    schedule_request_path_prefetch,
+    get_model_registry_payload,
+    get_model_lifecycle_payload,
+    get_model_evaluation_payload,
+    promote_runtime_model_version,
+    rollback_runtime_model_version,
+)
 from src.runtime.bootstrap import build_runtime_services, shutdown_runtime_services
 from src.prefetch.queue import get_prefetch_queue
 from src.security.security_headers import SecurityHeadersMiddleware, SlidingWindowRateLimiter, configure_trusted_proxies
 from config.settings import settings
+from src.auth.key_fetcher import get_key_fetcher
+from src.api.live_validation_service import run_live_validation
+from src.api.live_simulation_service import (
+    start_live_simulation_session,
+    get_live_simulation_session,
+    stop_live_simulation_session,
+)
 
 # Import all route modules
 from src.api.route_health import create_health_router, get_startup_state
-from src.api.route_keys import create_key_router
+from src.api.route_keys import create_key_router, metrics_storage as _metrics_storage
 from src.api.route_metrics import create_metrics_router
 from src.api.route_prefetch import create_prefetch_router
 from src.api.route_ml import create_ml_router
@@ -26,7 +43,7 @@ from src.api.route_training import create_training_router
 from src.api.route_simulation import create_simulation_router
 from src.api.route_security_lifecycle import create_security_router, create_lifecycle_router
 from src.api.route_admin_pipeline import create_admin_router, create_pipeline_router
-from src.api.routes_models import router as models_router
+from src.api.routes_models import router as models_router, legacy_router as legacy_models_router
 from src.api.routes_observability import router as observability_router
 from src.api.routes_dashboard import router as dashboard_router
 
@@ -200,6 +217,7 @@ app.include_router(create_lifecycle_router())
 app.include_router(create_admin_router())
 app.include_router(create_pipeline_router())
 app.include_router(models_router)
+app.include_router(legacy_models_router)
 app.include_router(observability_router)
 app.include_router(dashboard_router)
 

@@ -21,6 +21,7 @@ from src.ml.model_version_manager import ModelVersionManager
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/models", tags=["models"])
+legacy_router = APIRouter(prefix="/models", tags=["models"])
 
 
 def get_version_manager(db: Session = Depends(get_db)) -> ModelVersionManager:
@@ -351,6 +352,7 @@ async def cleanup_old_versions(
 # ============================================================
 
 @router.get("/intelligence/dashboard")
+@legacy_router.get("/intelligence/dashboard")
 async def model_intelligence_dashboard(db: Session = Depends(get_db)):
     """
     Comprehensive model intelligence dashboard.

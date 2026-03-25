@@ -21,6 +21,9 @@ const PIE_COLORS = ['#14b8a6', '#0ea5e9', '#22c55e', '#f59e0b', '#f97316', '#ef4
 const formatPercent = (value, digits = 1) =>
   value == null ? 'N/A' : `${Number(value).toFixed(digits)}%`;
 
+const formatRatioPercent = (value, digits = 1) =>
+  value == null ? 'N/A' : `${(Number(value) * 100).toFixed(digits)}%`;
+
 const formatMs = (value) =>
   value == null ? 'N/A' : `${Number(value).toFixed(2)} ms`;
 
@@ -57,8 +60,10 @@ const LiveSimulationDashboard = () => {
   const [modelPreference, setModelPreference] = useState('best_available');
   const [keyMode, setKeyMode] = useState('auto');
   const [simulateKms, setSimulateKms] = useState(true);
+  const [transportMode, setTransportMode] = useState('idle');
 
   const pollIntervalRef = useRef(null);
+  const eventSourceRef = useRef(null);
   const sessionIdRef = useRef(null);
 
   const scenarios = [
@@ -89,6 +94,78 @@ const LiveSimulationDashboard = () => {
     { id: 'high_churn', name: 'High Churn' },
   ];
 
+  const cleanupTransport = useCallback(() => {
+    if (pollIntervalRef.current) {
+      clearInterval(pollIntervalRef.current);
+      pollIntervalRef.current = null;
+    }
+    if (eventSourceRef.current) {
+      eventSourceRef.current.close();
+      eventSourceRef.current = null;
+    }
+  }, []);
+
+  const fetchSessionSnapshot = useCallback(async (sessionId) => {
+    try {
+      const updatedSession = await apiClient.getLiveSimulationSession(sessionId);
+      if (updatedSession) {
+        setSession(updatedSession);
+        if (['completed', 'stopped', 'failed'].includes(updatedSession.status)) {
+          cleanupTransport();
+          setTransportMode('idle');
+        }
+      }
+    } catch (err) {
+      setError(err.message || 'Failed to fetch live simulation snapshot');
+      cleanupTransport();
+      setTransportMode('idle');
+    }
+  }, [cleanupTransport]);
+
+  const startPolling = useCallback((sessionId) => {
+    cleanupTransport();
+    setTransportMode('polling');
+    fetchSessionSnapshot(sessionId);
+    pollIntervalRef.current = setInterval(() => {
+      fetchSessionSnapshot(sessionId);
+    }, 1000);
+  }, [cleanupTransport, fetchSessionSnapshot]);
+
+  const startStream = useCallback((sessionId) => {
+    if (typeof window === 'undefined' || typeof window.EventSource === 'undefined') {
+      startPolling(sessionId);
+      return;
+    }
+
+    cleanupTransport();
+    setTransportMode('sse');
+    const source = new window.EventSource(apiClient.getLiveSimulationStreamUrl(sessionId));
+    eventSourceRef.current = source;
+
+    source.addEventListener('snapshot', (event) => {
+      try {
+        const payload = JSON.parse(event.data);
+        setSession(payload);
+        if (['completed', 'stopped', 'failed'].includes(payload.status)) {
+          cleanupTransport();
+          setTransportMode('idle');
+        }
+      } catch (err) {
+        console.error('Failed to parse simulation stream payload', err);
+      }
+    });
+
+    source.addEventListener('end', () => {
+      cleanupTransport();
+      setTransportMode('idle');
+    });
+
+    source.onerror = () => {
+      cleanupTransport();
+      startPolling(sessionId);
+    };
+  }, [cleanupTransport, startPolling]);
+
   const startSession = useCallback(async () => {
     setIsStarting(true);
     setError(null);
@@ -104,72 +181,59 @@ const LiveSimulationDashboard = () => {
       });
       sessionIdRef.current = response.session_id;
       setSession(response);
-
-      // Start polling for updates
-      pollIntervalRef.current = setInterval(async () => {
-        try {
-          const updatedSession = await apiClient.getLiveSimulationSession(sessionIdRef.current);
-          if (updatedSession) {
-            setSession(updatedSession);
-          }
-        } catch (err) {
-          console.error('Failed to poll session:', err);
-        }
-      }, 1000); // Poll every second
+      startStream(response.session_id);
     } catch (err) {
       setError(err.message || 'Failed to start simulation session');
     } finally {
       setIsStarting(false);
     }
-  }, [selectedScenario, selectedTraffic, virtualNodes, maxRequests, modelPreference, keyMode, simulateKms]);
+  }, [keyMode, maxRequests, modelPreference, selectedScenario, selectedTraffic, simulateKms, startStream, virtualNodes]);
 
   const stopSession = useCallback(async () => {
     if (!sessionIdRef.current) return;
 
     setIsStopping(true);
     try {
-      await apiClient.stopLiveSimulationSession(sessionIdRef.current);
-      // Session will be updated via polling
+      const stoppedSession = await apiClient.stopLiveSimulationSession(sessionIdRef.current);
+      if (stoppedSession) {
+        setSession(stoppedSession);
+      }
+      cleanupTransport();
+      setTransportMode('idle');
     } catch (err) {
       setError(err.message || 'Failed to stop simulation session');
     } finally {
       setIsStopping(false);
     }
-  }, []);
+  }, [cleanupTransport]);
 
   const resetSession = useCallback(() => {
-    if (pollIntervalRef.current) {
-      clearInterval(pollIntervalRef.current);
-      pollIntervalRef.current = null;
-    }
+    cleanupTransport();
     sessionIdRef.current = null;
     setSession(null);
     setError(null);
-  }, []);
+    setTransportMode('idle');
+  }, [cleanupTransport]);
 
   useEffect(() => {
     return () => {
-      if (pollIntervalRef.current) {
-        clearInterval(pollIntervalRef.current);
-      }
+      cleanupTransport();
     };
-  }, []);
+  }, [cleanupTransport]);
 
   // Prepare chart data
   const pathBreakdownData = session?.pskc_metrics?.path_breakdown || [];
+  const latencyBreakdownData = session?.observability?.latency_breakdown || [];
   const latencyTrendData = session?.trace?.slice(-50) || []; // Last 50 requests
   const accuracyData = session?.live_accuracy ? [{
     name: 'Model Accuracy',
     top1: session.live_accuracy.top_1_accuracy * 100,
     top10: session.live_accuracy.top_10_accuracy * 100,
   }] : [];
-
-  const prefetchData = session?.prefetch ? [{
-    name: 'Prefetch Performance',
-    opportunities: session.prefetch.prefetch_opportunities,
-    hits: session.prefetch.verified_prefetch_hits,
-    hitRate: session.prefetch.verified_prefetch_hit_rate * 100,
-  }] : [];
+  const benchmark = session?.observability?.benchmark || {};
+  const drift = session?.observability?.drift || {};
+  const riverOnline = session?.observability?.river_online || {};
+  const kmsPressure = session?.observability?.kms_pressure || {};
 
   // Per-key accuracy data for bar chart
   const perKeyAccuracyData = (session?.per_key_accuracy || []).map((k) => ({
@@ -178,6 +242,9 @@ const LiveSimulationDashboard = () => {
     top1: k.top1_accuracy,
     top10: k.top10_accuracy,
     total: k.total,
+    avgLatency: k.avg_latency_ms,
+    cacheHits: k.cache_hits,
+    cacheMisses: k.cache_misses,
   }));
 
   // Accuracy trend data for line chart
@@ -188,7 +255,6 @@ const LiveSimulationDashboard = () => {
   const latestTrace = recentTraces[0] || null;
 
   const isRunning = session?.status === 'running';
-  const isCompleted = session?.status === 'completed' || session?.status === 'stopped';
   const canStart = !isRunning && !isStarting;
   const canStop = isRunning && !isStopping;
 
@@ -217,6 +283,9 @@ const LiveSimulationDashboard = () => {
                 </span>
                 <span className="text-slate-400">
                   Requests: {formatNumber(session.requests_processed)}
+                </span>
+                <span className="text-slate-500">
+                  Transport: {transportMode.toUpperCase()}
                 </span>
               </div>
             )}
@@ -374,50 +443,97 @@ const LiveSimulationDashboard = () => {
       {session && (
         <>
           {/* Key Metrics Row */}
-          <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-4">
-            <div className="rounded-xl border border-dark-border bg-dark-card p-4">
-              <h3 className="text-sm font-medium text-slate-400">PSKC Latency</h3>
-              <p className="mt-2 text-2xl font-bold text-white">
-                {formatMs(session.pskc_metrics?.avg_latency_ms)}
-              </p>
-              <p className="text-xs text-slate-500">
-                P95: {formatMs(session.pskc_metrics?.p95_latency_ms)} · KMS miss avg: {formatMs(session.pskc_metrics?.kms_avg_latency_ms)}
-              </p>
+          <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
+            <MetricTile
+              label="PSKC Latency"
+              value={formatMs(session.pskc_metrics?.avg_latency_ms)}
+              hint={`P95 ${formatMs(session.pskc_metrics?.p95_latency_ms)} · KMS fallback avg ${formatMs(session.pskc_metrics?.kms_avg_latency_ms)}`}
+            />
+            <MetricTile
+              label="Baseline Latency"
+              value={formatMs(session.baseline_metrics?.avg_latency_ms)}
+              hint={`Direct KMS avg ${formatMs(session.baseline_metrics?.direct_kms_avg_latency_ms)}`}
+            />
+            <MetricTile
+              label="Cache Hit Rate"
+              value={formatPercent(benchmark.cache_hit_rate_percent)}
+              hint={`L1 ${session.pskc_metrics?.l1_hits || 0} · L2 ${session.pskc_metrics?.l2_hits || 0}`}
+              valueClassName="text-green-400"
+            />
+            <MetricTile
+              label="Latency Reduction"
+              value={formatPercent(benchmark.latency_reduction_percent)}
+              hint={`${formatMs(session.comparison?.avg_latency_saved_ms)} saved`}
+              valueClassName="text-accent-blue"
+            />
+            <MetricTile
+              label="Cache Efficiency"
+              value={formatPercent(benchmark.cache_efficiency_percent)}
+              hint="Weighted L1/L2/late-hit efficiency score"
+              valueClassName="text-emerald-300"
+            />
+            <MetricTile
+              label="KMS Offload"
+              value={formatPercent(benchmark.kms_offload_percent)}
+              hint="Direct KMS avoided by PSKC"
+              valueClassName="text-sky-300"
+            />
+            <MetricTile
+              label="Predictor Drift"
+              value={drift.score != null ? Number(drift.score).toFixed(4) : 'N/A'}
+              hint={`Level ${String(drift.level || 'normal').toUpperCase()}`}
+              valueClassName="text-amber-300"
+            />
+            <MetricTile
+              label="River Online"
+              value={riverOnline.initialized ? formatNumber(riverOnline.learn_count) : 'Offline'}
+              hint="Incremental updates applied"
+              valueClassName="text-purple-300"
+            />
+          </div>
+
+          <div className="grid grid-cols-1 gap-6 xl:grid-cols-3">
+            <div className="rounded-xl border border-dark-border bg-dark-card p-6 xl:col-span-2">
+              <h3 className="text-lg font-semibold mb-4">Observability &amp; Latency Metrics</h3>
+              <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
+                <MetricTile
+                  label="Accuracy Samples"
+                  value={formatNumber(benchmark.prediction_sample_count)}
+                  hint="Grounded next-request samples"
+                />
+                <MetricTile
+                  label="PSKC KMS Pressure"
+                  value={`${formatNumber(kmsPressure.pskc_recent_rps)} rps`}
+                  hint={`Avg ${formatMs(kmsPressure.pskc_avg_latency_ms)}`}
+                />
+                <MetricTile
+                  label="Direct KMS Pressure"
+                  value={`${formatNumber(kmsPressure.direct_recent_rps)} rps`}
+                  hint={`Avg ${formatMs(kmsPressure.direct_avg_latency_ms)}`}
+                />
+                <MetricTile
+                  label="Tracked Keys"
+                  value={formatNumber(perKeyAccuracyData.length)}
+                  hint="Keys with grounded accuracy stats"
+                />
+              </div>
             </div>
 
-            <div className="rounded-xl border border-dark-border bg-dark-card p-4">
-              <h3 className="text-sm font-medium text-slate-400">Baseline Latency</h3>
-              <p className="mt-2 text-2xl font-bold text-white">
-                {formatMs(session.baseline_metrics?.avg_latency_ms)}
-              </p>
-              <p className="text-xs text-slate-500">
-                Direct KMS avg: {formatMs(session.baseline_metrics?.direct_kms_avg_latency_ms)}
-              </p>
-            </div>
-
-            <div className="rounded-xl border border-dark-border bg-dark-card p-4">
-              <h3 className="text-sm font-medium text-slate-400">Cache Hit Rate</h3>
-              <p className="mt-2 text-2xl font-bold text-green-400">
-                {formatPercent(session.pskc_metrics?.cache_hit_rate)}
-              </p>
-              <p className="text-xs text-slate-500">
-                L1: {session.pskc_metrics?.l1_hits || 0}, L2: {session.pskc_metrics?.l2_hits || 0}
-              </p>
-            </div>
-
-            <div className="rounded-xl border border-dark-border bg-dark-card p-4">
-              <h3 className="text-sm font-medium text-slate-400">Improvement</h3>
-              <p className="mt-2 text-2xl font-bold text-accent-blue">
-                {formatPercent(session.comparison?.latency_improvement_percent)}
-              </p>
-              <p className="text-xs text-slate-500">
-                {formatMs(session.comparison?.avg_latency_saved_ms)} saved
-              </p>
+            <div className="rounded-xl border border-dark-border bg-dark-card p-6">
+              <h3 className="text-lg font-semibold mb-4">KMS / Worker Proof</h3>
+              <div className="space-y-3 text-sm">
+                <ProofRow label="Redis shared cache" value={session.component_status?.redis_available} />
+                <ProofRow label="Prefetch worker active" value={(session.prefetch?.active_workers || []).length > 0} />
+                <ProofRow label="Selected model loaded" value={session.model?.loaded} />
+                <ProofRow label="Worker completions" value={formatNumber(session.prefetch?.worker_completed_delta)} />
+                <ProofRow label="Queue length" value={formatNumber(session.prefetch?.queue_length)} />
+                <ProofRow label="Model source" value={session.model?.source || 'N/A'} />
+              </div>
             </div>
           </div>
 
           {/* Charts Row */}
-          <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
+          <div className="grid grid-cols-1 gap-6 xl:grid-cols-3">
             {/* Path Breakdown Pie Chart */}
             <div className="rounded-xl border border-dark-border bg-dark-card p-6">
               <h3 className="text-lg font-semibold mb-4">Request Path Distribution</h3>
@@ -478,6 +594,33 @@ const LiveSimulationDashboard = () => {
                     />
                   )}
                 </LineChart>
+              </ResponsiveContainer>
+            </div>
+
+            <div className="rounded-xl border border-dark-border bg-dark-card p-6">
+              <h3 className="text-lg font-semibold mb-4">Latency Breakdown by Path</h3>
+              <ResponsiveContainer width="100%" height={300}>
+                <BarChart data={latencyBreakdownData}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#374151" />
+                  <XAxis
+                    dataKey="label"
+                    stroke="#9CA3AF"
+                    fontSize={11}
+                    angle={-16}
+                    textAnchor="end"
+                    height={70}
+                  />
+                  <YAxis stroke="#9CA3AF" fontSize={11} tickFormatter={formatMs} />
+                  <Tooltip
+                    formatter={(value, name) => [formatMs(value), name === 'avg_latency_ms' ? 'Average latency' : 'P95 latency']}
+                    contentStyle={{ backgroundColor: '#1e293b', border: '1px solid #334155', borderRadius: '8px' }}
+                    itemStyle={{ color: '#e2e8f0' }}
+                    labelStyle={{ color: '#94a3b8' }}
+                  />
+                  <Legend formatter={(value) => value === 'avg_latency_ms' ? 'Average latency' : 'P95 latency'} />
+                  <Bar dataKey="avg_latency_ms" fill="#3b82f6" radius={[4, 4, 0, 0]} />
+                  <Bar dataKey="p95_latency_ms" fill="#f59e0b" radius={[4, 4, 0, 0]} />
+                </BarChart>
               </ResponsiveContainer>
             </div>
           </div>
@@ -657,6 +800,42 @@ const LiveSimulationDashboard = () => {
             </div>
           )}
 
+          {session.per_key_accuracy && session.per_key_accuracy.length > 0 && (
+            <div className="rounded-xl border border-dark-border bg-dark-card p-6">
+              <h3 className="text-lg font-semibold mb-4">Per-Key Observability</h3>
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="border-b border-dark-border">
+                      <th className="py-2 px-3 text-left text-slate-400">Key</th>
+                      <th className="py-2 px-3 text-left text-slate-400">Top-1</th>
+                      <th className="py-2 px-3 text-left text-slate-400">Top-10</th>
+                      <th className="py-2 px-3 text-left text-slate-400">Avg Latency</th>
+                      <th className="py-2 px-3 text-left text-slate-400">Cache Hits</th>
+                      <th className="py-2 px-3 text-left text-slate-400">Misses</th>
+                      <th className="py-2 px-3 text-left text-slate-400">L1 / L2 / KMS</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {session.per_key_accuracy.slice(0, 10).map((item) => (
+                      <tr key={item.key_id} className="border-b border-dark-border/50">
+                        <td className="py-2 px-3 font-mono text-xs text-slate-300">{item.key_id}</td>
+                        <td className="py-2 px-3 text-accent-blue">{formatPercent(item.top1_accuracy)}</td>
+                        <td className="py-2 px-3 text-emerald-300">{formatPercent(item.top10_accuracy)}</td>
+                        <td className="py-2 px-3 text-slate-300">{formatMs(item.avg_latency_ms)}</td>
+                        <td className="py-2 px-3 text-slate-300">{formatNumber(item.cache_hits)}</td>
+                        <td className="py-2 px-3 text-slate-300">{formatNumber(item.cache_misses)}</td>
+                        <td className="py-2 px-3 text-slate-300">
+                          {formatNumber(item.l1_hits)} / {formatNumber(item.l2_hits)} / {formatNumber(item.kms_fetches)}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+
           {/* Model Performance */}
           {accuracyData.length > 0 && (
             <div className="rounded-xl border border-dark-border bg-dark-card p-6">
@@ -664,7 +843,7 @@ const LiveSimulationDashboard = () => {
               <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
                 <div className="text-center">
                   <p className="text-2xl font-bold text-accent-blue">
-                    {formatPercent(session.live_accuracy?.top_1_accuracy)}
+                    {formatRatioPercent(session.live_accuracy?.top_1_accuracy)}
                   </p>
                   <p className="text-sm text-slate-400">Previous Prediction Top-1</p>
                   <p className="text-xs text-slate-500">
@@ -673,7 +852,7 @@ const LiveSimulationDashboard = () => {
                 </div>
                 <div className="text-center">
                   <p className="text-2xl font-bold text-green-400">
-                    {formatPercent(session.live_accuracy?.top_10_accuracy)}
+                    {formatRatioPercent(session.live_accuracy?.top_10_accuracy)}
                   </p>
                   <p className="text-sm text-slate-400">Previous Prediction Top-10</p>
                   <p className="text-xs text-slate-500">
@@ -682,7 +861,7 @@ const LiveSimulationDashboard = () => {
                 </div>
                 <div className="text-center">
                   <p className="text-2xl font-bold text-yellow-400">
-                    {formatPercent(session.prefetch?.verified_prefetch_hit_rate)}
+                    {formatRatioPercent(session.prefetch?.verified_prefetch_hit_rate)}
                   </p>
                   <p className="text-sm text-slate-400">Verified Prefetch Hit Rate</p>
                   <p className="text-xs text-slate-500">
@@ -729,6 +908,8 @@ const LiveSimulationDashboard = () => {
                       <th className="text-left py-2 px-3 text-slate-400">Key</th>
                       <th className="text-left py-2 px-3 text-slate-400">Path</th>
                       <th className="text-left py-2 px-3 text-slate-400">Latency</th>
+                      <th className="text-left py-2 px-3 text-slate-400">Direct KMS</th>
+                      <th className="text-left py-2 px-3 text-slate-400">Saved</th>
                       <th className="text-left py-2 px-3 text-slate-400">Prev Prediction</th>
                       <th className="text-left py-2 px-3 text-slate-400">Next Prediction</th>
                       <th className="text-left py-2 px-3 text-slate-400">Cache Origin</th>
@@ -753,13 +934,19 @@ const LiveSimulationDashboard = () => {
                           </span>
                         </td>
                         <td className="py-2 px-3 text-slate-300">{formatMs(trace.latency_ms)}</td>
+                        <td className="py-2 px-3 text-slate-300">{formatMs(trace.baseline_latency_ms)}</td>
+                        <td className={`py-2 px-3 ${Number(trace.latency_saved_ms) >= 0 ? 'text-emerald-300' : 'text-red-300'}`}>
+                          {formatMs(trace.latency_saved_ms)}
+                        </td>
                         <td className="py-2 px-3">
-                          {trace.predicted_on_previous ? (
-                            <span className={trace.top1_correct ? 'text-green-400' : 'text-yellow-300'}>
-                              {trace.top1_correct ? 'Top-1' : 'Top-10'}
-                            </span>
+                          {trace.prediction_outcome === 'top1_hit' ? (
+                            <span className="text-green-400">Top-1</span>
+                          ) : trace.prediction_outcome === 'top10_hit' ? (
+                            <span className="text-yellow-300">Top-10</span>
+                          ) : trace.prediction_outcome === 'prediction_miss' ? (
+                            <span className="text-red-400">Prediction miss</span>
                           ) : (
-                            <span className="text-slate-500">Missed</span>
+                            <span className="text-slate-500">N/A</span>
                           )}
                         </td>
                         <td className="py-2 px-3">
@@ -824,6 +1011,33 @@ const LiveSimulationDashboard = () => {
           )}
         </>
       )}
+    </div>
+  );
+};
+
+const MetricTile = ({ label, value, hint, valueClassName = 'text-white' }) => (
+  <div className="rounded-xl border border-dark-border bg-dark-card p-4">
+    <h3 className="text-sm font-medium text-slate-400">{label}</h3>
+    <p className={`mt-2 text-2xl font-bold ${valueClassName}`}>{value}</p>
+    <p className="text-xs text-slate-500">{hint}</p>
+  </div>
+);
+
+const ProofRow = ({ label, value }) => {
+  const isBoolean = typeof value === 'boolean';
+  const valueLabel = isBoolean ? (value ? 'YES' : 'NO') : String(value ?? 'N/A');
+  const toneClass = isBoolean
+    ? value
+      ? 'bg-green-500/20 text-green-400'
+      : 'bg-red-500/20 text-red-400'
+    : 'bg-slate-500/20 text-slate-300';
+
+  return (
+    <div className="flex items-center justify-between gap-4">
+      <span className="text-slate-400">{label}</span>
+      <span className={`rounded-full px-2 py-1 text-xs font-medium ${toneClass}`}>
+        {valueLabel}
+      </span>
     </div>
   );
 };

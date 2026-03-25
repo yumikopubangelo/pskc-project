@@ -83,6 +83,12 @@ def _p95(values: List[float]) -> float:
     return round(float(ordered[index]), 2)
 
 
+def _avg(values: List[float]) -> float:
+    if not values:
+        return 0.0
+    return round(sum(values) / len(values), 2)
+
+
 def _stage_rank(stage: Optional[str]) -> int:
     normalized = str(stage or "").lower()
     if normalized == "production":
@@ -251,7 +257,8 @@ def _resolve_kms_latency_target_ms(session: Dict[str, Any], *, lane: str = "pskc
         latency_ms *= rng.uniform(1.4, 3.4 if session["traffic_type"] == "overload" else 2.3)
 
     latency_ms += rng.uniform(0.0, 14.0 if session["traffic_type"] == "overload" else 6.0)
-    return round(min(_KMS_HARD_CEILING_MS, latency_ms), 2)
+    hard_ceiling_ms = _KMS_HARD_CEILING_MS * (1.2 if lane == "direct" else 1.0)
+    return round(min(hard_ceiling_ms, latency_ms), 2)
 
 
 async def _fetch_key_with_kms_latency(
@@ -578,8 +585,16 @@ def _session_key_breakdown(state: Dict[str, Any]) -> List[Dict[str, Any]]:
 def _refresh_session_view(session: Dict[str, Any], app_state: Any, queue_stats: Dict[str, Any]) -> None:
     state = session["_state"]
     path_counts = state["path_counts"]
+    predictor = state.get("predictor")
+    predictor_stats = {}
+    if predictor is not None:
+        try:
+            predictor_stats = predictor.get_prediction_stats()
+        except Exception:
+            predictor_stats = {}
     pskc_kms_latencies = state["kms_latency_samples"].get("pskc", [])
     baseline_kms_latencies = state["kms_latency_samples"].get("direct", [])
+    path_latency_samples = state["path_latency_samples"]
     live_accuracy = {
         "top_1_accuracy": _safe_rate(state["top1_hits"], state["prediction_samples"]),
         "top_10_accuracy": _safe_rate(state["top10_hits"], state["prediction_samples"]),
@@ -613,7 +628,7 @@ def _refresh_session_view(session: Dict[str, Any], app_state: Any, queue_stats: 
     pskc_hits = path_counts["l1_hit"] + path_counts["l2_hit"] + path_counts["late_cache_hit"]
     pskc_metrics = {
         "request_count": pskc_request_count,
-        "avg_latency_ms": round(sum(state["pskc_latencies"]) / pskc_request_count, 2) if pskc_request_count else 0.0,
+        "avg_latency_ms": _avg(state["pskc_latencies"]),
         "p95_latency_ms": _p95(state["pskc_latencies"]),
         "cache_hit_rate": _safe_rate(pskc_hits, pskc_request_count - path_counts["blocked"]),
         "l1_hits": path_counts["l1_hit"],
@@ -621,7 +636,7 @@ def _refresh_session_view(session: Dict[str, Any], app_state: Any, queue_stats: 
         "late_cache_hits": path_counts["late_cache_hit"],
         "kms_fetches": path_counts["kms_fetch"],
         "kms_misses": path_counts["kms_miss"],
-        "kms_avg_latency_ms": round(sum(pskc_kms_latencies) / len(pskc_kms_latencies), 2) if pskc_kms_latencies else 0.0,
+        "kms_avg_latency_ms": _avg(pskc_kms_latencies),
         "kms_p95_latency_ms": _p95(pskc_kms_latencies),
         "blocked": path_counts["blocked"],
         "path_breakdown": [
@@ -636,18 +651,20 @@ def _refresh_session_view(session: Dict[str, Any], app_state: Any, queue_stats: 
     baseline_request_count = len(state["baseline_latencies"])
     baseline_metrics = {
         "request_count": baseline_request_count,
-        "avg_latency_ms": round(sum(state["baseline_latencies"]) / baseline_request_count, 2)
-        if baseline_request_count
-        else 0.0,
+        "avg_latency_ms": _avg(state["baseline_latencies"]),
         "p95_latency_ms": _p95(state["baseline_latencies"]),
         "direct_kms_requests": baseline_request_count,
-        "direct_kms_avg_latency_ms": round(sum(baseline_kms_latencies) / len(baseline_kms_latencies), 2)
-        if baseline_kms_latencies
-        else 0.0,
+        "direct_kms_avg_latency_ms": _avg(baseline_kms_latencies),
         "direct_kms_p95_latency_ms": _p95(baseline_kms_latencies),
     }
     baseline_avg = baseline_metrics["avg_latency_ms"]
     pskc_avg = pskc_metrics["avg_latency_ms"]
+    eligible_request_count = max(1, pskc_request_count - path_counts["blocked"])
+    weighted_cache_score = (
+        path_counts["l1_hit"]
+        + (path_counts["l2_hit"] * 0.8)
+        + (path_counts["late_cache_hit"] * 0.6)
+    )
     comparison = {
         "avg_latency_saved_ms": round(max(0.0, baseline_avg - pskc_avg), 2),
         "latency_improvement_percent": round(((baseline_avg - pskc_avg) / baseline_avg) * 100, 2)
@@ -674,6 +691,75 @@ def _refresh_session_view(session: Dict[str, Any], app_state: Any, queue_stats: 
             "selected_model_is_active_runtime": session["selected_model"].get("is_active_runtime", False),
         }
     )
+    latency_breakdown = [
+        {
+            "path": "l1_hit",
+            "label": "L1 hit",
+            "count": path_counts["l1_hit"],
+            "avg_latency_ms": _avg(path_latency_samples["l1_hit"]),
+            "p95_latency_ms": _p95(path_latency_samples["l1_hit"]),
+        },
+        {
+            "path": "l2_hit",
+            "label": "L2 hit",
+            "count": path_counts["l2_hit"],
+            "avg_latency_ms": _avg(path_latency_samples["l2_hit"]),
+            "p95_latency_ms": _p95(path_latency_samples["l2_hit"]),
+        },
+        {
+            "path": "late_cache_hit",
+            "label": "Late cache hit",
+            "count": path_counts["late_cache_hit"],
+            "avg_latency_ms": _avg(path_latency_samples["late_cache_hit"]),
+            "p95_latency_ms": _p95(path_latency_samples["late_cache_hit"]),
+        },
+        {
+            "path": "kms_fetch",
+            "label": "KMS fallback",
+            "count": path_counts["kms_fetch"],
+            "avg_latency_ms": _avg(path_latency_samples["kms_fetch"]),
+            "p95_latency_ms": _p95(path_latency_samples["kms_fetch"]),
+        },
+        {
+            "path": "kms_miss",
+            "label": "KMS miss",
+            "count": path_counts["kms_miss"],
+            "avg_latency_ms": _avg(path_latency_samples["kms_miss"]),
+            "p95_latency_ms": _p95(path_latency_samples["kms_miss"]),
+        },
+        {
+            "path": "direct_kms",
+            "label": "Direct KMS baseline",
+            "count": baseline_request_count,
+            "avg_latency_ms": baseline_metrics["avg_latency_ms"],
+            "p95_latency_ms": baseline_metrics["p95_latency_ms"],
+        },
+    ]
+    observability = {
+        "drift": {
+            "score": predictor_stats.get("ensemble", {}).get("drift_score", 0.0),
+            "level": predictor_stats.get("ensemble", {}).get("drift_level", "normal"),
+            "outcome_count": predictor_stats.get("outcome_count", state["prediction_samples"]),
+        },
+        "river_online": predictor_stats.get("river_online", {"initialized": False}),
+        "benchmark": {
+            "cache_hit_rate_percent": round(pskc_metrics["cache_hit_rate"] * 100, 2),
+            "latency_reduction_percent": comparison["latency_improvement_percent"],
+            "cache_efficiency_percent": round((weighted_cache_score / eligible_request_count) * 100, 2),
+            "kms_offload_percent": round(
+                max(0.0, 1.0 - _safe_rate(path_counts["kms_fetch"], baseline_request_count)) * 100,
+                2,
+            ) if baseline_request_count > 0 else 0.0,
+            "prediction_sample_count": state["prediction_samples"],
+        },
+        "latency_breakdown": latency_breakdown,
+        "kms_pressure": {
+            "pskc_recent_rps": round(len(state["kms_windows"]["pskc"]) / _KMS_PRESSURE_WINDOW_SECONDS, 2),
+            "direct_recent_rps": round(len(state["kms_windows"]["direct"]) / _KMS_PRESSURE_WINDOW_SECONDS, 2),
+            "pskc_avg_latency_ms": pskc_metrics["kms_avg_latency_ms"],
+            "direct_avg_latency_ms": baseline_metrics["direct_kms_avg_latency_ms"],
+        },
+    }
     session["updated_at"] = _now_iso()
     session["requests_processed"] = state["requests_processed"]
     session["component_status"] = component_status
@@ -683,6 +769,7 @@ def _refresh_session_view(session: Dict[str, Any], app_state: Any, queue_stats: 
     session["pskc_metrics"] = pskc_metrics
     session["baseline_metrics"] = baseline_metrics
     session["comparison"] = comparison
+    session["observability"] = observability
     session["trace"] = list(state["trace"])
     session["key_breakdown"] = _session_key_breakdown(state)
 
@@ -690,6 +777,7 @@ def _refresh_session_view(session: Dict[str, Any], app_state: Any, queue_stats: 
     per_key_acc = []
     for kid, stats in state["per_key_predictions"].items():
         t = stats["total"]
+        runtime = state["per_key_observability"].get(kid, {})
         per_key_acc.append({
             "key_id": kid,
             "total": t,
@@ -697,6 +785,15 @@ def _refresh_session_view(session: Dict[str, Any], app_state: Any, queue_stats: 
             "top10_hits": stats["top10_hits"],
             "top1_accuracy": round(stats["top1_hits"] / t * 100, 2) if t else 0.0,
             "top10_accuracy": round(stats["top10_hits"] / t * 100, 2) if t else 0.0,
+            "avg_latency_ms": round((runtime.get("latency_total_ms", 0.0) / runtime.get("requests", 1)), 2)
+            if runtime.get("requests")
+            else 0.0,
+            "cache_hits": runtime.get("cache_hits", 0),
+            "cache_misses": runtime.get("cache_misses", 0),
+            "l1_hits": runtime.get("l1_hit", 0),
+            "l2_hits": runtime.get("l2_hit", 0),
+            "kms_fetches": runtime.get("kms_fetch", 0),
+            "kms_misses": runtime.get("kms_miss", 0),
         })
     per_key_acc.sort(key=lambda x: x["total"], reverse=True)
     session["per_key_accuracy"] = per_key_acc[:15]
@@ -782,6 +879,7 @@ async def _process_live_request(
     top1_correct = False
     top10_correct = False
     prefetched_by_worker = False
+    cache_hit = False
     cache_origin_source = cache_origin_before.get("source") if cache_origin_before else "unknown"
     if previous_predictions:
         predicted_keys = [predicted_key for predicted_key, _ in previous_predictions]
@@ -807,18 +905,6 @@ async def _process_live_request(
             "top1_running": round(state["top1_hits"] / samples * 100, 2),
             "top10_running": round(state["top10_hits"] / samples * 100, 2),
         })
-
-        # Feed outcome to predictor's EWMA/Markov/Drift ensemble
-        if predictor is not None:
-            try:
-                predictor.record_outcome(
-                    service_id=service_id,
-                    actual_key=key_id,
-                    predicted_keys=predicted_keys if previous_predictions else [],
-                    cache_hit=bool(cache_hit),
-                )
-            except Exception:
-                pass  # best-effort
 
         if predicted_on_previous:
             state["prefetch_opportunities"] += 1
@@ -869,7 +955,31 @@ async def _process_live_request(
     total_latency_ms = round((time.perf_counter() - request_started) * 1000, 2)
     state["path_counts"][path] = state["path_counts"].get(path, 0) + 1
     state["pskc_latencies"].append(total_latency_ms)
+    state["path_latency_samples"][path].append(total_latency_ms)
     _update_key_breakdown(state, key_id, path)
+
+    key_runtime = state["per_key_observability"].setdefault(
+        key_id,
+        {
+            "requests": 0,
+            "latency_total_ms": 0.0,
+            "cache_hits": 0,
+            "cache_misses": 0,
+            "l1_hit": 0,
+            "l2_hit": 0,
+            "late_cache_hit": 0,
+            "kms_fetch": 0,
+            "kms_miss": 0,
+            "blocked": 0,
+        },
+    )
+    key_runtime["requests"] += 1
+    key_runtime["latency_total_ms"] += total_latency_ms
+    key_runtime[path] = key_runtime.get(path, 0) + 1
+    if path in {"l1_hit", "l2_hit", "late_cache_hit"}:
+        key_runtime["cache_hits"] += 1
+    elif path in {"kms_fetch", "kms_miss"}:
+        key_runtime["cache_misses"] += 1
 
     baseline_latency_ms = None
     baseline_kms_latency_ms = None
@@ -881,6 +991,17 @@ async def _process_live_request(
         )
         state["baseline_latencies"].append(baseline_latency_ms)
         _record_kms_latency(state, "direct", baseline_kms_latency_ms)
+
+    if predictor is not None and previous_predictions:
+        try:
+            predictor.record_outcome(
+                service_id=service_id,
+                actual_key=key_id,
+                predicted_keys=predicted_keys,
+                cache_hit=bool(cache_hit),
+            )
+        except Exception:
+            pass  # best-effort
 
     if allowed and key_data is not None:
         record_runtime_access(
@@ -954,6 +1075,15 @@ async def _process_live_request(
             "predicted_on_previous": predicted_on_previous,
             "top1_correct": top1_correct,
             "top10_correct": top10_correct,
+            "prediction_outcome": (
+                "top1_hit"
+                if top1_correct
+                else "top10_hit"
+                if top10_correct
+                else "prediction_miss"
+                if previous_predictions
+                else "no_previous_prediction"
+            ),
             "prefetched_before_request": prefetched_before_request,
             "prefetched_by_worker": prefetched_by_worker,
             "cache_origin_before": cache_origin_source,
@@ -993,6 +1123,7 @@ async def _run_live_session(session_id: str, app_state: Any) -> None:
             preference=session["model_preference"],
         )
         session["selected_model"] = model_meta
+        session["_state"]["predictor"] = predictor
         session["status"] = "running"
 
         rng = random.Random(session_id)
@@ -1165,6 +1296,15 @@ async def start_live_simulation_session(
             "seen_worker_job_ids": set(),
             "generation_offset": 0,
             "node_cursor": 0,
+            "path_latency_samples": {
+                "l1_hit": [],
+                "l2_hit": [],
+                "late_cache_hit": [],
+                "kms_fetch": [],
+                "kms_miss": [],
+                "blocked": [],
+            },
+            "per_key_observability": {},
             "kms_rng": random.Random(f"{session_id}:kms"),
             "kms_windows": {
                 "pskc": deque(),
@@ -1178,6 +1318,7 @@ async def start_live_simulation_session(
             "adaptive_popularity": defaultdict(Counter),
             "last_key_by_service": {},
             "virtual_nodes": [],
+            "predictor": None,
         },
     }
     with _SESSION_LOCK:

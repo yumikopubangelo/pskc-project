@@ -6,10 +6,11 @@ import os
 import logging
 from typing import Generator, Optional
 from sqlalchemy import create_engine, event, text
-from sqlalchemy.engine import Engine
+from sqlalchemy.engine import Engine, make_url
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
+from config.settings import settings
 from src.database.models import Base
 
 logger = logging.getLogger(__name__)
@@ -40,21 +41,28 @@ class DatabaseConnection:
     @classmethod
     def _initialize_database(cls):
         """Initialize database engine and session factory."""
-        db_path = r"d:\pskc-project\data\pskc.db"
-        
-        # Ensure data directory exists
-        os.makedirs(os.path.dirname(db_path), exist_ok=True)
-        
-        # Create SQLite engine with connection string
-        database_url = f"sqlite:///{db_path}"
-        
-        # For SQLite, use check_same_thread=False for thread safety with connection pooling
-        cls._engine = create_engine(
-            database_url,
-            connect_args={"check_same_thread": False},
-            poolclass=StaticPool,
-            echo=False,  # Set to True for SQL logging
-        )
+        database_url = settings.database_url
+        url = make_url(database_url)
+
+        engine_kwargs = {
+            "echo": False,
+        }
+
+        if url.get_backend_name() == "sqlite":
+            database_path = url.database or ""
+            if database_path and database_path != ":memory:":
+                db_dir = os.path.dirname(os.path.abspath(database_path))
+                if db_dir:
+                    os.makedirs(db_dir, exist_ok=True)
+
+            engine_kwargs.update(
+                {
+                    "connect_args": {"check_same_thread": False},
+                    "poolclass": StaticPool,
+                }
+            )
+
+        cls._engine = create_engine(database_url, **engine_kwargs)
         
         # Enable foreign keys for SQLite
         @event.listens_for(Engine, "connect")
@@ -73,7 +81,7 @@ class DatabaseConnection:
         
         # Initialize database schema
         cls._create_tables()
-        logger.info(f"Database initialized at {db_path}")
+        logger.info("Database initialized at %s", database_url)
     
     @classmethod
     def _create_tables(cls):

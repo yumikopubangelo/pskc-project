@@ -621,7 +621,6 @@ class EnsembleModel:
                     mode='min',
                     factor=settings.ml_lstm_lr_scheduler_factor,
                     patience=settings.ml_lstm_lr_scheduler_patience,
-                    verbose=False
                 )
             
             # Early stopping tracking

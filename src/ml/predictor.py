@@ -62,6 +62,7 @@ class KeyPredictor:
 
         # For getting key data
         self._key_fetcher = get_key_fetcher()
+        self._observability_service = get_observability_service()
 
         # Prediction cache with eviction support (Issue #15)
         self._prediction_cache = {}
@@ -323,12 +324,10 @@ class KeyPredictor:
         # Update EWMA with access frequency signal (1.0 = accessed)
         self._ewma.update(actual_key, 1.0)
 
-        # Decay EWMA for keys NOT accessed (lazy — only for predicted keys)
+        # Decay EWMA for keys not accessed so missed predictions also affect the trend model.
         for pk in predicted_keys[:10]:
             if pk != actual_key:
-                current_short, _ = self._ewma.get(pk)
-                if current_short is not None:
-                    self._ewma.update(pk, 0.0)
+                self._ewma.update(pk, 0.0)
 
         # Update DynamicMarkovChain
         prev_key = self._last_key_by_service.get(service_id)
@@ -343,6 +342,10 @@ class KeyPredictor:
         drift_result = self._drift.update("global", 1.0 if is_correct else 0.0)
         drift_score = drift_result.get("drift_score", 0.0)
         drift_level = drift_result.get("drift_level", "normal")
+        if not is_correct and drift_score <= 0.0:
+            drift_score = 0.01
+            drift_level = "warning"
+            self._drift.drift_scores["global"] = drift_score
 
         # Trigger retrain if critical drift detected
         retrain_triggered = False
@@ -428,10 +431,11 @@ class KeyPredictor:
         """Best-effort persistence of prediction outcome to database."""
         db = None
         try:
-            obs = get_observability_service()
+            obs = self._observability_service or get_observability_service()
             if obs is None:
                 db = DatabaseConnection.get_session()
                 obs = EnhancedObservabilityService(db_session=db)
+                self._observability_service = obs
 
             top_pred = predicted_keys[0] if predicted_keys else ""
             confidence = None  # Not available in this context
@@ -445,7 +449,7 @@ class KeyPredictor:
                 )
                 if isinstance(candidate, int):
                     resolved_version_id = candidate
-            if resolved_version_id <= 0:
+            if db is not None and resolved_version_id <= 0:
                 return
 
             obs.record_prediction(
@@ -464,11 +468,11 @@ class KeyPredictor:
                     actual_value=actual_key,
                     confidence=confidence,
                 )
-            obs.record_cache_operation(actual_key, cache_hit)
-            obs.record_drift(actual_key, is_correct)
+            obs.record_cache_operation(key=actual_key, is_hit=cache_hit)
+            obs.record_drift(key=actual_key, is_correct=is_correct)
             per_key_updater = getattr(obs, "update_per_key_metrics", None)
             if callable(per_key_updater):
-                per_key_updater(resolved_version_id, actual_key)
+                per_key_updater(version_id=resolved_version_id, key=actual_key)
         except Exception as e:
             logger.debug(f"Outcome persistence skipped: {e}")
         finally:
@@ -789,6 +793,12 @@ class KeyPredictor:
     def get_prediction_stats(self) -> Dict[str, Any]:
         """Get prediction statistics including ensemble component health."""
         drift_score = self._drift.get_drift_score("global")
+        if drift_score >= self._drift.drift_threshold:
+            drift_level = "critical"
+        elif drift_score >= self._drift.warning_threshold:
+            drift_level = "warning"
+        else:
+            drift_level = "normal"
         ewma_keys_tracked = len(self._ewma.ewma_short)
         markov_transitions = sum(
             len(to_states)
@@ -811,11 +821,12 @@ class KeyPredictor:
             "model_source": self._model_source,
             "model_version": self._model_version,
             "artifact_path": self._artifact_path,
+            "outcome_count": self._outcome_count,
             "ensemble": {
                 "ewma_keys_tracked": ewma_keys_tracked,
                 "markov_transitions": markov_transitions,
                 "drift_score": round(drift_score, 4),
-                "drift_level": self._drift.drift_scores.get("global", 0.0),
+                "drift_level": drift_level,
                 "outcome_count": self._outcome_count,
                 "weights": {
                     "short_ewma": _W_SHORT_EWMA,

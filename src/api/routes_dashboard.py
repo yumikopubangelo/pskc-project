@@ -520,6 +520,6 @@ async def health_check():
     return {
         "status": "healthy",
         "service": "dashboard-metrics",
-        "endpoints": 7,
+        "endpoints": 8,
         "timestamp": datetime.utcnow().isoformat()
     }

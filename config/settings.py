@@ -2,6 +2,7 @@
 # PSKC — Global Configuration Settings
 # ============================================================
 import os
+from pathlib import Path
 from typing import Optional
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -211,6 +212,29 @@ class AppSettings(BaseSettings):
 
         model_dir = os.path.dirname(self.ml_model_path)
         return model_dir or "data/models"
+
+    @property
+    def project_root(self) -> str:
+        """Absolute project root directory derived from this settings module."""
+        return str(Path(__file__).resolve().parents[1])
+
+    @property
+    def database_path(self) -> str:
+        """Resolved SQLite file path when DATABASE_URL is not explicitly provided."""
+        explicit_path = os.getenv("DATABASE_PATH", "").strip()
+        if explicit_path:
+            return str(Path(explicit_path).expanduser().resolve())
+
+        return str((Path(self.project_root) / "data" / "pskc.db").resolve())
+
+    @property
+    def database_url(self) -> str:
+        """Database URL used by SQLAlchemy and Alembic."""
+        explicit_url = os.getenv("DATABASE_URL", "").strip()
+        if explicit_url:
+            return explicit_url
+
+        return f"sqlite:///{Path(self.database_path).as_posix()}"
     
     @property
     def is_production(self) -> bool:

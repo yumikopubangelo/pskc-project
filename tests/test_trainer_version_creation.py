@@ -215,18 +215,27 @@ class TestTrainerVersionCreation:
         assert result_scheduled["success"] is True
         assert result_scheduled["reason"] == "scheduled"
         
-        # Test drift-based training
-        result_drift = trainer.train(force=True, reason="drift_detected")
+        # Test drift-based online training (separate path, no version bump)
+        fake_predictor = Mock()
+        fake_predictor.run_online_learning = Mock(return_value={
+            "success": True,
+            "reason": "drift_detected",
+            "training_path": "online",
+            "sample_count": 25,
+        })
+        with patch('src.ml.predictor.get_key_predictor', return_value=fake_predictor):
+            result_drift = trainer.train(force=True, reason="drift_detected")
         assert result_drift["success"] is True
         assert result_drift["reason"] == "drift_detected"
+        assert result_drift["training_path"] == "online"
         
         # Test manual training
         result_manual = trainer.train(force=True, reason="manual")
         assert result_manual["success"] is True
         assert result_manual["reason"] == "manual"
         
-        # Verify all three calls were made
-        assert mock_incremental_persistence.update.call_count == 3
+        # Only scheduled/manual go through persisted full retraining
+        assert mock_incremental_persistence.update.call_count == 2
     
     # =========================================================================
     # Test: Training with insufficient samples
