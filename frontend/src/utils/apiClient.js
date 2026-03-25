@@ -43,7 +43,14 @@ class ApiClient {
     delete config.params;
 
     try {
+      // Add timeout: default 10 seconds, or use provided timeout
+      const timeout = options.timeout || 10000;
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), timeout);
+      
+      config.signal = controller.signal;
       const response = await fetch(url, config);
+      clearTimeout(timeoutId);
       
       if (!response.ok) {
         const errorBody = await response.text();
@@ -58,6 +65,10 @@ class ApiClient {
 
       return await response.json();
     } catch (error) {
+      if (error.name === 'AbortError') {
+        console.error('API Request Timeout:', endpoint);
+        throw new Error(`Request timeout: ${endpoint}`);
+      }
       console.error('API Error:', error);
       throw error;
     }

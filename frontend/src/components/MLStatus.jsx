@@ -4,22 +4,45 @@ import apiClient from '../utils/apiClient';
 const MLStatus = () => {
   const [status, setStatus] = useState(null);
   const [error, setError] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [lastSyncTime, setLastSyncTime] = useState(null);
+  const [retryCount, setRetryCount] = useState(0);
 
   const fetchStatus = useCallback(async () => {
+    const abortController = new AbortController();
+    const timeoutId = setTimeout(() => abortController.abort(), 5000); // 5s timeout
+
     try {
       const data = await apiClient.getModelStatus();
+      clearTimeout(timeoutId);
       setStatus(data);
+      setError(null);
+      setLastSyncTime(new Date().toLocaleTimeString());
+      setRetryCount(0);
+      setLoading(false);
     } catch (err) {
-      setError('Failed to fetch ML status.');
-      console.error(err);
+      clearTimeout(timeoutId);
+      if (err.name === 'AbortError') {
+        setError('Request timeout (5s). Server may be unresponsive.');
+      } else {
+        setError('Failed to fetch ML status. Retrying...');
+      }
+      setRetryCount(prev => prev + 1);
+      setLoading(false);
+      console.error('MLStatus fetch error:', err);
     }
   }, []);
 
   useEffect(() => {
+    // Initial fetch
     fetchStatus();
-    const interval = setInterval(fetchStatus, 15000); // Refresh every 15 seconds
+    
+    // Set up interval - but use a more intelligent retry strategy
+    const pollInterval = error ? 5000 : 15000; // 5s if error, 15s if ok
+    const interval = setInterval(fetchStatus, pollInterval);
+    
     return () => clearInterval(interval);
-  }, [fetchStatus]);
+  }, [fetchStatus, error]);
 
   const getStageColor = (stage) => {
     switch (stage) {
@@ -75,8 +98,28 @@ const MLStatus = () => {
 
   return (
     <div className="bg-dark-card rounded-lg p-4 border border-dark-border h-full">
-      <h2 className="text-lg font-semibold mb-3">ML Model Status</h2>
-      {error && <p className="text-red-400">{error}</p>}
+      <div className="flex justify-between items-center mb-3">
+        <h2 className="text-lg font-semibold">ML Model Status</h2>
+        <div className="flex items-center gap-2 text-xs">
+          {loading && <span className="text-blue-400">Loading...</span>}
+          {!loading && !error && <span className="text-green-400">✓ Connected</span>}
+          {error && <span className="text-red-400">✗ Error</span>}
+          {lastSyncTime && <span className="text-gray-500">Synced: {lastSyncTime}</span>}
+        </div>
+      </div>
+      
+      {error && (
+        <div className="mb-3 p-2 bg-red-500/10 border border-red-500/30 rounded text-red-300 text-sm">
+          <p>{error} (Attempt {retryCount})</p>
+          <button
+            onClick={fetchStatus}
+            className="mt-2 px-3 py-1 bg-red-600 hover:bg-red-700 rounded text-xs font-semibold transition-colors"
+          >
+            Retry Now
+          </button>
+        </div>
+      )}
+      
       {!status && !error && <p className="text-gray-400">Loading status...</p>}
       {status && (
         <div className="space-y-3 text-sm">

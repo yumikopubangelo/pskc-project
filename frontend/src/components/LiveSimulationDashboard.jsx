@@ -171,6 +171,22 @@ const LiveSimulationDashboard = () => {
     hitRate: session.prefetch.verified_prefetch_hit_rate * 100,
   }] : [];
 
+  // Per-key accuracy data for bar chart
+  const perKeyAccuracyData = (session?.per_key_accuracy || []).map((k) => ({
+    key: k.key_id?.slice(0, 12),
+    fullKey: k.key_id,
+    top1: k.top1_accuracy,
+    top10: k.top10_accuracy,
+    total: k.total,
+  }));
+
+  // Accuracy trend data for line chart
+  const accuracyTrendData = session?.accuracy_trend || [];
+
+  // Latest trace for prediction feed
+  const recentTraces = session?.trace?.slice(-10)?.reverse() || [];
+  const latestTrace = recentTraces[0] || null;
+
   const isRunning = session?.status === 'running';
   const isCompleted = session?.status === 'completed' || session?.status === 'stopped';
   const canStart = !isRunning && !isStarting;
@@ -466,6 +482,181 @@ const LiveSimulationDashboard = () => {
             </div>
           </div>
 
+          {/* Prediction Live Feed */}
+          {latestTrace && (
+            <div className="rounded-xl border border-dark-border bg-dark-card p-6">
+              <h3 className="text-lg font-semibold mb-4">Prediction Live Feed</h3>
+              <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+                {/* Current prediction for next request */}
+                <div className="rounded-lg border border-dark-border/70 bg-dark-bg p-4">
+                  <p className="text-xs uppercase tracking-wide text-slate-500 mb-3">Model Predicts Next Keys</p>
+                  {latestTrace.prediction_preview && latestTrace.prediction_preview.length > 0 ? (
+                    <div className="space-y-2">
+                      {latestTrace.prediction_preview.map((pred, i) => (
+                        <div key={i} className="flex items-center gap-3">
+                          <span className={`w-6 h-6 flex items-center justify-center rounded-full text-xs font-bold ${
+                            i === 0 ? 'bg-yellow-500/20 text-yellow-400' :
+                            i === 1 ? 'bg-slate-500/20 text-slate-300' :
+                            'bg-amber-800/20 text-amber-600'
+                          }`}>
+                            {i + 1}
+                          </span>
+                          <span className="font-mono text-xs text-slate-300 flex-1 truncate">
+                            {pred.key_id}
+                          </span>
+                          <div className="flex items-center gap-2">
+                            <div className="w-20 h-2 rounded-full bg-dark-border overflow-hidden">
+                              <div
+                                className="h-full rounded-full bg-accent-blue"
+                                style={{ width: `${Math.min(pred.confidence * 100, 100)}%` }}
+                              />
+                            </div>
+                            <span className="text-xs text-slate-400 w-12 text-right">
+                              {(pred.confidence * 100).toFixed(1)}%
+                            </span>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <p className="text-sm text-slate-500">No predictions available</p>
+                  )}
+                  <p className="mt-3 text-xs text-slate-500">
+                    Source: {latestTrace.prediction_source || 'N/A'} | Prefetch: {latestTrace.prefetch_mode || 'noop'}
+                  </p>
+                </div>
+
+                {/* Last 5 prediction results */}
+                <div className="rounded-lg border border-dark-border/70 bg-dark-bg p-4">
+                  <p className="text-xs uppercase tracking-wide text-slate-500 mb-3">Recent Prediction Results</p>
+                  <div className="space-y-2">
+                    {recentTraces.slice(0, 6).map((trace) => (
+                      <div key={trace.index} className="flex items-center gap-2 text-sm">
+                        <span className="text-slate-500 w-8 text-right">#{trace.index}</span>
+                        <span className="font-mono text-xs text-slate-400 flex-1 truncate">
+                          {trace.key_id?.slice(0, 20)}
+                        </span>
+                        {trace.predicted_on_previous ? (
+                          trace.top1_correct ? (
+                            <span className="px-2 py-0.5 rounded-full text-xs font-medium bg-green-500/20 text-green-400">
+                              Top-1 HIT
+                            </span>
+                          ) : (
+                            <span className="px-2 py-0.5 rounded-full text-xs font-medium bg-yellow-500/20 text-yellow-300">
+                              Top-10 HIT
+                            </span>
+                          )
+                        ) : (
+                          <span className="px-2 py-0.5 rounded-full text-xs font-medium bg-red-500/20 text-red-400">
+                            MISS
+                          </span>
+                        )}
+                        <span className={`text-xs ${
+                          trace.path === 'l1_hit' || trace.path === 'l2_hit' ? 'text-green-400' :
+                          trace.path === 'kms_fetch' ? 'text-yellow-400' : 'text-red-400'
+                        }`}>
+                          {formatPathLabel(trace.path)}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Accuracy Trend + Per-Key Accuracy */}
+          {(accuracyTrendData.length > 3 || perKeyAccuracyData.length > 0) && (
+            <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
+              {/* Accuracy Trend Line Chart */}
+              {accuracyTrendData.length > 3 && (
+                <div className="rounded-xl border border-dark-border bg-dark-card p-6">
+                  <h3 className="text-lg font-semibold mb-4">Prediction Accuracy Trend</h3>
+                  <ResponsiveContainer width="100%" height={280}>
+                    <LineChart data={accuracyTrendData}>
+                      <CartesianGrid strokeDasharray="3 3" stroke="#374151" />
+                      <XAxis
+                        dataKey="index"
+                        stroke="#9CA3AF"
+                        fontSize={11}
+                        label={{ value: 'Request #', position: 'insideBottom', offset: -5, fill: '#9CA3AF', fontSize: 11 }}
+                      />
+                      <YAxis
+                        stroke="#9CA3AF"
+                        fontSize={11}
+                        domain={[0, 100]}
+                        tickFormatter={(v) => `${v}%`}
+                      />
+                      <Tooltip
+                        formatter={(value, name) => [`${value}%`, name === 'top1_running' ? 'Top-1 Accuracy' : 'Top-10 Accuracy']}
+                        labelFormatter={(label) => `Request #${label}`}
+                        contentStyle={{ backgroundColor: '#1e293b', border: '1px solid #334155', borderRadius: '8px' }}
+                        itemStyle={{ color: '#e2e8f0' }}
+                        labelStyle={{ color: '#94a3b8' }}
+                      />
+                      <Legend
+                        formatter={(value) => value === 'top1_running' ? 'Top-1' : 'Top-10'}
+                      />
+                      <Line
+                        type="monotone"
+                        dataKey="top1_running"
+                        stroke="#3b82f6"
+                        strokeWidth={2}
+                        dot={false}
+                      />
+                      <Line
+                        type="monotone"
+                        dataKey="top10_running"
+                        stroke="#22c55e"
+                        strokeWidth={2}
+                        dot={false}
+                      />
+                    </LineChart>
+                  </ResponsiveContainer>
+                </div>
+              )}
+
+              {/* Per-Key Accuracy Bar Chart */}
+              {perKeyAccuracyData.length > 0 && (
+                <div className="rounded-xl border border-dark-border bg-dark-card p-6">
+                  <h3 className="text-lg font-semibold mb-4">Per-Key Prediction Accuracy</h3>
+                  <ResponsiveContainer width="100%" height={280}>
+                    <BarChart data={perKeyAccuracyData} layout="vertical" margin={{ left: 10 }}>
+                      <CartesianGrid strokeDasharray="3 3" stroke="#374151" horizontal={false} />
+                      <XAxis
+                        type="number"
+                        domain={[0, 100]}
+                        stroke="#9CA3AF"
+                        fontSize={11}
+                        tickFormatter={(v) => `${v}%`}
+                      />
+                      <YAxis
+                        type="category"
+                        dataKey="key"
+                        stroke="#9CA3AF"
+                        fontSize={10}
+                        width={90}
+                        tick={{ fill: '#94a3b8' }}
+                      />
+                      <Tooltip
+                        formatter={(value, name) => [`${value}%`, name === 'top1' ? 'Top-1' : 'Top-10']}
+                        labelFormatter={(label) => `Key: ${label}`}
+                        contentStyle={{ backgroundColor: '#1e293b', border: '1px solid #334155', borderRadius: '8px' }}
+                        itemStyle={{ color: '#e2e8f0' }}
+                        labelStyle={{ color: '#94a3b8' }}
+                      />
+                      <Legend
+                        formatter={(value) => value === 'top1' ? 'Top-1 Accuracy' : 'Top-10 Accuracy'}
+                      />
+                      <Bar dataKey="top1" fill="#3b82f6" radius={[0, 4, 4, 0]} barSize={10} />
+                      <Bar dataKey="top10" fill="#22c55e" radius={[0, 4, 4, 0]} barSize={10} />
+                    </BarChart>
+                  </ResponsiveContainer>
+                </div>
+              )}
+            </div>
+          )}
+
           {/* Model Performance */}
           {accuracyData.length > 0 && (
             <div className="rounded-xl border border-dark-border bg-dark-card p-6">
@@ -539,6 +730,7 @@ const LiveSimulationDashboard = () => {
                       <th className="text-left py-2 px-3 text-slate-400">Path</th>
                       <th className="text-left py-2 px-3 text-slate-400">Latency</th>
                       <th className="text-left py-2 px-3 text-slate-400">Prev Prediction</th>
+                      <th className="text-left py-2 px-3 text-slate-400">Next Prediction</th>
                       <th className="text-left py-2 px-3 text-slate-400">Cache Origin</th>
                     </tr>
                   </thead>
@@ -568,6 +760,21 @@ const LiveSimulationDashboard = () => {
                             </span>
                           ) : (
                             <span className="text-slate-500">Missed</span>
+                          )}
+                        </td>
+                        <td className="py-2 px-3">
+                          {trace.prediction_preview && trace.prediction_preview.length > 0 ? (
+                            <div className="flex flex-col gap-0.5">
+                              {trace.prediction_preview.slice(0, 2).map((pred, i) => (
+                                <span key={i} className="text-xs font-mono text-slate-400">
+                                  <span className="text-slate-500">{i + 1}.</span>{' '}
+                                  {pred.key_id?.slice(0, 10)}
+                                  <span className="text-accent-blue ml-1">{(pred.confidence * 100).toFixed(0)}%</span>
+                                </span>
+                              ))}
+                            </div>
+                          ) : (
+                            <span className="text-xs text-slate-600">-</span>
                           )}
                         </td>
                         <td className="py-2 px-3">
