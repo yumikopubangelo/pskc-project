@@ -515,6 +515,9 @@ class EnsembleModel:
         self.rf = RandomForestModel(num_classes=num_classes) if SKLEARN_AVAILABLE else None
         self.markov = MarkovChainPredictor(num_classes=num_classes)
 
+        # RF feature preprocessor (fitted during training, applied at prediction)
+        self.rf_preprocessor = None
+
         # Dynamic weight tracker
         self._weight_tracker = EnsembleWeightTracker(
             model_names=["lstm", "rf", "markov"],
@@ -709,6 +712,12 @@ class EnsembleModel:
                 return self._static_weights
             return w
         return self._static_weights
+
+    def preprocess_rf(self, X_rf: np.ndarray) -> np.ndarray:
+        """Apply fitted RF preprocessor (normalize, drop constant, select features)."""
+        if self.rf_preprocessor is not None and self.rf_preprocessor.is_fitted:
+            return self.rf_preprocessor.transform(X_rf)
+        return X_rf
 
     def predict_proba(
         self,

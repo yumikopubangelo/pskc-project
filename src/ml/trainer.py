@@ -37,11 +37,8 @@ from src.observability.metrics_persistence import get_metrics_persistence
 from src.api.training_progress import get_training_progress_tracker, TrainingPhase
 from src.ml.model_improvements import (
     DataBalancer,
-    FeatureSelector,
     DataAugmenter,
-    HyperparameterTuner,
-    FeatureNormalizer,
-    PerModelPerformanceTracker,
+    RFPreprocessor,
 )
 
 logger = logging.getLogger(__name__)
@@ -817,13 +814,13 @@ class ModelTrainer:
 
                 # Different data window sizes based on training type
                 if is_automatic:
-                    # Automatic: recent data only (faster adaptation)
-                    window_seconds = 3600  # Last 1 hour
-                    max_events = 5000      # Smaller batch for quick updates
+                    # Automatic: recent data for quick adaptation
+                    window_seconds = 21600     # Last 6 hours
+                    max_events = 50_000        # More data for better patterns
                 else:
-                    # Scheduled: comprehensive data (better generalization)
-                    window_seconds = 86400     # Last 24 hours
-                    max_events = 50_000        # Full batch for baseline
+                    # Scheduled: comprehensive data (best generalization)
+                    window_seconds = 604800    # Last 7 days
+                    max_events = 170_000       # Use all available data
 
                 access_data = self._collector.get_access_sequence(
                     window_seconds=window_seconds,
@@ -857,27 +854,10 @@ class ModelTrainer:
                 details={"total_samples": len(X_rf)},
             )
 
-            # Apply feature normalization for better training stability
-            normalizer = FeatureNormalizer()
-            X_rf = normalizer.fit_transform(X_rf)
-
-            # Drop constant features before selection to avoid sklearn warnings
-            col_variance = np.var(X_rf, axis=0)
-            non_constant_cols = col_variance > 0
-            if not np.all(non_constant_cols):
-                logger.warning(
-                    f"Dropping {(~non_constant_cols).sum()} constant feature(s) before selection."
-                )
-                X_rf = X_rf[:, non_constant_cols]
-
-            # Apply feature selection to reduce noise and improve generalization
+            # Apply full RF preprocessing pipeline (normalize → drop constant → select)
             n_select = min(25, max(10, int(np.sqrt(len(X_rf))), X_rf.shape[1]))
-            n_select = min(n_select, X_rf.shape[1])  # cannot select more than available
-            selector = FeatureSelector(n_features=n_select)
-            import warnings as _warnings
-            with _warnings.catch_warnings():
-                _warnings.simplefilter("ignore")
-                X_rf = selector.fit_transform(X_rf, np.array(y))
+            rf_preprocessor = RFPreprocessor(n_select=n_select)
+            X_rf = rf_preprocessor.fit_transform(X_rf, np.array(y))
 
             tracker.update_progress(
                 phase=TrainingPhase.DATA_AUGMENTATION,
@@ -905,16 +885,30 @@ class ModelTrainer:
                 details={"total_samples": len(X_rf)},
             )
 
-            # 70/30 split (temporal)
-            split_idx = int(len(X_rf) * 0.7)
-            X_rf_train, X_rf_val = X_rf[:split_idx], X_rf[split_idx:]
-            X_lstm_train, X_lstm_val = X_lstm[:split_idx], X_lstm[split_idx:]
-            y_train, y_val = y[:split_idx], y[split_idx:]
+            # Stratified 70/30 split — ensures all key classes are
+            # represented proportionally in both train and validation sets.
+            from sklearn.model_selection import StratifiedShuffleSplit
+            y_arr = np.array(y)
+            try:
+                sss = StratifiedShuffleSplit(n_splits=1, test_size=0.3, random_state=42)
+                train_idx, val_idx = next(sss.split(X_rf, y_arr))
+            except ValueError:
+                # Fallback to simple split if stratification fails
+                # (e.g., a class has only 1 sample)
+                split_idx = int(len(X_rf) * 0.7)
+                train_idx = np.arange(split_idx)
+                val_idx = np.arange(split_idx, len(X_rf))
+
+            X_rf_train, X_rf_val = X_rf[train_idx], X_rf[val_idx]
+            X_lstm_train, X_lstm_val = X_lstm[train_idx], X_lstm[val_idx]
+            y_train = [y[i] for i in train_idx]
+            y_val = [y[i] for i in val_idx]
 
             # Build access sequence for Markov Chain
             key_sequence = [d["key_id"] for d in access_data]
 
             trainable_model = self._build_trainable_model(y_train)
+            trainable_model.rf_preprocessor = rf_preprocessor
 
             tracker.update_progress(
                 phase=TrainingPhase.FEATURE_ENGINEERING,
@@ -936,8 +930,8 @@ class ModelTrainer:
                 progress_percent=40.0,
                 current_step=4,
                 total_steps=10,
-                message=f"Training ensemble model on {split_idx} samples...",
-                details={"train_samples": split_idx},
+                message=f"Training ensemble model on {len(X_rf_train)} samples...",
+                details={"train_samples": len(X_rf_train)},
             )
 
             # Train ensemble (RF + Markov; LSTM uses sequential data)
@@ -963,7 +957,7 @@ class ModelTrainer:
                 X_rf_val,
                 y_val,
                 access_data=access_data,
-                validation_offset=split_idx,
+                validation_indices=val_idx,
                 X_lstm_val=X_lstm_val,
             )
 
@@ -1147,7 +1141,8 @@ class ModelTrainer:
         X_rf_val: np.ndarray,
         y_val: List[str],
         access_data: List[Dict[str, Any]],
-        validation_offset: int,
+        validation_indices: np.ndarray = None,
+        validation_offset: int = 0,
         X_lstm_val: np.ndarray = None,
     ) -> Dict[str, Any]:
         """Evaluate validation split using the same ensemble path used at runtime."""
@@ -1160,7 +1155,10 @@ class ModelTrainer:
             total = 0
 
             for idx, (x_rf, true_key) in enumerate(zip(X_rf_val, y_val)):
-                source_index = validation_offset + idx
+                if validation_indices is not None:
+                    source_index = int(validation_indices[idx])
+                else:
+                    source_index = validation_offset + idx
                 current_key = access_data[source_index - 1]["key_id"] if source_index > 0 else None
                 x_lstm = X_lstm_val[idx] if X_lstm_val is not None else None
                 top_predictions, _ = model.predict_top_n(
@@ -1295,9 +1293,10 @@ class ModelTrainer:
 
             for i, (x, true_key) in enumerate(zip(X_rf, y_true)):
                 current_key = test_data[i - 1]["key_id"] if i > 0 else None
+                x_rf = self.model.preprocess_rf(x.reshape(1, -1))
                 top_indices, top_probs = self.model.predict_top_n(
                     n=10,
-                    X_rf=x.reshape(1, -1),
+                    X_rf=x_rf,
                     current_key=current_key,
                 )
 
