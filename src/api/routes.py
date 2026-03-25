@@ -26,6 +26,9 @@ from src.api.route_training import create_training_router
 from src.api.route_simulation import create_simulation_router
 from src.api.route_security_lifecycle import create_security_router, create_lifecycle_router
 from src.api.route_admin_pipeline import create_admin_router, create_pipeline_router
+from src.api.routes_models import router as models_router
+from src.api.routes_observability import router as observability_router
+from src.api.routes_dashboard import router as dashboard_router
 
 logger = logging.getLogger(__name__)
 
@@ -196,5 +199,8 @@ app.include_router(create_security_router())
 app.include_router(create_lifecycle_router())
 app.include_router(create_admin_router())
 app.include_router(create_pipeline_router())
+app.include_router(models_router)
+app.include_router(observability_router)
+app.include_router(dashboard_router)
 
 logger.info("All route modules registered successfully")

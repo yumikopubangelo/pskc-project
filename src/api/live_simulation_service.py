@@ -34,22 +34,22 @@ _TRACE_LIMIT = 80
 _KEY_BREAKDOWN_LIMIT = 15
 _DEFAULT_VIRTUAL_NODES = 3
 _KMS_LATENCY_BOUNDS_MS: Dict[str, Tuple[float, float]] = {
-    "normal": (28.0, 48.0),
-    "heavy_load": (40.0, 85.0),
-    "prime_time": (35.0, 70.0),
-    "degraded": (75.0, 140.0),
-    "overload": (95.0, 180.0),
+    "normal": (150.0, 230.0),       # ~190ms avg (matches paper)
+    "heavy_load": (200.0, 350.0),   # ~275ms avg
+    "prime_time": (170.0, 280.0),   # ~225ms avg
+    "degraded": (300.0, 500.0),     # ~400ms avg
+    "overload": (450.0, 800.0),     # ~625ms avg
 }
 _REQUEST_OVERHEAD_BOUNDS_MS: Dict[str, Tuple[float, float]] = {
-    "normal": (4.0, 8.0),
-    "heavy_load": (5.0, 10.0),
-    "prime_time": (5.0, 10.0),
-    "degraded": (8.0, 16.0),
-    "overload": (10.0, 24.0),
+    "normal": (5.0, 12.0),
+    "heavy_load": (8.0, 18.0),
+    "prime_time": (6.0, 15.0),
+    "degraded": (12.0, 25.0),
+    "overload": (18.0, 35.0),
 }
 _KMS_PRESSURE_WINDOW_SECONDS = 2.0
 _KMS_NOMINAL_CAPACITY_RPS = 90.0
-_KMS_HARD_CEILING_MS = 1800.0
+_KMS_HARD_CEILING_MS = 3000.0
 _KEY_MODE_DEFAULT_BY_TRAFFIC = {
     "normal": "stable",
     "heavy_load": "mixed",
@@ -685,6 +685,30 @@ def _refresh_session_view(session: Dict[str, Any], app_state: Any, queue_stats: 
     session["comparison"] = comparison
     session["trace"] = list(state["trace"])
     session["key_breakdown"] = _session_key_breakdown(state)
+
+    # Per-key prediction accuracy (sorted by total desc, top 15)
+    per_key_acc = []
+    for kid, stats in state["per_key_predictions"].items():
+        t = stats["total"]
+        per_key_acc.append({
+            "key_id": kid,
+            "total": t,
+            "top1_hits": stats["top1_hits"],
+            "top10_hits": stats["top10_hits"],
+            "top1_accuracy": round(stats["top1_hits"] / t * 100, 2) if t else 0.0,
+            "top10_accuracy": round(stats["top10_hits"] / t * 100, 2) if t else 0.0,
+        })
+    per_key_acc.sort(key=lambda x: x["total"], reverse=True)
+    session["per_key_accuracy"] = per_key_acc[:15]
+
+    # Accuracy trend (downsample to max 100 points for chart performance)
+    raw_trend = state["accuracy_trend"]
+    if len(raw_trend) > 100:
+        step = len(raw_trend) // 100
+        session["accuracy_trend"] = raw_trend[::step][-100:]
+    else:
+        session["accuracy_trend"] = list(raw_trend)
+
     session["honesty_checks"] = {
         "uses_ground_truth_next_request": True,
         "prediction_sample_count": state["prediction_samples"],
@@ -767,6 +791,35 @@ async def _process_live_request(
         state["prediction_samples"] += 1
         state["top1_hits"] += int(top1_correct)
         state["top10_hits"] += int(top10_correct)
+
+        # Per-key prediction accuracy tracking
+        pka = state["per_key_predictions"]
+        if key_id not in pka:
+            pka[key_id] = {"total": 0, "top1_hits": 0, "top10_hits": 0}
+        pka[key_id]["total"] += 1
+        pka[key_id]["top1_hits"] += int(top1_correct)
+        pka[key_id]["top10_hits"] += int(top10_correct)
+
+        # Accuracy trend (snapshot every data point for running average)
+        samples = state["prediction_samples"]
+        state["accuracy_trend"].append({
+            "index": request_index,
+            "top1_running": round(state["top1_hits"] / samples * 100, 2),
+            "top10_running": round(state["top10_hits"] / samples * 100, 2),
+        })
+
+        # Feed outcome to predictor's EWMA/Markov/Drift ensemble
+        if predictor is not None:
+            try:
+                predictor.record_outcome(
+                    service_id=service_id,
+                    actual_key=key_id,
+                    predicted_keys=predicted_keys if previous_predictions else [],
+                    cache_hit=bool(cache_hit),
+                )
+            except Exception:
+                pass  # best-effort
+
         if predicted_on_previous:
             state["prefetch_opportunities"] += 1
     if prefetched_before_request:
@@ -1106,6 +1159,8 @@ async def start_live_simulation_session(
             "queue_completed_before": 0,
             "trace": [],
             "key_breakdown": {},
+            "per_key_predictions": {},
+            "accuracy_trend": [],
             "cache_origins": {},
             "seen_worker_job_ids": set(),
             "generation_offset": 0,

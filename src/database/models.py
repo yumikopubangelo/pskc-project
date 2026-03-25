@@ -3,12 +3,12 @@
 # ============================================================
 """SQLAlchemy ORM models for simulation learning data."""
 from datetime import datetime
-from typing import Optional, Any, Dict
+from typing import Optional, Any, Dict, List
 from sqlalchemy import (
     Column, Integer, String, Float, Boolean, DateTime, JSON,
     Index, UniqueConstraint, ForeignKey, event
 )
-from sqlalchemy.orm import declarative_base, Session
+from sqlalchemy.orm import declarative_base, Session, relationship
 from sqlalchemy.pool import NullPool
 
 Base = declarative_base()
@@ -117,3 +117,304 @@ class DriftAnalysisHistory(Base):
         Index('idx_drift_sim_id', 'simulation_id'),
         Index('idx_drift_created_at', 'created_at'),
     )
+
+
+class ModelVersion(Base):
+    """
+    Stores model versions and their metadata.
+    
+    Tracks different versions of ML models used in the system, supporting model lineage
+    through parent_version_id and providing a unified metrics storage location.
+    
+    Attributes:
+        version_id: Primary key and unique identifier for this model version
+        model_name: Name of the model (indexed for filtering by model)
+        version_number: Semantic version string (e.g., "1.0.0", "1.1.0")
+        created_at: Timestamp when the version was created (indexed for time-based queries)
+        status: Current status of the model (e.g., "active", "archived", "deprecated")
+        parent_version_id: Optional reference to parent version for lineage tracking
+        metrics_json: Optional JSON field for storing summary metrics
+    """
+    __tablename__ = "model_versions"
+    
+    version_id = Column(Integer, primary_key=True, index=True)
+    model_name = Column(String(255), nullable=False, index=True)
+    version_number = Column(String(50), nullable=False)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow, index=True)
+    status = Column(String(50), nullable=False, index=True)
+    parent_version_id = Column(Integer, ForeignKey('model_versions.version_id', ondelete='SET NULL'), nullable=True)
+    metrics_json = Column(JSON, nullable=True)
+    
+    # Relationships
+    metrics = relationship('ModelMetric', back_populates='version', cascade='all, delete-orphan')
+    training_metadata = relationship('TrainingMetadata', back_populates='version', uselist=False, cascade='all, delete-orphan')
+    key_predictions = relationship('KeyPrediction', back_populates='version', cascade='all, delete-orphan')
+    per_key_metrics = relationship('PerKeyMetric', back_populates='version', cascade='all, delete-orphan')
+    parent = relationship('ModelVersion', remote_side=[version_id], backref='child_versions')
+    
+    __table_args__ = (
+        Index('idx_model_versions_model_name_version_number', 'model_name', 'version_number'),
+        Index('idx_model_versions_parent_version_id', 'parent_version_id'),
+    )
+    
+    def __repr__(self) -> str:
+        return f"<ModelVersion(version_id={self.version_id}, model_name='{self.model_name}', version_number='{self.version_number}', status='{self.status}')>"
+
+
+class ModelMetric(Base):
+    """
+    Stores performance metrics for a specific model version.
+    
+    Captures individual metrics (accuracy, precision, recall, F1, etc.) for each
+    model version, allowing tracking of metric evolution over time and model iterations.
+    
+    Attributes:
+        id: Primary key
+        version_id: Foreign key to ModelVersion
+        metric_name: Name of the metric (e.g., "accuracy", "precision", "recall")
+        metric_value: Numeric value of the metric
+        recorded_at: Timestamp when the metric was recorded (indexed for time-based queries)
+    """
+    __tablename__ = "model_metrics"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    version_id = Column(Integer, ForeignKey('model_versions.version_id', ondelete='CASCADE'), nullable=False, index=True)
+    metric_name = Column(String(255), nullable=False, index=True)
+    metric_value = Column(Float, nullable=False)
+    recorded_at = Column(DateTime, nullable=False, default=datetime.utcnow, index=True)
+    
+    # Relationships
+    version = relationship('ModelVersion', back_populates='metrics')
+
+    __table_args__ = (
+        Index('idx_model_metrics_version_id_metric_name', 'version_id', 'metric_name'),
+    )
+    
+    def __repr__(self) -> str:
+        return f"<ModelMetric(id={self.id}, version_id={self.version_id}, metric_name='{self.metric_name}', metric_value={self.metric_value})>"
+
+
+class TrainingMetadata(Base):
+    """
+    Stores training session metadata for a model version.
+    
+    Records information about the training process for each model version, including
+    training duration, sample count, and accuracy improvements before and after training.
+    
+    Attributes:
+        id: Primary key
+        version_id: Foreign key to ModelVersion
+        training_start_time: When the training session started
+        training_end_time: When the training session ended (nullable if still training)
+        samples_count: Number of samples used in training
+        accuracy_before: Model accuracy before training
+        accuracy_after: Model accuracy after training
+    """
+    __tablename__ = "training_metadata"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    version_id = Column(Integer, ForeignKey('model_versions.version_id', ondelete='CASCADE'), nullable=False, index=True)
+    training_start_time = Column(DateTime, nullable=False, index=True)
+    training_end_time = Column(DateTime, nullable=True)
+    samples_count = Column(Integer, nullable=False)
+    accuracy_before = Column(Float, nullable=True)
+    accuracy_after = Column(Float, nullable=True)
+    
+    # Relationships
+    version = relationship('ModelVersion', back_populates='training_metadata')
+
+    def __repr__(self) -> str:
+        return f"<TrainingMetadata(id={self.id}, version_id={self.version_id}, samples_count={self.samples_count})>"
+
+
+class KeyPrediction(Base):
+    """
+    Stores individual key predictions made by a model version.
+    
+    Captures detailed prediction data for specific cache keys, including predicted values,
+    actual values, correctness, and confidence scores. Used for model evaluation and debugging.
+    
+    Attributes:
+        id: Primary key
+        version_id: Foreign key to ModelVersion
+        key: Cache key being predicted (indexed for per-key analysis)
+        predicted_value: The value predicted by the model
+        actual_value: The actual value (nullable if not yet known)
+        is_correct: Whether the prediction was correct (nullable if actual value unknown)
+        confidence: Model confidence score for the prediction
+        timestamp: When the prediction was made (indexed for time-based queries)
+    """
+    __tablename__ = "key_predictions"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    version_id = Column(Integer, ForeignKey('model_versions.version_id', ondelete='CASCADE'), nullable=False, index=True)
+    key = Column(String(255), nullable=False, index=True)
+    predicted_value = Column(String(500), nullable=False)
+    actual_value = Column(String(500), nullable=True)
+    is_correct = Column(Boolean, nullable=True, index=True)
+    confidence = Column(Float, nullable=True)
+    timestamp = Column(DateTime, nullable=False, default=datetime.utcnow, index=True)
+    
+    # Relationships
+    version = relationship('ModelVersion', back_populates='key_predictions')
+
+    __table_args__ = (
+        Index('idx_key_predictions_version_id_key', 'version_id', 'key'),
+    )
+    
+    def __repr__(self) -> str:
+        return f"<KeyPrediction(id={self.id}, version_id={self.version_id}, key='{self.key}', is_correct={self.is_correct})>"
+
+
+class PerKeyMetric(Base):
+    """
+    Stores aggregated metrics for individual cache keys across a model version.
+    
+    Provides per-key performance statistics (accuracy, drift score, cache hit rate),
+    enabling identification of keys with performance issues or high drift.
+    
+    Attributes:
+        id: Primary key
+        version_id: Foreign key to ModelVersion
+        key: Cache key identifier (indexed for per-key lookups)
+        accuracy: Accuracy for predictions of this key
+        drift_score: Detected drift score for this key
+        cache_hit_rate: Proportion of cache hits for this key
+        total_predictions: Total number of predictions for this key
+        error_count: Number of incorrect predictions for this key
+        hit_rate: Cache hit rate for this key
+        avg_confidence: Average confidence for predictions of this key
+        timestamp: When the metrics were recorded (indexed for time-based queries)
+    """
+    __tablename__ = "per_key_metrics"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    version_id = Column(Integer, ForeignKey('model_versions.version_id', ondelete='CASCADE'), nullable=False, index=True)
+    key = Column(String(255), nullable=False, index=True)
+    accuracy = Column(Float, nullable=True, default=0.0)
+    drift_score = Column(Float, nullable=True, default=0.0)
+    cache_hit_rate = Column(Float, nullable=True, default=0.0)
+    hit_rate = Column(Float, nullable=True, default=0.0)
+    total_predictions = Column(Integer, nullable=True, default=0)
+    error_count = Column(Integer, nullable=True, default=0)
+    avg_confidence = Column(Float, nullable=True, default=0.0)
+    timestamp = Column(DateTime, nullable=False, default=datetime.utcnow, index=True)
+    
+    # Relationships
+    version = relationship('ModelVersion', back_populates='per_key_metrics')
+    
+    __table_args__ = (
+        Index('idx_per_key_metrics_version_id_key', 'version_id', 'key'),
+        Index('idx_per_key_metrics_timestamp', 'timestamp'),
+    )
+    
+    def __repr__(self) -> str:
+        return f"<PerKeyMetric(id={self.id}, version_id={self.version_id}, key='{self.key}', accuracy={self.accuracy})>"
+
+
+class PredictionLog(Base):
+    """
+    Stores detailed logs of all predictions made by model versions.
+    
+    Records every prediction for auditing, analysis, and model evaluation purposes.
+    Enables calculation of per-key metrics and drift detection.
+    
+    Attributes:
+        id: Primary key
+        version_id: Foreign key to ModelVersion
+        key: Cache key being predicted
+        predicted_value: The value predicted by the model
+        actual_value: The actual value (for comparing accuracy)
+        confidence: Model confidence score (0-1)
+        is_correct: Whether the prediction matched actual value
+        latency_ms: Latency in milliseconds for this prediction
+        timestamp: When the prediction was made (indexed for time-based queries)
+    """
+    __tablename__ = "prediction_logs"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    version_id = Column(Integer, ForeignKey('model_versions.version_id', ondelete='CASCADE'), nullable=False, index=True)
+    key = Column(String(255), nullable=False, index=True)
+    predicted_value = Column(String(500), nullable=False)
+    actual_value = Column(String(500), nullable=True)
+    confidence = Column(Float, nullable=True, default=0.0)
+    is_correct = Column(Boolean, nullable=True)
+    latency_ms = Column(Float, nullable=True, default=0.0)
+    timestamp = Column(DateTime, nullable=False, default=datetime.utcnow, index=True)
+    
+    # Relationships
+    version = relationship('ModelVersion', foreign_keys=[version_id])
+    
+    __table_args__ = (
+        Index('idx_prediction_logs_version_id', 'version_id'),
+        Index('idx_prediction_logs_key', 'key'),
+        Index('idx_prediction_logs_timestamp', 'timestamp'),
+        Index('idx_prediction_logs_version_key_timestamp', 'version_id', 'key', 'timestamp'),
+    )
+    
+    def __repr__(self) -> str:
+        return f"<PredictionLog(id={self.id}, version_id={self.version_id}, key='{self.key}', confidence={self.confidence})>"
+
+
+# ============================================================
+# Database Session Management
+# ============================================================
+
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+
+def get_database_session():
+    """
+    Create database engine and session factory.
+    
+    This function is called once on application startup to initialize
+    the database connection pool and session factory.
+    """
+    # Import settings here to avoid circular imports
+    from config.settings import settings
+    
+    # Create engine with connection pooling
+    engine = create_engine(
+        settings.database_url,
+        poolclass=NullPool,  # Use NullPool for SQLite (no connection pooling)
+        echo=False,
+        future=True
+    )
+    
+    # Create all tables
+    Base.metadata.create_all(bind=engine)
+    
+    return engine, sessionmaker(bind=engine, expire_on_commit=False)
+
+
+def get_session() -> Session:
+    """
+    Dependency injection function for FastAPI.
+    
+    Provides a database session for each request. Used as a dependency
+    in FastAPI route handlers.
+    
+    Usage in routes:
+        @router.get("/example")
+        def example_route(db: Session = Depends(get_session)):
+            ...
+    """
+    # Import here to avoid circular imports and ensure settings are loaded
+    from config.settings import settings
+    from sqlalchemy.orm import sessionmaker
+    
+    engine = create_engine(
+        settings.database_url,
+        poolclass=NullPool,
+        echo=False,
+        future=True
+    )
+    
+    SessionLocal = sessionmaker(bind=engine, expire_on_commit=False)
+    db = SessionLocal()
+    
+    try:
+        yield db
+    finally:
+        db.close()
+

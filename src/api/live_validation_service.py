@@ -310,6 +310,17 @@ async def run_live_validation(
             if predicted_on_previous:
                 prefetch_opportunities += 1
 
+            # Feed outcome to predictor's EWMA/Markov/Drift ensemble
+            try:
+                predictor.record_outcome(
+                    service_id=service_id,
+                    actual_key=key_id,
+                    predicted_keys=predicted_keys,
+                    cache_hit=False,
+                )
+            except Exception:
+                pass
+
         prefetched_before_request = secure_manager.secure_exists(key_id, service_id)
         if predicted_on_previous and prefetched_before_request:
             prefetched_by_worker = _find_worker_prefetch_hit(

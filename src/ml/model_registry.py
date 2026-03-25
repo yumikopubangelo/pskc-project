@@ -15,6 +15,7 @@ import numpy as np
 
 from config.settings import settings
 from src.ml.model import EnsembleModel, MarkovChainPredictor
+from src.ml.model_improvements import RFPreprocessor
 from src.security.fips_module import FipsCryptographicModule
 
 logger = logging.getLogger(__name__)
@@ -737,6 +738,10 @@ class ModelRegistry:
             if getattr(model, "rf", None) is not None and getattr(model.rf, "is_trained", False):
                 portable_rf = PortableRandomForestModel.from_sklearn_wrapper(model.rf).to_checkpoint()
 
+            rf_preproc = None
+            if getattr(model, "rf_preprocessor", None) is not None:
+                rf_preproc = model.rf_preprocessor.to_dict()
+
             return {
                 "artifact_type": "pskc_ensemble_v1",
                 "num_classes": int(model.num_classes),
@@ -744,6 +749,7 @@ class ModelRegistry:
                 "static_weights": dict(getattr(model, "_static_weights", {})),
                 "is_trained": bool(getattr(model, "is_trained", False)),
                 "rf": portable_rf,
+                "rf_preprocessor": rf_preproc,
                 "markov": _serialize_markov(model.markov),
             }
 
@@ -767,6 +773,10 @@ class ModelRegistry:
         rf_payload = payload.get("rf")
         model.rf = PortableRandomForestModel.from_checkpoint(rf_payload) if rf_payload else None
         model.markov = _restore_markov(payload.get("markov", {}))
+
+        rf_preproc_payload = payload.get("rf_preprocessor")
+        model.rf_preprocessor = RFPreprocessor.from_dict(rf_preproc_payload) if rf_preproc_payload else None
+
         model.is_trained = bool(payload.get("is_trained", False))
         return model
 

@@ -58,11 +58,14 @@ class FeatureEngineer:
         
         # 5. Frequency features (6 features)
         features.extend(self._extract_frequency_features(access_data))
-        
+
+        # 6. N-gram features (6 features)
+        features.extend(self._extract_ngram_features(access_data))
+
         result = np.array(features, dtype=np.float32)
-        
-        # Validate feature shape consistency (Issue #13)
-        expected_size = 30  # 8+6+4+6+6 = 30
+
+        # Validate feature shape consistency
+        expected_size = 36  # 8+6+4+6+6+6 = 36
         assert result.shape[0] == expected_size, (
             f"Feature vector shape mismatch: expected {expected_size}, "
             f"got {result.shape[0]}"
@@ -139,7 +142,7 @@ class FeatureEngineer:
     
     def _get_default_features(self) -> np.ndarray:
         """Return default features when no data available"""
-        return np.zeros(30, dtype=np.float32)
+        return np.zeros(36, dtype=np.float32)
     
     def _extract_temporal_features(self, data: List[Dict]) -> List[float]:
         """Extract temporal patterns"""
@@ -287,6 +290,55 @@ class FeatureEngineer:
             np.percentile(latencies, 99)
         ]
     
+    def _extract_ngram_features(self, data: List[Dict]) -> List[float]:
+        """Extract N-gram (bigram/trigram) transition features from key sequences."""
+        if len(data) < 2:
+            return [0.0] * 6
+
+        keys = [d.get('key_id', '') for d in data]
+        n = len(keys)
+
+        # Bigrams
+        bigrams = [(keys[i], keys[i + 1]) for i in range(n - 1)]
+        unique_bigrams = len(set(bigrams))
+        bigram_diversity = unique_bigrams / max(len(bigrams), 1)
+
+        # Most common bigram frequency
+        bigram_counts = defaultdict(int)
+        for bg in bigrams:
+            bigram_counts[bg] += 1
+        top_bigram_freq = max(bigram_counts.values()) / max(len(bigrams), 1)
+
+        # Trigrams
+        if n >= 3:
+            trigrams = [(keys[i], keys[i + 1], keys[i + 2]) for i in range(n - 2)]
+            unique_trigrams = len(set(trigrams))
+            trigram_diversity = unique_trigrams / max(len(trigrams), 1)
+            trigram_counts = defaultdict(int)
+            for tg in trigrams:
+                trigram_counts[tg] += 1
+            top_trigram_freq = max(trigram_counts.values()) / max(len(trigrams), 1)
+        else:
+            trigram_diversity = 0.0
+            top_trigram_freq = 0.0
+
+        # Repetition score: consecutive same-key accesses
+        repetitions = sum(1 for i in range(1, n) if keys[i] == keys[i - 1])
+        repetition_score = repetitions / max(n - 1, 1)
+
+        # Transition entropy: entropy of bigram distribution
+        probs = [c / len(bigrams) for c in bigram_counts.values()]
+        transition_entropy = -sum(p * np.log(p + 1e-10) for p in probs)
+
+        return [
+            bigram_diversity,
+            top_bigram_freq,
+            trigram_diversity,
+            top_trigram_freq,
+            repetition_score,
+            transition_entropy,
+        ]
+
     def _extract_frequency_features(self, data: List[Dict]) -> List[float]:
         """Extract frequency-based features"""
         if not data:
@@ -395,7 +447,10 @@ class FeatureEngineer:
             "latency_mean", "latency_std", "latency_min", "latency_max",
             "latency_p95", "latency_p99",
             # Frequency (6)
-            "rpm", "rph", "cv", "recent_count", "short_term_ratio", "total_events"
+            "rpm", "rph", "cv", "recent_count", "short_term_ratio", "total_events",
+            # N-gram (6)
+            "bigram_diversity", "top_bigram_freq", "trigram_diversity",
+            "top_trigram_freq", "repetition_score", "transition_entropy",
         ]
 
 

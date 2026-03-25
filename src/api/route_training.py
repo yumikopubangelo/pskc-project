@@ -31,7 +31,14 @@ def create_training_router() -> APIRouter:
         traffic_profile: str = Query(default="normal", description="Traffic profile: normal, heavy, prime_time, overload"),
         duration_hours: Optional[int] = Query(default=None, ge=1),
     ):
-        """Generate synthetic training data based on scenario and traffic profile."""
+        """
+        Generate synthetic training data based on scenario and traffic profile.
+        
+        Returns immediately with HTTP 202 (Accepted) and starts generation in background.
+        Poll /ml/training/generate/progress endpoint to check status.
+        """
+        from fastapi.responses import JSONResponse
+        
         if num_events is None or num_keys is None or num_services is None or duration_hours is None:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -41,23 +48,44 @@ def create_training_router() -> APIRouter:
         try:
             reset_data_generation_progress()
             get_data_generation_tracker().start_generation(num_events)
-
-            loop = asyncio.get_event_loop()
-            result = await loop.run_in_executor(
-                None,
-                functools.partial(
-                    generate_training_data,
-                    num_events=num_events,
-                    num_keys=num_keys,
-                    num_services=num_services,
-                    scenario=scenario,
-                    traffic_profile=traffic_profile,
-                    duration_hours=duration_hours,
-                ),
+            
+            # ✅ FIX: Start in background task instead of waiting for it
+            # This returns immediately with HTTP 202, letting client poll for progress
+            async def run_generation_in_background():
+                loop = asyncio.get_event_loop()
+                await loop.run_in_executor(
+                    None,
+                    functools.partial(
+                        generate_training_data,
+                        num_events=num_events,
+                        num_keys=num_keys,
+                        num_services=num_services,
+                        scenario=scenario,
+                        traffic_profile=traffic_profile,
+                        duration_hours=duration_hours,
+                    ),
+                )
+            
+            # Create and schedule background task (don't wait for it)
+            asyncio.create_task(run_generation_in_background())
+            
+            # Return immediately with 202 Accepted
+            return JSONResponse(
+                status_code=202,
+                content={
+                    "status": "generating",
+                    "message": "Data generation started in background",
+                    "num_events": num_events,
+                    "num_keys": num_keys,
+                    "num_services": num_services,
+                    "scenario": scenario,
+                    "traffic_profile": traffic_profile,
+                    "poll_endpoint": "/ml/training/generate-progress",
+                    "instructions": "Poll the progress endpoint to check completion status"
+                }
             )
-            return result
         except Exception as e:
-            logger.exception("Error generating training data: %s", e)
+            logger.exception("Error starting data generation: %s", e)
             raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
 
     @router.get("/generate/estimate")
@@ -141,28 +169,57 @@ def create_training_router() -> APIRouter:
         force: bool = Query(default=True),
         reason: str = Query(default="manual", description="Reason for training: manual, drift_detected, scheduled"),
     ):
-        """Train the ML model using collected data."""
-        import asyncio
-        import functools
-        loop = asyncio.get_event_loop()
-        result = await loop.run_in_executor(
-            None,
-            functools.partial(train_model, force=force, reason=reason),
-        )
-
-        if result.get("reason") == "already_training":
-            from fastapi.responses import JSONResponse
+        """
+        Train the ML model using collected data.
+        
+        Returns immediately with status. Use WebSocket at /ml/training/ws for real-time updates
+        or poll /ml/training/progress for status updates.
+        """
+        from src.api.ml_service import get_model_trainer
+        from fastapi.responses import JSONResponse
+        
+        trainer = get_model_trainer()
+        
+        # Check if training already in progress
+        if trainer._is_training:
             return JSONResponse(
                 status_code=202,
-                content={"status": "already_training", "message": "Training is already in progress. Watch the WebSocket stream for updates."},
+                content={
+                    "status": "already_training",
+                    "message": "Training is already in progress. Watch the WebSocket stream for updates.",
+                    "websocket_url": "/ml/training/ws",
+                    "progress_endpoint": "/ml/training/progress"
+                }
             )
-
-        if not result.get("success"):
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=result.get("message") or result.get("reason")
+        
+        try:
+            # ✅ FIX: Start training in background task instead of waiting
+            async def run_training_in_background():
+                loop = asyncio.get_event_loop()
+                await loop.run_in_executor(
+                    None,
+                    functools.partial(train_model, force=force, reason=reason),
+                )
+            
+            # Create and schedule background task (don't wait for it)
+            asyncio.create_task(run_training_in_background())
+            
+            # Return immediately with 202 Accepted
+            return JSONResponse(
+                status_code=202,
+                content={
+                    "status": "training_started",
+                    "message": "Model training started in background",
+                    "reason": reason,
+                    "force": force,
+                    "websocket_url": "/ml/training/ws",
+                    "progress_endpoint": "/ml/training/progress",
+                    "instructions": "Connect to WebSocket or poll progress endpoint for real-time updates"
+                }
             )
-        return result
+        except Exception as e:
+            logger.exception("Error starting training: %s", e)
+            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
 
     @router.post("/reset-lock")
     async def reset_training_lock():

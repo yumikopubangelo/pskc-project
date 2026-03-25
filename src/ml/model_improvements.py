@@ -217,10 +217,13 @@ class DataAugmenter:
             Augmented (X, y)
         """
         n_augment = int(len(X) * self.augmentation_factor)
-        
+
+        if n_augment == 0:
+            return X, y
+
         augmented_X = []
         augmented_y = []
-        
+
         # Randomly select samples to augment
         indices = np.random.choice(len(X), size=n_augment, replace=True)
         
@@ -483,7 +486,110 @@ class FeatureNormalizer:
 
 
 # ============================================================
-# 7. MODEL PERFORMANCE TRACKER
+# 7. RF PREPROCESSING PIPELINE
+# ============================================================
+
+class RFPreprocessor:
+    """
+    Encapsulates the full RF feature preprocessing pipeline:
+      1. Normalize (StandardScaler)
+      2. Drop constant-variance columns
+      3. Select top-K features (SelectKBest)
+
+    Fitted during training, then stored with the model so the same
+    transformations are applied at prediction time.
+    """
+
+    def __init__(self, n_select: int = 25):
+        self._n_select = n_select
+        # Fitted state
+        self._mean: Optional[np.ndarray] = None
+        self._scale: Optional[np.ndarray] = None
+        self._non_constant_mask: Optional[np.ndarray] = None
+        self._selected_indices: Optional[np.ndarray] = None
+        self._is_fitted = False
+
+    @property
+    def is_fitted(self) -> bool:
+        return self._is_fitted
+
+    # ---- fit / transform ----
+
+    def fit(self, X: np.ndarray, y: np.ndarray) -> None:
+        """Fit the full pipeline on training data."""
+        # 1. Normalize
+        self._mean = np.mean(X, axis=0)
+        self._scale = np.std(X, axis=0)
+        self._scale[self._scale == 0] = 1.0  # avoid division by zero
+        X_norm = (X - self._mean) / self._scale
+
+        # 2. Drop constant columns (post-normalization variance == 0)
+        col_var = np.var(X_norm, axis=0)
+        self._non_constant_mask = col_var > 0
+        if not np.all(self._non_constant_mask):
+            logger.warning(
+                "RFPreprocessor: dropping %d constant feature(s).",
+                int((~self._non_constant_mask).sum()),
+            )
+        X_reduced = X_norm[:, self._non_constant_mask]
+
+        # 3. Feature selection (SelectKBest)
+        k = min(self._n_select, X_reduced.shape[1])
+        if SKLEARN_AVAILABLE and k < X_reduced.shape[1]:
+            selector = SelectKBest(f_classif, k=k)
+            import warnings as _w
+            with _w.catch_warnings():
+                _w.simplefilter("ignore")
+                selector.fit(X_reduced, y)
+            self._selected_indices = selector.get_support(indices=True)
+        else:
+            self._selected_indices = np.arange(X_reduced.shape[1])
+
+        self._is_fitted = True
+        logger.info(
+            "RFPreprocessor fitted: %d → %d features",
+            X.shape[1],
+            len(self._selected_indices),
+        )
+
+    def transform(self, X: np.ndarray) -> np.ndarray:
+        """Apply the fitted pipeline to new data."""
+        if not self._is_fitted:
+            return X
+        X_norm = (X - self._mean) / self._scale
+        X_reduced = X_norm[:, self._non_constant_mask]
+        return X_reduced[:, self._selected_indices]
+
+    def fit_transform(self, X: np.ndarray, y: np.ndarray) -> np.ndarray:
+        self.fit(X, y)
+        return self.transform(X)
+
+    # ---- serialization (JSON-safe) ----
+
+    def to_dict(self) -> Optional[Dict[str, Any]]:
+        if not self._is_fitted:
+            return None
+        return {
+            "n_select": self._n_select,
+            "mean": self._mean.tolist(),
+            "scale": self._scale.tolist(),
+            "non_constant_mask": self._non_constant_mask.tolist(),
+            "selected_indices": self._selected_indices.tolist(),
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "RFPreprocessor":
+        obj = cls(n_select=data.get("n_select", 25))
+        obj._mean = np.array(data["mean"])
+        obj._scale = np.array(data["scale"])
+        obj._non_constant_mask = np.array(data["non_constant_mask"], dtype=bool)
+        obj._selected_indices = np.array(data["selected_indices"], dtype=int)
+        obj._is_fitted = True
+        return obj
+
+
+# ============================================================
+# 8. MODEL PERFORMANCE TRACKER
 # ============================================================
 
 class PerModelPerformanceTracker:
