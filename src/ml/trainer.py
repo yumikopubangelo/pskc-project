@@ -38,10 +38,51 @@ from src.api.training_progress import get_training_progress_tracker, TrainingPha
 from src.ml.model_improvements import (
     DataBalancer,
     DataAugmenter,
+    HyperparameterTuner,
     RFPreprocessor,
 )
 
 logger = logging.getLogger(__name__)
+
+
+TRAINING_PROFILE_DEFAULTS: Dict[str, Dict[str, Any]] = {
+    "fast": {
+        "window_seconds": 86400,
+        "max_events": 40000,
+        "rf_tree_cap": 48,
+        "rf_depth_cap": 10,
+        "lstm_hidden_cap": 64,
+        "epochs_cap": 12,
+        "batch_size_floor": 32,
+        "augmentation_factor": 0.10,
+        "feature_cap": 18,
+        "notes": "Shortest runtime, good for quick iteration and sanity-check retrains.",
+    },
+    "balanced": {
+        "window_seconds": 604800,
+        "max_events": 90000,
+        "rf_tree_cap": 80,
+        "rf_depth_cap": 12,
+        "lstm_hidden_cap": 96,
+        "epochs_cap": 18,
+        "batch_size_floor": 48,
+        "augmentation_factor": 0.18,
+        "feature_cap": 22,
+        "notes": "Default profile for stronger validation without letting training sprawl.",
+    },
+    "thorough": {
+        "window_seconds": 1209600,
+        "max_events": 150000,
+        "rf_tree_cap": 128,
+        "rf_depth_cap": 14,
+        "lstm_hidden_cap": 128,
+        "epochs_cap": 24,
+        "batch_size_floor": 64,
+        "augmentation_factor": 0.22,
+        "feature_cap": 28,
+        "notes": "Highest quality profile. Intended to stay within a 30-60 minute budget on CPU-class deployments.",
+    },
+}
 
 
 # ============================================================
@@ -635,10 +676,153 @@ class ModelTrainer:
             self._load_failed = True
         return result
 
-    def _build_trainable_model(self, y_labels: Union[List, np.ndarray]) -> EnsembleModel:
+    def _normalize_quality_profile(self, quality_profile: Optional[str]) -> str:
+        candidate = str(
+            quality_profile
+            or getattr(settings, "ml_training_quality_profile", "balanced")
+            or "balanced"
+        ).strip().lower()
+        return candidate if candidate in TRAINING_PROFILE_DEFAULTS else "balanced"
+
+    def _clamp_time_budget_minutes(self, value: Optional[int]) -> int:
+        configured_default = int(getattr(settings, "ml_training_time_budget_minutes", 30) or 30)
+        configured_max = int(getattr(settings, "ml_training_time_budget_max_minutes", 60) or 60)
+        budget = int(value or configured_default)
+        return max(5, min(configured_max, budget))
+
+    def _estimate_training_minutes(
+        self,
+        *,
+        sample_count: int,
+        unique_keys: int,
+        profile_name: str,
+        rf_trees: int,
+        lstm_epochs: int,
+        lstm_hidden: int,
+    ) -> int:
+        profile_factor = {"fast": 0.75, "balanced": 1.0, "thorough": 1.3}.get(profile_name, 1.0)
+        score = (
+            (sample_count / 12000.0)
+            + (unique_keys / 180.0)
+            + (rf_trees / 55.0)
+            + (lstm_epochs * max(lstm_hidden, 32) / 420.0)
+        ) * profile_factor
+        return max(2, int(round(score)))
+
+    def _build_training_plan(
+        self,
+        *,
+        sample_count: int,
+        unique_keys: int,
+        quality_profile: Optional[str] = None,
+        time_budget_minutes: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        profile_name = self._normalize_quality_profile(quality_profile)
+        profile = TRAINING_PROFILE_DEFAULTS[profile_name]
+        budget_minutes = self._clamp_time_budget_minutes(time_budget_minutes)
+        tuner = HyperparameterTuner()
+        hparams = tuner.suggest_hyperparameters(
+            data_size=max(int(sample_count or 0), 1),
+            num_keys=max(int(unique_keys or 0), 1),
+            training_time_budget=float(budget_minutes) * 60.0,
+        )
+
+        lstm_cfg = dict(hparams.get("lstm", {}))
+        rf_cfg = dict(hparams.get("random_forest", {}))
+        markov_cfg = dict(hparams.get("markov", {}))
+        training_cfg = dict(hparams.get("training", {}))
+
+        lstm_cfg["hidden_size"] = min(int(lstm_cfg.get("hidden_size", 64)), int(profile["lstm_hidden_cap"]))
+        lstm_cfg["epochs"] = min(int(lstm_cfg.get("epochs", 12)), int(profile["epochs_cap"]))
+        lstm_cfg["batch_size"] = max(int(lstm_cfg.get("batch_size", 32)), int(profile["batch_size_floor"]))
+
+        rf_cfg["n_estimators"] = min(int(rf_cfg.get("n_estimators", 50)), int(profile["rf_tree_cap"]))
+        rf_cfg["max_depth"] = min(int(rf_cfg.get("max_depth", 8)), int(profile["rf_depth_cap"]))
+        rf_cfg["use_class_weight"] = True
+
+        training_cfg["augmentation_factor"] = min(
+            float(training_cfg.get("augmentation_factor", 0.15)),
+            float(profile["augmentation_factor"]),
+        )
+        training_cfg["n_selected_features"] = min(
+            int(training_cfg.get("n_selected_features", 20)),
+            int(profile["feature_cap"]),
+        )
+        training_cfg["data_balancing"] = str(training_cfg.get("data_balancing", "auto") or "auto")
+
+        if sample_count < 2000:
+            small_sample_caps = {
+                "fast": {"trees": 32, "epochs": 8, "hidden": 48},
+                "balanced": {"trees": 48, "epochs": 10, "hidden": 64},
+                "thorough": {"trees": 72, "epochs": 12, "hidden": 80},
+            }[profile_name]
+            rf_cfg["n_estimators"] = min(int(rf_cfg["n_estimators"]), small_sample_caps["trees"])
+            lstm_cfg["epochs"] = min(int(lstm_cfg["epochs"]), small_sample_caps["epochs"])
+            lstm_cfg["hidden_size"] = min(int(lstm_cfg["hidden_size"]), small_sample_caps["hidden"])
+            training_cfg["augmentation_factor"] = min(
+                float(training_cfg.get("augmentation_factor", 0.12)),
+                0.12,
+            )
+
+        estimated_minutes = self._estimate_training_minutes(
+            sample_count=sample_count,
+            unique_keys=unique_keys,
+            profile_name=profile_name,
+            rf_trees=int(rf_cfg["n_estimators"]),
+            lstm_epochs=int(lstm_cfg["epochs"]),
+            lstm_hidden=int(lstm_cfg["hidden_size"]),
+        )
+        estimated_minutes = min(estimated_minutes, budget_minutes)
+
+        return {
+            "quality_profile": profile_name,
+            "time_budget_minutes": budget_minutes,
+            "window_seconds": int(profile["window_seconds"]),
+            "max_events": int(profile["max_events"]),
+            "estimated_training_minutes": estimated_minutes,
+            "notes": profile["notes"],
+            "hyperparameters": {
+                "lstm": lstm_cfg,
+                "random_forest": rf_cfg,
+                "markov": markov_cfg,
+                "training": training_cfg,
+            },
+        }
+
+    def get_training_plan(
+        self,
+        *,
+        quality_profile: Optional[str] = None,
+        time_budget_minutes: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        collector_stats = self._collector.get_stats()
+        return {
+            "collector": collector_stats,
+            **self._build_training_plan(
+                sample_count=int(collector_stats.get("total_events", 0) or 0),
+                unique_keys=int(collector_stats.get("unique_keys", 0) or 0),
+                quality_profile=quality_profile,
+                time_budget_minutes=time_budget_minutes,
+            ),
+        }
+
+    def _build_trainable_model(
+        self,
+        y_labels: Union[List, np.ndarray],
+        *,
+        training_plan: Optional[Dict[str, Any]] = None,
+    ) -> EnsembleModel:
         unique_labels = len(set(y_labels)) if y_labels is not None and len(y_labels) > 0 else 0
         num_classes = max(unique_labels, 1)
-        return ModelFactory.create_model("ensemble", num_classes=num_classes)
+        hyperparameters = (training_plan or {}).get("hyperparameters", {})
+        return ModelFactory.create_model(
+            "ensemble",
+            num_classes=num_classes,
+            lstm_config=hyperparameters.get("lstm"),
+            rf_config=hyperparameters.get("random_forest"),
+            markov_config=hyperparameters.get("markov"),
+            training_config=hyperparameters.get("lstm"),
+        )
 
     def _persist_model(
         self,
@@ -862,7 +1046,13 @@ class ModelTrainer:
     # Training
     # ----------------------------------------------------------
 
-    def train(self, force: bool = False, reason: str = "scheduled") -> Dict[str, Any]:
+    def train(
+        self,
+        force: bool = False,
+        reason: str = "scheduled",
+        quality_profile: Optional[str] = None,
+        time_budget_minutes: Optional[int] = None,
+    ) -> Dict[str, Any]:
         """
         Train the model on collected data.
         
@@ -874,6 +1064,8 @@ class ModelTrainer:
         Args:
             force: Bypass sample count check
             reason: Why training was triggered ("scheduled" | "drift_detected" | "automatic" | "manual")
+            quality_profile: "fast" | "balanced" | "thorough" for full retraining
+            time_budget_minutes: Requested upper bound for the full retrain budget
 
         Returns:
             Training results dict
@@ -940,13 +1132,25 @@ class ModelTrainer:
 
                 # Different data window sizes based on training type
                 if is_automatic:
-                    # Automatic: recent data for quick adaptation
-                    window_seconds = 21600     # Last 6 hours
-                    max_events = 50_000        # More data for better patterns
+                    training_plan = {
+                        "quality_profile": "online",
+                        "time_budget_minutes": 5,
+                        "window_seconds": 21600,
+                        "max_events": 50000,
+                        "estimated_training_minutes": 5,
+                        "notes": "Drift-triggered online adaptation path",
+                        "hyperparameters": {},
+                    }
                 else:
-                    # Scheduled: comprehensive data (best generalization)
-                    window_seconds = 604800    # Last 7 days
-                    max_events = 170_000       # Use all available data
+                    training_plan = self._build_training_plan(
+                        sample_count=int(sample_count or 0),
+                        unique_keys=int(stats.get("unique_keys", 0) or 0),
+                        quality_profile=quality_profile,
+                        time_budget_minutes=time_budget_minutes,
+                    )
+
+                window_seconds = int(training_plan.get("window_seconds", 604800))
+                max_events = int(training_plan.get("max_events", 90000))
 
                 access_data = self._collector.get_access_sequence(
                     window_seconds=window_seconds,
@@ -963,7 +1167,12 @@ class ModelTrainer:
                     current_step=2,
                     total_steps=10,
                     message=f"Loaded {len(access_data)} events, preprocessing...",
-                    details={"total_samples": len(access_data)},
+                    details={
+                        "total_samples": len(access_data),
+                        "quality_profile": training_plan.get("quality_profile"),
+                        "time_budget_minutes": training_plan.get("time_budget_minutes"),
+                        "estimated_training_minutes": training_plan.get("estimated_training_minutes"),
+                    },
                 )
             except Exception:
                 raise
@@ -1007,7 +1216,10 @@ class ModelTrainer:
                 details={"train_samples": len(X_rf_train_raw), "val_samples": len(X_rf_val_raw)},
             )
 
-            n_select = min(25, max(10, int(np.sqrt(len(X_rf_train_raw))), X_rf_train_raw.shape[1]))
+            plan_hparams = training_plan.get("hyperparameters", {})
+            training_hparams = plan_hparams.get("training", {})
+            requested_feature_count = int(training_hparams.get("n_selected_features", 25) or 25)
+            n_select = min(requested_feature_count, max(10, X_rf_train_raw.shape[1]))
             rf_preprocessor = RFPreprocessor(n_select=n_select)
             X_rf_train = rf_preprocessor.fit_transform(X_rf_train_raw, y_train_lstm)
             X_rf_val = rf_preprocessor.transform(X_rf_val_raw)
@@ -1021,20 +1233,22 @@ class ModelTrainer:
                 details={"train_samples": len(X_rf_train), "val_samples": len(X_rf_val)},
             )
 
-            augmenter = DataAugmenter(augmentation_factor=0.3)
+            augmenter = DataAugmenter(
+                augmentation_factor=float(training_hparams.get("augmentation_factor", 0.18) or 0.18)
+            )
             X_rf_train, y_train_rf = augmenter.augment_dataset(X_rf_train, y_train_lstm)
 
             balancer = DataBalancer()
             X_rf_train, y_train_rf = balancer.balance_dataset(
                 X_rf_train,
                 np.array(y_train_rf, dtype=object),
-                strategy="auto",
+                strategy=str(training_hparams.get("data_balancing", "auto") or "auto"),
             )
 
             # Build access sequence for Markov Chain
             key_sequence = [d["key_id"] for d in access_data]
 
-            trainable_model = self._build_trainable_model(y_train_rf)
+            trainable_model = self._build_trainable_model(y_train_rf, training_plan=training_plan)
             trainable_model.rf_preprocessor = rf_preprocessor
 
             tracker.update_progress(
@@ -1049,6 +1263,9 @@ class ModelTrainer:
                     "features_count": X_rf_train.shape[1] if len(X_rf_train) > 0 else 0,
                     "train_samples": len(X_rf_train),
                     "val_samples": len(X_rf_val),
+                    "quality_profile": training_plan.get("quality_profile"),
+                    "time_budget_minutes": training_plan.get("time_budget_minutes"),
+                    "estimated_training_minutes": training_plan.get("estimated_training_minutes"),
                 },
             )
 
@@ -1116,6 +1333,10 @@ class ModelTrainer:
                 "sample_count": len(access_data),
                 "train_samples": len(X_rf_train),
                 "val_samples": len(X_rf_val),
+                "quality_profile": training_plan.get("quality_profile"),
+                "time_budget_minutes": training_plan.get("time_budget_minutes"),
+                "estimated_training_minutes": training_plan.get("estimated_training_minutes"),
+                "hyperparameters": training_plan.get("hyperparameters"),
             }
 
             # Check if model accuracy meets minimum threshold for active model
@@ -1159,6 +1380,10 @@ class ModelTrainer:
                     "attempt_count": attempt_result.get("attempt_count"),
                     "db_version_id": db_training_record.get("version_id"),
                     "db_version_number": db_training_record.get("version_number"),
+                    "quality_profile": training_plan.get("quality_profile"),
+                    "time_budget_minutes": training_plan.get("time_budget_minutes"),
+                    "estimated_training_minutes": training_plan.get("estimated_training_minutes"),
+                    "hyperparameters": training_plan.get("hyperparameters"),
                 }
                 self._training_history.append(result)
                 self._record_training_metrics(
@@ -1182,6 +1407,9 @@ class ModelTrainer:
                         "model_accepted": False,
                         "training_time_s": round(training_time, 2),
                         "sample_count": len(access_data),
+                        "quality_profile": training_plan.get("quality_profile"),
+                        "time_budget_minutes": training_plan.get("time_budget_minutes"),
+                        "estimated_training_minutes": training_plan.get("estimated_training_minutes"),
                     },
                 )
                 tracker.finish_training(success=True)
@@ -1251,6 +1479,10 @@ class ModelTrainer:
                 "decision_reason": persist_result.get("decision_reason"),
                 "db_version_id": db_training_record.get("version_id"),
                 "db_version_number": db_training_record.get("version_number"),
+                "quality_profile": training_plan.get("quality_profile"),
+                "time_budget_minutes": training_plan.get("time_budget_minutes"),
+                "estimated_training_minutes": training_plan.get("estimated_training_minutes"),
+                "hyperparameters": training_plan.get("hyperparameters"),
             }
 
             self._training_history.append(result)
@@ -1280,6 +1512,9 @@ class ModelTrainer:
                     "model_accepted": accepted,
                     "training_time_s": round(training_time, 2),
                     "sample_count": len(access_data),
+                    "quality_profile": training_plan.get("quality_profile"),
+                    "time_budget_minutes": training_plan.get("time_budget_minutes"),
+                    "estimated_training_minutes": training_plan.get("estimated_training_minutes"),
                 },
             )
             tracker.finish_training(success=True)
@@ -1498,6 +1733,7 @@ class ModelTrainer:
 
     def get_stats(self) -> Dict[str, Any]:
         incremental_info = self._incremental_persistence.get_info()
+        training_plan = self.get_training_plan()
         return {
             "training_count":  self._training_count,
             "last_train_time": self._last_train_time,
@@ -1518,6 +1754,7 @@ class ModelTrainer:
             "last_evaluation": self._last_evaluation,
             "online_learning_count": self._online_learning_count,
             "last_online_learning": self._last_online_learning_result,
+            "training_plan": training_plan,
         }
 
     def get_training_history(self) -> List[Dict]:

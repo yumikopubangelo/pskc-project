@@ -859,6 +859,8 @@ def generate_training_data(
 def train_model(
     force: bool = True,
     reason: str = "manual",
+    quality_profile: Optional[str] = None,
+    time_budget_minutes: Optional[int] = None,
 ) -> Dict[str, Any]:
     """
     Train the model using collected data.
@@ -881,7 +883,12 @@ def train_model(
         }
     
     # Run training
-    result = trainer.train(force=force, reason=reason)
+    result = trainer.train(
+        force=force,
+        reason=reason,
+        quality_profile=quality_profile,
+        time_budget_minutes=time_budget_minutes,
+    )
     
     if result.get("success"):
         # Update predictor with new model
@@ -911,6 +918,10 @@ def train_model(
             "model_accepted": model_accepted,
             "version_bumped": bool(result.get("version_bumped", model_accepted)),
             "decision_reason": result.get("decision_reason"),
+            "quality_profile": result.get("quality_profile"),
+            "time_budget_minutes": result.get("time_budget_minutes"),
+            "estimated_training_minutes": result.get("estimated_training_minutes"),
+            "hyperparameters": result.get("hyperparameters"),
         }
     else:
         return {
@@ -918,3 +929,16 @@ def train_model(
             "reason": result.get("reason", "unknown"),
             "message": f"Training failed: {result.get('reason', 'Unknown error')}",
         }
+
+
+def get_training_plan(
+    quality_profile: Optional[str] = None,
+    time_budget_minutes: Optional[int] = None,
+) -> Dict[str, Any]:
+    trainer = get_model_trainer()
+    plan = trainer.get_training_plan(
+        quality_profile=quality_profile,
+        time_budget_minutes=time_budget_minutes,
+    )
+    plan["model_name"] = trainer.model_name
+    return plan

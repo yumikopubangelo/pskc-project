@@ -1,34 +1,34 @@
-﻿# Dokumentasi PSKC
+# Dokumentasi PSKC
 
-Dokumen ini adalah pintu masuk untuk seluruh dokumentasi proyek.
+Halaman ini adalah pintu masuk dokumentasi yang sesuai dengan struktur repo saat ini.
 
 ## Mulai Dari Sini
 
-1. [README.md](../README.md) - ringkasan proyek dan status sistem saat ini
-2. [getting_started.md](getting_started.md) - setup lokal, Docker, dan smoke test
-3. [project_status.md](project_status.md) - backlog status: belum selesai, kurang, dan belum dikembangkan
-4. [feature_roadmap.md](feature_roadmap.md) - backlog fitur yang lebih detail, prioritas, dan definisi selesai
-5. [architecture.md](architecture.md) - arsitektur runtime dan data flow aktif
+1. [../README.md](../README.md) - orientasi cepat, quick start, endpoint penting, dan status saat ini
+2. [getting_started.md](getting_started.md) - langkah setup lokal dan Docker
+3. [comprehensive_features.md](comprehensive_features.md) - fitur yang sudah aktif
+4. [feature_roadmap.md](feature_roadmap.md) - backlog yang masih perlu dibangun
+5. [realtime_simulation.md](realtime_simulation.md) - cara membaca simulation realtime
 
-## Referensi Teknis
+## Arsitektur dan Referensi Teknis
 
-- [api_reference.md](api_reference.md) - endpoint FastAPI yang tersedia saat ini
-- [project_status.md](project_status.md) - daftar gap implementasi dan prioritas pengembangan
-- [feature_roadmap.md](feature_roadmap.md) - rincian backlog fitur per area, dependensi, dan validation plan
-- [security_model.md](security_model.md) - kontrol keamanan aktif, parsial, dan rekomendasi deployment
-- [simulation_and_ml.md](simulation_and_ml.md) - engine simulasi, training data, artefak model, dan gap integrasi
-- [realtime_simulation.md](realtime_simulation.md) - cara membaca live simulation, cache origin, verified prefetch, dan baseline KMS
-- [development.md](development.md) - panduan contributor, frontend, dan status test
-- [operations.md](operations.md) - konfigurasi `.env`, Docker Compose, log, dan catatan operasional
+- [architecture/architecture.md](architecture/architecture.md)
+- [architecture/api_reference.md](architecture/api_reference.md)
+- [architecture/security_model.md](architecture/security_model.md)
+- [architecture/simulation_and_ml.md](architecture/simulation_and_ml.md)
+- [development.md](development.md)
+- [operations.md](operations.md)
 
-## Ringkasan Non-Teknis dan Historis
+## Dokumen Tambahan
 
-- [gemini.md](gemini.md) - executive overview untuk stakeholder
-- [security_analysis_report.md](security_analysis_report.md) - status terkini dari temuan keamanan historis
+- [comprehensive_feature.md](comprehensive_feature.md) - alias lama ke `comprehensive_features.md`
+- [deployment_policies.md](deployment_policies.md)
+- [gemini.md](gemini.md)
+- [security_analysis_report.md](security_analysis_report.md)
 
-## Cara Membaca Dokumentasi Ini
+## Saran Jalur Baca
 
-- Jika Anda ingin menjalankan proyek: baca `README.md` lalu `getting_started.md`.
-- Jika Anda ingin mengubah backend: baca `architecture.md`, `api_reference.md`, dan `development.md`.
-- Jika Anda ingin fokus pada benchmark dan model: baca `simulation_and_ml.md` lalu `realtime_simulation.md`.
-- Jika Anda ingin menyiapkan deployment: baca `operations.md` dan `security_model.md`.
+- Jika Anda ingin menjalankan sistem: baca `README.md` lalu `getting_started.md`
+- Jika Anda ingin tahu apa yang sudah ada: baca `comprehensive_features.md`
+- Jika Anda ingin tahu next feature yang harus dibuat: baca `feature_roadmap.md`
+- Jika Anda ingin memahami simulation dan model: baca `realtime_simulation.md` lalu `architecture/simulation_and_ml.md`

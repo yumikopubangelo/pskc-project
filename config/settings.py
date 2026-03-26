@@ -94,6 +94,18 @@ class AppSettings(BaseSettings):
         default=250,
         alias="ML_MIN_SAMPLE_DELTA_FOR_VERSION_BUMP",
     )
+    ml_training_quality_profile: str = Field(
+        default="balanced",
+        alias="ML_TRAINING_QUALITY_PROFILE",
+    )
+    ml_training_time_budget_minutes: int = Field(
+        default=30,
+        alias="ML_TRAINING_TIME_BUDGET_MINUTES",
+    )
+    ml_training_time_budget_max_minutes: int = Field(
+        default=60,
+        alias="ML_TRAINING_TIME_BUDGET_MAX_MINUTES",
+    )
     
     # ============================================================
     # ML Hyperparameter Configuration (LSTM, RF, Markov, Ensemble)

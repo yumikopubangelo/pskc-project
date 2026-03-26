@@ -8,7 +8,13 @@ from typing import Optional
 from datetime import datetime, timezone
 from fastapi import APIRouter, Query, HTTPException, status, WebSocket, WebSocketDisconnect
 
-from src.api.ml_service import generate_training_data, train_model, initialize_ml_runtime, shutdown_ml_runtime
+from src.api.ml_service import (
+    generate_training_data,
+    train_model,
+    get_training_plan,
+    initialize_ml_runtime,
+    shutdown_ml_runtime,
+)
 from src.api.training_progress import (
     get_training_progress_tracker, reset_training_progress, TrainingPhase,
     reset_data_generation_progress, get_data_generation_tracker,
@@ -168,6 +174,8 @@ def create_training_router() -> APIRouter:
     async def train_model_endpoint(
         force: bool = Query(default=True),
         reason: str = Query(default="manual", description="Reason for training: manual, drift_detected, scheduled"),
+        quality_profile: str = Query(default="balanced", description="Training quality profile: fast, balanced, thorough"),
+        time_budget_minutes: int = Query(default=30, ge=5, le=60, description="Requested time budget in minutes"),
     ):
         """
         Train the ML model using collected data.
@@ -198,7 +206,13 @@ def create_training_router() -> APIRouter:
                 loop = asyncio.get_event_loop()
                 await loop.run_in_executor(
                     None,
-                    functools.partial(train_model, force=force, reason=reason),
+                    functools.partial(
+                        train_model,
+                        force=force,
+                        reason=reason,
+                        quality_profile=quality_profile,
+                        time_budget_minutes=time_budget_minutes,
+                    ),
                 )
             
             # Create and schedule background task (don't wait for it)
@@ -212,6 +226,8 @@ def create_training_router() -> APIRouter:
                     "message": "Model training started in background",
                     "reason": reason,
                     "force": force,
+                    "quality_profile": quality_profile,
+                    "time_budget_minutes": time_budget_minutes,
                     "websocket_url": "/ml/training/ws",
                     "progress_endpoint": "/ml/training/progress",
                     "instructions": "Connect to WebSocket or poll progress endpoint for real-time updates"
@@ -305,6 +321,17 @@ def create_training_router() -> APIRouter:
                 "message": "No prior training state found",
                 "timestamp": datetime.utcnow().isoformat() + "Z"
             }
+
+    @router.get("/plan")
+    async def get_training_plan_endpoint(
+        quality_profile: str = Query(default="balanced", description="Training quality profile: fast, balanced, thorough"),
+        time_budget_minutes: int = Query(default=30, ge=5, le=60, description="Requested time budget in minutes"),
+    ):
+        """Return a training recommendation and bounded runtime plan."""
+        return get_training_plan(
+            quality_profile=quality_profile,
+            time_budget_minutes=time_budget_minutes,
+        )
 
     @router.post("/train-improved")
     async def train_model_improved(

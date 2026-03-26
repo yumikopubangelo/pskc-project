@@ -11,7 +11,7 @@ Dokumen ini sengaja fokus ke kondisi implementasi saat ini. Untuk backlog pengem
 | Backend API | Aktif | FastAPI modular, health, keys, metrics, ML, security, simulation, dan model intelligence sudah tersedia. |
 | Cache | Aktif | L1 `LocalCache` + L2 Redis terenkripsi via `EncryptedCacheStore` dan `SecureCacheManager`. |
 | Prefetch | Aktif | Request path enqueue job ke Redis, worker terpisah memanaskan shared cache, retry dan DLQ dasar sudah ada. |
-| ML runtime | Aktif | Trainer, predictor, River online learning, model registry aman, promote/rollback, dan lifecycle metadata sudah tersambung. |
+| ML runtime | Aktif | Trainer, predictor, River online learning, model registry aman, promote/rollback, lifecycle metadata, dan planner full-training sudah tersambung. |
 | Simulation | Aktif | Halaman simulation sekarang fokus ke realtime session dengan bukti L1/L2/KMS, latency breakdown, drift, dan per-key accuracy. |
 | Model Intelligence | Aktif | Dashboard versi model, history training, metrics, drift, River stats, dan prediction logs sudah tersedia. |
 | Security | Aktif dengan caveat | HTTP security middleware, rate limiter, FIPS startup self-test, tamper-evident audit log, dan IDS sudah aktif. |
@@ -50,7 +50,7 @@ database
 | Overview | `/` | Ringkasan status backend dan entry point UI |
 | Dashboard | `/dashboard` | Ringkasan metrik runtime |
 | Simulation | `/simulation` | Realtime simulation dengan L1/L2/KMS trace, per-key accuracy, drift, dan proof komponen |
-| ML Training | `/ml-training` | Trigger training/evaluation dan lihat status model |
+| ML Training | `/ml-training` | Generate data, pilih quality profile + time budget, trigger full retrain/evaluation, dan lihat status model |
 | Model Intelligence | `/model-intelligence` | Version history, training history, per-version metrics, drift, River, prediction logs |
 | Security Testing | `/security-testing` | Tampilan fitur keamanan dan hasil uji |
 
@@ -108,6 +108,9 @@ Lihat [.env.example](.env.example) untuk daftar lengkap. Variabel yang paling pe
 | `ML_MODEL_REGISTRY_DIR` | direktori artefak model aman |
 | `ML_MODEL_STAGE` | stage default model baru |
 | `ML_MODEL_SIGNING_KEY` | signing key metadata model |
+| `ML_TRAINING_QUALITY_PROFILE` | profile default full retraining (`fast`, `balanced`, `thorough`) |
+| `ML_TRAINING_TIME_BUDGET_MINUTES` | budget default full retraining |
+| `ML_TRAINING_TIME_BUDGET_MAX_MINUTES` | batas atas budget full retraining |
 | `TRUSTED_PROXIES` | CIDR proxy yang dipercaya untuk forwarded headers |
 | `HTTP_SECURITY_*` | hardening middleware HTTP |
 | `AUDIT_LOG_DIRECTORY` | lokasi audit log |
@@ -126,6 +129,8 @@ Lihat [.env.example](.env.example) untuk daftar lengkap. Variabel yang paling pe
 | `GET` | `/ml/lifecycle` | history lifecycle model |
 | `GET` | `/ml/evaluate` | evaluasi model aktif |
 | `POST` | `/ml/retrain` | manual retrain |
+| `GET` | `/ml/training/plan` | rekomendasi full-training profile, budget, dan hyperparameter |
+| `POST` | `/ml/training/train` | start full retraining dengan profile + time budget |
 | `POST` | `/ml/promote` | promote version ke stage target |
 | `POST` | `/ml/rollback` | rollback ke version aman |
 | `GET` | `/api/models/intelligence/dashboard` | payload utama Model Intelligence |
@@ -140,7 +145,7 @@ Lihat [.env.example](.env.example) untuk daftar lengkap. Variabel yang paling pe
 Focused backend validation:
 
 ```powershell
-pytest tests/test_settings_database.py tests/test_live_simulation_service.py tests/test_model_intelligence_dashboard.py tests/test_predictor_record_predictions.py tests/test_trainer_version_creation.py -q
+pytest tests/test_settings_database.py tests/test_database_schema_compatibility.py tests/test_model_intelligence_dashboard.py -q
 ```
 
 Build frontend:
@@ -156,6 +161,12 @@ Smoke live via Docker:
 docker compose up -d --build api redis prefetch-worker
 python scripts/smoke_backend_runtime.py
 ```
+
+Catatan implementasi saat ini:
+
+- startup sekarang memperbaiki schema SQLite lama untuk kolom observability tambahan seperti `per_key_metrics.hit_rate`
+- halaman ML Training sudah memakai planner backend untuk quality profile dan time budget
+- drift-triggered online learning tetap terpisah dari full retraining, jadi simulation tidak memicu full retrain blocking
 
 ## Dokumentasi
 

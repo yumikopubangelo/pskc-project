@@ -134,6 +134,13 @@ class ApiClient {
     });
   }
 
+  async getTrainingPlan(params = {}) {
+    return this.request('/ml/training/plan', {
+      method: 'GET',
+      params,
+    });
+  }
+
   // ML Data Import
   async importTrainingData() {
     return this.request('/ml/data/import', {

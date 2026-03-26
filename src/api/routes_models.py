@@ -468,7 +468,13 @@ async def model_intelligence_dashboard(db: Session = Depends(get_db)):
         per_key_data = []
         if latest_version_id:
             per_key_rows = (
-                db.query(PerKeyMetric)
+                db.query(
+                    PerKeyMetric.key,
+                    PerKeyMetric.accuracy,
+                    PerKeyMetric.drift_score,
+                    PerKeyMetric.cache_hit_rate,
+                    PerKeyMetric.total_predictions,
+                )
                 .filter(PerKeyMetric.version_id == latest_version_id)
                 .order_by(desc(PerKeyMetric.total_predictions))
                 .limit(20)
@@ -476,13 +482,13 @@ async def model_intelligence_dashboard(db: Session = Depends(get_db)):
             )
             per_key_data = [
                 {
-                    "key": pk.key,
-                    "accuracy": pk.accuracy,
-                    "drift_score": pk.drift_score,
-                    "cache_hit_rate": pk.cache_hit_rate,
-                    "total_predictions": pk.total_predictions,
+                    "key": row.key,
+                    "accuracy": row.accuracy,
+                    "drift_score": row.drift_score,
+                    "cache_hit_rate": row.cache_hit_rate,
+                    "total_predictions": row.total_predictions,
                 }
-                for pk in per_key_rows
+                for row in per_key_rows
             ]
 
         # 4. Complete training history from TrainingMetadata

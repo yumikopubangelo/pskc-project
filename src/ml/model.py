@@ -499,6 +499,10 @@ class EnsembleModel:
         markov_weight: float = None,
         num_classes: int = 100,
         dynamic_weights: bool = None,
+        lstm_config: Optional[Dict[str, Any]] = None,
+        rf_config: Optional[Dict[str, Any]] = None,
+        markov_config: Optional[Dict[str, Any]] = None,
+        training_config: Optional[Dict[str, Any]] = None,
     ):
         self.num_classes = num_classes
         
@@ -509,11 +513,41 @@ class EnsembleModel:
         dynamic_weights = dynamic_weights if dynamic_weights is not None else settings.ml_ensemble_dynamic_weights
         
         self.dynamic_weights = dynamic_weights
+        self.lstm_config = dict(lstm_config or {})
+        self.rf_config = dict(rf_config or {})
+        self.markov_config = dict(markov_config or {})
+        self.training_config = dict(training_config or {})
 
         # Sub-models
-        self.lstm = LSTMModel(input_size=8, num_classes=num_classes) if TORCH_AVAILABLE else None  # Sequential input: 8 features per event
-        self.rf = RandomForestModel(num_classes=num_classes) if SKLEARN_AVAILABLE else None
-        self.markov = MarkovChainPredictor(num_classes=num_classes)
+        self.lstm = (
+            LSTMModel(
+                input_size=8,
+                hidden_size=self.lstm_config.get("hidden_size"),
+                num_layers=self.lstm_config.get("num_layers"),
+                num_classes=num_classes,
+                dropout=self.lstm_config.get("dropout"),
+            )
+            if TORCH_AVAILABLE
+            else None
+        )  # Sequential input: 8 features per event
+        self.rf = (
+            RandomForestModel(
+                n_estimators=self.rf_config.get("n_estimators"),
+                max_depth=self.rf_config.get("max_depth"),
+                min_samples_split=self.rf_config.get("min_samples_split"),
+                min_samples_leaf=self.rf_config.get("min_samples_leaf"),
+                num_classes=num_classes,
+                use_class_weight=self.rf_config.get("use_class_weight"),
+            )
+            if SKLEARN_AVAILABLE
+            else None
+        )
+        self.markov = MarkovChainPredictor(
+            num_classes=num_classes,
+            smoothing=self.markov_config.get("smoothing"),
+            max_history=self.markov_config.get("max_history"),
+            max_transitions=self.markov_config.get("max_transitions"),
+        )
 
         # RF feature preprocessor (fitted during training, applied at prediction)
         self.rf_preprocessor = None
@@ -578,12 +612,21 @@ class EnsembleModel:
         
         try:
             # Config parameters
-            batch_size = settings.ml_lstm_batch_size
-            max_epochs = settings.ml_lstm_max_epochs
-            learning_rate = settings.ml_lstm_learning_rate
-            patience = settings.ml_lstm_early_stopping_patience
-            min_delta = settings.ml_lstm_early_stopping_min_delta
+            batch_size = int(self.training_config.get("batch_size") or settings.ml_lstm_batch_size)
+            max_epochs = int(self.training_config.get("epochs") or settings.ml_lstm_max_epochs)
+            learning_rate = float(self.training_config.get("learning_rate") or settings.ml_lstm_learning_rate)
+            patience = int(
+                self.training_config.get("early_stopping_patience")
+                or settings.ml_lstm_early_stopping_patience
+            )
+            min_delta = float(
+                self.training_config.get("early_stopping_min_delta")
+                or settings.ml_lstm_early_stopping_min_delta
+            )
             use_lr_scheduler = settings.ml_lstm_use_lr_scheduler
+            weight_decay = float(self.training_config.get("weight_decay") or 0.0)
+            batch_size = max(8, batch_size)
+            max_epochs = max(1, max_epochs)
             
             # Encode labels
             if self.lstm and self.lstm.label_encoder is not None:
@@ -611,7 +654,11 @@ class EnsembleModel:
             
             self.lstm.train()
             criterion = nn.CrossEntropyLoss()
-            optimizer = torch.optim.Adam(self.lstm.parameters(), lr=learning_rate)
+            optimizer = torch.optim.Adam(
+                self.lstm.parameters(),
+                lr=learning_rate,
+                weight_decay=weight_decay,
+            )
             
             # Learning rate scheduler (if enabled)
             scheduler = None
@@ -873,6 +920,14 @@ class EnsembleModel:
             "is_trained": self.is_trained,
             "dynamic_weights": self.dynamic_weights,
             "current_weights": weights,
+            "training_config": {
+                "batch_size": self.training_config.get("batch_size"),
+                "epochs": self.training_config.get("epochs"),
+                "learning_rate": self.training_config.get("learning_rate"),
+                "rf_trees": self.rf_config.get("n_estimators"),
+                "rf_max_depth": self.rf_config.get("max_depth"),
+                "lstm_hidden_size": self.lstm_config.get("hidden_size"),
+            },
             "per_model_accuracy": {
                 name: self._weight_tracker.get_accuracy(name)
                 for name in ["lstm", "rf", "markov"]
