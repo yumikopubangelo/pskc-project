@@ -64,6 +64,7 @@ services:
       - ./src:/app/src              # Hot-reload untuk source code
       - ./config:/app/config        # Sinkronkan settings/config tanpa rebuild image
       - ./data:/app/data              # persist model & histori data
+      - ./migrations:/app/migrations  # mount migrations so container sees updates
       - ./simulation:/app/simulation  # mount simulation scripts
       - ./logs:/app/logs
     command: >

@@ -1,7 +1,7 @@
 """Model versioning database schema — model_versions, model_metrics, training_metadata, key_predictions, per_key_metrics
 
-Revision ID: 0002_model_versioning_schema
-Revises: 0001_initial_schema
+Revision ID: 20260324_0002
+Revises: 20260323_0001
 Create Date: 2026-03-24 00:00:00.000000
 
 """
@@ -11,8 +11,8 @@ from alembic import op
 import sqlalchemy as sa
 
 # revision identifiers, used by Alembic.
-revision: str = "0002_model_versioning_schema"
-down_revision: Union[str, None] = "0001_initial_schema"
+revision: str = "20260324_0002"
+down_revision: Union[str, None] = "20260323_0001"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
