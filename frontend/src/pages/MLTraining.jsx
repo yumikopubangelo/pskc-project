@@ -235,9 +235,13 @@ const MLTraining = () => {
     return () => clearTimeout(timer)
   }, [loadTrainingPlan])
 
-  const handleGenerationComplete = useCallback(() => {
+  const handleGenerationComplete = useCallback(async () => {
     setShowGenerationProgress(false)
-  }, [])
+    // Re-fetch ML status to show the actual updated sample count
+    // (the prior fetch happened right after 202 Accepted, before generation finished)
+    await loadMLStatus()
+    await loadTrainingPlan()
+  }, [loadMLStatus, loadTrainingPlan])
 
   const handleTrainingComplete = useCallback(async result => {
     setShowTrainingProgress(false)
@@ -696,6 +700,13 @@ const MLTraining = () => {
                   <Icon name={trainSummary.model_accepted ? 'check' : 'info'} className="h-5 w-5" />
                   <span>{trainSummary.model_accepted ? 'Training accepted and active model updated' : 'Training completed, existing active version retained'}</span>
                 </div>
+                {!trainSummary.model_accepted && (
+                  <div className="mt-2 text-sm text-amber-200/80 bg-amber-500/5 p-3 rounded-xl border border-amber-500/20">
+                    <span className="font-semibold block mb-1">Reason: {trainSummary.decision_reason || 'no_meaningful_improvement'}</span>
+                    The newly trained model's accuracy ({formatPercent(trainSummary.val_accuracy)}) did not significantly outperform the active model. 
+                    If you want to unconditionally accept the next training run regardless of its accuracy, use the <strong>Reset Model</strong> button below before training.
+                  </div>
+                )}
                 <div className="mt-4 grid gap-4 md:grid-cols-2 xl:grid-cols-4">
                   <SummaryTile label="Validation Top-1" value={formatPercent(trainSummary.val_accuracy)} hint={trainSummary.accuracy_confidence || 'attempt confidence'} />
                   <SummaryTile label="Validation Top-10" value={formatPercent(trainSummary.val_top_10_accuracy)} hint={`Profile ${trainSummary.quality_profile || qualityProfile}`} />

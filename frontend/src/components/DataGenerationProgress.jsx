@@ -1,15 +1,16 @@
 /**
- * DataGenerationProgress.jsx - Real-time data generation progress
+ * DataGenerationProgress.jsx - Real-time data generation progress (dark theme)
  *
- * Displays data generation progress with:
- * - Events processed / total
- * - Progress percentage
- * - Estimated time remaining
- * - Generation rate (events/second)
+ * Premium dark-themed progress display with:
+ * - Animated gradient progress bar
+ * - Live metrics with glassmorphism cards
+ * - Elapsed/remaining time counters
+ * - Consistent styling with MLTraining page
  */
 
 import React, { useState, useEffect, useRef } from 'react';
 import { DataGenerationProgressWebSocket, DataGenerationProgressPoller } from '../utils/progressClient';
+import Icon from './Icon';
 
 export default function DataGenerationProgress({ onComplete, useWebSocket = false }) {
   const [progress, setProgress] = useState({
@@ -47,46 +48,43 @@ export default function DataGenerationProgress({ onComplete, useWebSocket = fals
       }
     }, MAX_WAIT_TIME_MS);
 
-    // Initialize progress tracking
+    const handleUpdate = (update) => {
+      setProgress(update);
+      setIsConnected(true);
+
+      if (update.processed > 0) {
+        hasSeenProgressRef.current = true;
+      }
+
+      const done = update.done === true ||
+        (hasSeenProgressRef.current && update.processed >= update.total && update.total > 0);
+      
+      if (done && !isDone) {
+        setIsDone(true);
+        if (progressClientRef.current?.stop) progressClientRef.current.stop();
+        if (progressClientRef.current?.disconnect) progressClientRef.current.disconnect();
+        setIsConnected(false);
+        clearTimeout(timeoutId);
+        
+        const elapsed = Date.now() - startTimeRef.current;
+        const remainingTime = Math.max(0, MIN_DISPLAY_TIME_MS - elapsed);
+        
+        setTimeout(() => {
+          if (onComplete) {
+            onComplete({
+              success: true,
+              processed: update.processed,
+              total: update.total,
+            });
+          }
+        }, remainingTime);
+      }
+    };
+
     if (useWebSocket) {
       const wsClient = new DataGenerationProgressWebSocket();
       progressClientRef.current = wsClient;
-
-      wsClient.onUpdate((update) => {
-        setProgress(update);
-        setIsConnected(true);
-
-        // Track if we've seen actual progress (processed > 0)
-        if (update.processed > 0) {
-          hasSeenProgressRef.current = true;
-        }
-
-        // Server sends done:true when complete
-        // Only consider done if we've seen actual progress or server explicitly says done
-        const done = update.done === true ||
-          (hasSeenProgressRef.current && update.processed >= update.total && update.total > 0);
-        
-        if (done && !isDone) {
-          setIsDone(true);
-          setIsConnected(false);
-          clearTimeout(timeoutId);
-          
-          // Ensure minimum display time before calling onComplete
-          const elapsed = Date.now() - startTimeRef.current;
-          const remainingTime = Math.max(0, MIN_DISPLAY_TIME_MS - elapsed);
-          
-          setTimeout(() => {
-            if (onComplete) {
-              onComplete({
-                success: true,
-                processed: update.processed,
-                total: update.total,
-              });
-            }
-          }, remainingTime);
-        }
-      });
-
+      wsClient.onUpdate(handleUpdate);
       wsClient.connect();
 
       return () => {
@@ -94,43 +92,9 @@ export default function DataGenerationProgress({ onComplete, useWebSocket = fals
         wsClient.disconnect();
       };
     } else {
-      // Fallback to polling
       const poller = new DataGenerationProgressPoller();
       progressClientRef.current = poller;
-
-      poller.onUpdate((update) => {
-        setProgress(update);
-        setIsConnected(true);
-
-        // Track if we've seen actual progress (processed > 0)
-        if (update.processed > 0) {
-          hasSeenProgressRef.current = true;
-        }
-
-        const done = update.done === true ||
-          (hasSeenProgressRef.current && update.processed >= update.total && update.total > 0);
-        
-        if (done && !isDone) {
-          setIsDone(true);
-          poller.stop();
-          clearTimeout(timeoutId);
-          
-          // Ensure minimum display time before calling onComplete
-          const elapsed = Date.now() - startTimeRef.current;
-          const remainingTime = Math.max(0, MIN_DISPLAY_TIME_MS - elapsed);
-          
-          setTimeout(() => {
-            if (onComplete) {
-              onComplete({
-                success: true,
-                processed: update.processed,
-                total: update.total,
-              });
-            }
-          }, remainingTime);
-        }
-      });
-
+      poller.onUpdate(handleUpdate);
       poller.start();
 
       return () => {
@@ -154,93 +118,106 @@ export default function DataGenerationProgress({ onComplete, useWebSocket = fals
   };
 
   return (
-    <div className="w-full bg-white rounded-lg shadow-lg p-6 border border-blue-200">
+    <div className="rounded-3xl border border-dark-border bg-dark-card p-6 space-y-6 animate-slide-in">
       {/* Header */}
-      <div className="flex justify-between items-center mb-6">
-        <h2 className="text-2xl font-bold text-gray-800">Data Generation Progress</h2>
+      <div className="flex justify-between items-center">
+        <h2 className="text-xl font-semibold text-white">Data Generation Progress</h2>
         <div className="flex items-center gap-2">
-          <div className={`w-3 h-3 rounded-full ${isConnected ? 'bg-green-500' : 'bg-red-500'}`} />
-          <span className="text-sm text-gray-600">{isConnected ? 'Generating' : 'Complete'}</span>
+          <div className={`h-2.5 w-2.5 rounded-full ${isConnected ? 'bg-emerald-400 shadow-[0_0_8px_rgba(52,211,153,0.5)]' : 'bg-slate-500'}`} />
+          <span className="text-xs text-slate-400">{isConnected ? 'Generating' : 'Complete'}</span>
         </div>
       </div>
 
-      {/* Event Count */}
-      <div className="mb-6">
-        <div className="flex justify-between items-center mb-2">
-          <span className="text-gray-700 font-medium">Events Generated</span>
-          <span className="text-lg font-bold text-blue-600">
-            {formatNumber(progress.processed)} / {formatNumber(progress.total)}
-          </span>
+      {/* Progress Info */}
+      <div className="flex justify-between items-end">
+        <div>
+          <div className="text-sm font-medium text-slate-400 mb-1">Events Generated</div>
+          <div className="text-2xl font-bold text-white tabular-nums">
+            <span className="text-accent-blue">{formatNumber(progress.processed)}</span>
+            <span className="text-slate-500 text-lg mx-2">/</span>
+            {formatNumber(progress.total)}
+          </div>
         </div>
-        <div className="text-gray-600 text-sm">
-          {progress.total > 0 ? `${((progress.processed / progress.total) * 100).toFixed(1)}% complete` : 'Starting...'}
+        <div className="text-right">
+          <div className="text-sm text-slate-400 mb-1">
+            {progress.total > 0 ? `${((progress.processed / progress.total) * 100).toFixed(1)}% complete` : 'Starting...'}
+          </div>
+          <div className="text-xl font-bold text-accent-blue tabular-nums">
+            {(progress.percent || 0).toFixed(1)}%
+          </div>
         </div>
       </div>
 
       {/* Progress Bar */}
-      <div className="mb-6">
-        <div className="flex justify-between items-center mb-2">
-          <span className="text-gray-700 font-medium">Progress</span>
-          <span className="text-lg font-bold text-blue-600">{(progress.percent || 0).toFixed(1)}%</span>
-        </div>
-        <div className="w-full bg-gray-200 rounded-full h-4 overflow-hidden">
-          <div
-            className="h-full bg-blue-500 transition-all duration-300 ease-out"
-            style={{ width: `${progress.percent}%` }}
-          />
-        </div>
+      <div className="w-full h-3 rounded-full bg-dark-bg border border-dark-border overflow-hidden">
+        <div
+          className="h-full rounded-full transition-all duration-300 ease-out progress-gradient-bar"
+          style={{ width: `${progress.percent || 0}%` }}
+        />
       </div>
 
       {/* Stats Grid */}
-      <div className="grid grid-cols-4 gap-4">
-        <div className="bg-blue-50 p-4 rounded-lg">
-          <div className="text-gray-600 text-sm">Rate</div>
-          <div className="text-xl font-bold text-blue-600">
-            {(progress.events_per_second || 0).toFixed(0)}
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+        <div className="rounded-2xl border border-accent-blue/20 bg-accent-blue/5 p-4 relative overflow-hidden group">
+          <div className="absolute -right-4 -top-4 opacity-10 group-hover:opacity-20 transition-opacity">
+            <Icon name="activity" className="h-16 w-16 text-accent-blue" />
           </div>
-          <div className="text-gray-500 text-xs">events/sec</div>
+          <div className="text-[11px] uppercase tracking-wider text-blue-400/70 font-medium mb-1 relative z-10">Rate</div>
+          <div className="flex items-baseline gap-1.5 relative z-10">
+            <div className="text-2xl font-bold tabular-nums text-blue-300">
+              {(progress.events_per_second || 0).toFixed(0)}
+            </div>
+            <div className="text-xs text-blue-400/50">evt/s</div>
+          </div>
         </div>
 
-        <div className="bg-purple-50 p-4 rounded-lg">
-          <div className="text-gray-600 text-sm">Elapsed</div>
-          <div className="text-xl font-bold text-purple-600">
+        <div className="rounded-2xl border border-purple-500/20 bg-purple-500/5 p-4 relative overflow-hidden group">
+          <div className="absolute -right-4 -top-4 opacity-10 group-hover:opacity-20 transition-opacity">
+             <Icon name="clock" className="h-16 w-16 text-purple-500" />
+          </div>
+          <div className="text-[11px] uppercase tracking-wider text-purple-400/70 font-medium mb-1 relative z-10">Elapsed</div>
+          <div className="text-2xl font-bold tabular-nums text-purple-300 relative z-10">
             {formatSeconds(progress.elapsed_seconds)}
           </div>
         </div>
 
-        <div className="bg-orange-50 p-4 rounded-lg">
-          <div className="text-gray-600 text-sm">ETA</div>
-          <div className="text-xl font-bold text-orange-600">
+        <div className="rounded-2xl border border-orange-500/20 bg-orange-500/5 p-4 relative overflow-hidden group">
+          <div className="absolute -right-4 -top-4 opacity-10 group-hover:opacity-20 transition-opacity">
+            <Icon name="fast-forward" className="h-16 w-16 text-orange-500" />
+          </div>
+          <div className="text-[11px] uppercase tracking-wider text-orange-400/70 font-medium mb-1 relative z-10">Remaining</div>
+          <div className="text-2xl font-bold tabular-nums text-orange-300 relative z-10">
             {formatSeconds(progress.eta_seconds)}
           </div>
         </div>
 
-        <div className="bg-green-50 p-4 rounded-lg">
-          <div className="text-gray-600 text-sm">Total Time</div>
-          <div className="text-xl font-bold text-green-600">
+        <div className="rounded-2xl border border-emerald-500/20 bg-emerald-500/5 p-4 relative overflow-hidden group">
+          <div className="absolute -right-4 -top-4 opacity-10 group-hover:opacity-20 transition-opacity">
+            <Icon name="calendar" className="h-16 w-16 text-emerald-500" />
+          </div>
+          <div className="text-[11px] uppercase tracking-wider text-emerald-400/70 font-medium mb-1 relative z-10">Total Time</div>
+          <div className="text-2xl font-bold tabular-nums text-emerald-300 relative z-10">
             {formatSeconds(progress.elapsed_seconds + progress.eta_seconds)}
           </div>
         </div>
       </div>
 
       {/* Info Message */}
-      <div className="mt-6 text-center text-gray-600">
+      <div className="mt-2 text-center">
         {isDone ? (
-          <div className="text-green-600 font-semibold">
-            ✓ Data generation complete! Ready to start training.
+          <div className="inline-flex items-center gap-2 px-4 py-2 rounded-full bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 text-sm font-medium">
+            <Icon name="check" className="h-4 w-4" />
+            Data generation complete! Ready for training.
           </div>
         ) : progress.total > 0 ? (
-          <div>
-            Generating {formatNumber(progress.total)} training events...
-            <br />
-            <span className="text-sm">
-              {progress.events_per_second > 0
-                ? `${Math.round((progress.total - progress.processed) / progress.events_per_second)} seconds remaining`
-                : 'Calculating...'}
-            </span>
+          <div className="text-sm text-slate-400">
+            Generating <span className="text-white font-medium">{formatNumber(progress.total)}</span> synthetic training events...
           </div>
         ) : (
-          <div className="text-gray-500">Initializing data generation...</div>
+          <div className="text-sm text-slate-500 flex items-center justify-center gap-2">
+            <div className="h-4 w-4 rounded-full border-2 border-slate-600 border-t-slate-400 animate-spin" />
+            Initializing data generation cluster...
+          </div>
         )}
       </div>
     </div>

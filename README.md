@@ -1,202 +1,179 @@
-# Predictive Secure Key Caching (PSKC)
+# PSKC Project
 
-PSKC adalah sistem cache kunci terenkripsi dengan prediksi ML untuk menurunkan latensi akses key. Saat ini repo ini sudah menjalankan backend FastAPI, L1 cache in-process, L2 Redis terenkripsi, prefetch worker terpisah, model registry aman, realtime simulation, dan dashboard frontend yang membaca backend nyata.
+![Docker](https://img.shields.io/badge/Docker-Enabled-blue?logo=docker)
+![Python](https://img.shields.io/badge/Python-3.11%2B-brightgreen?logo=python)
 
-Dokumen ini sengaja fokus ke kondisi implementasi saat ini. Untuk backlog pengembangan berikutnya, baca [docs/feature_roadmap.md](docs/feature_roadmap.md). Untuk daftar fitur yang sudah aktif, baca [docs/comprehensive_features.md](docs/comprehensive_features.md).
+---
 
-## Status Saat Ini
+## 📖 Overview
 
-| Area | Status | Ringkasannya |
-| --- | --- | --- |
-| Backend API | Aktif | FastAPI modular, health, keys, metrics, ML, security, simulation, dan model intelligence sudah tersedia. |
-| Cache | Aktif | L1 `LocalCache` + L2 Redis terenkripsi via `EncryptedCacheStore` dan `SecureCacheManager`. |
-| Prefetch | Aktif | Request path enqueue job ke Redis, worker terpisah memanaskan shared cache, retry dan DLQ dasar sudah ada. |
-| ML runtime | Aktif | Trainer, predictor, River online learning, model registry aman, promote/rollback, lifecycle metadata, dan planner full-training sudah tersambung. |
-| Simulation | Aktif | Halaman simulation sekarang fokus ke realtime session dengan bukti L1/L2/KMS, latency breakdown, drift, dan per-key accuracy. |
-| Model Intelligence | Aktif | Dashboard versi model, history training, metrics, drift, River stats, dan prediction logs sudah tersedia. |
-| Security | Aktif dengan caveat | HTTP security middleware, rate limiter, FIPS startup self-test, tamper-evident audit log, dan IDS sudah aktif. |
-| Frontend | Aktif | Overview, Dashboard, Simulation, ML Training, Model Intelligence, dan Security Testing membaca backend. |
-| Docker | Aktif | `frontend`, `api`, `redis`, `prefetch-worker`, dan profile monitoring bisa dijalankan. |
+**PSKC** (Predictive Secure Key‑Cache) is a modular micro‑service platform that provides:
+- **Real‑time cache‑hit analytics**
+- **Online learning with River**
+- **Concept‑drift detection (EWMA, ADWIN, EDDM)**
+- **Automatic retraining via a dedicated ML worker**
+- **Database Explorero** for administrators to inspect raw SQLite data.
 
-## Arsitektur Runtime
+All components communicate through **Redis** and expose a **FastAPI** HTTP API. The frontend is a Vite‑powered React app.
 
-```text
-browser
-  -> frontend (React/Vite)
-    -> /api
-      -> FastAPI app (src/api/routes.py)
-        -> SecureCacheManager
-          -> LocalCache (L1, per process)
-          -> RedisCache (L2, shared)
-          -> EncryptedCacheStore
-          -> IDS + audit logger + FIPS crypto
-        -> KeyFetcher / KMS fallback
-        -> ML runtime (trainer, predictor, registry)
-        -> Prefetch queue producer
+---
 
-prefetch-worker
-  -> Redis queue
-  -> Redis shared cache
+## 🏗️ Architecture
 
-database
-  -> SQLite by default
-  -> stores ModelVersion, TrainingMetadata, ModelMetric, PredictionLog, etc.
+```mermaid
+flowchart TD
+    subgraph DockerCompose[Docker‑Compose]
+        direction LR
+        API[API Service (FastAPI)] -->|HTTP| Frontend[Frontend (Vite/React)]
+        API -->|Redis| Redis[Redis]
+        MLWorker[ML Worker] -->|Redis| Redis
+        Prefetch[Prefetch Worker] -->|Redis| Redis
+    end
+    subgraph DB[SQLite DB]
+        DBFile[(pskc.db)]
+    end
+    API -->|SQLAlchemy| DBFile
+    classDef service fill:#f9f9f9,stroke:#333,stroke-width:1px;
+    class API,MLWorker,Prefetch,Frontend service;
 ```
 
-## Halaman Frontend yang Aktif
+---
 
-| Halaman | Path | Fungsi |
-| --- | --- | --- |
-| Overview | `/` | Ringkasan status backend dan entry point UI |
-| Dashboard | `/dashboard` | Ringkasan metrik runtime |
-| Simulation | `/simulation` | Realtime simulation dengan L1/L2/KMS trace, per-key accuracy, drift, dan proof komponen |
-| ML Training | `/ml-training` | Generate data, pilih quality profile + time budget, trigger full retrain/evaluation, dan lihat status model |
-| Model Intelligence | `/model-intelligence` | Version history, training history, per-version metrics, drift, River, prediction logs |
-| Security Testing | `/security-testing` | Tampilan fitur keamanan dan hasil uji |
+## 📦 Prerequisites
 
-Catatan:
+- **Docker Desktop** (or Docker Engine) >= 24.x
+- **Docker‑Compose** (v2) – bundled with Docker Desktop
+- **Python 3.11+** (only needed if you want to run services locally without Docker)
+- **Node.js 20+** (for frontend development)
 
-- Halaman simulation sekarang realtime-only.
-- Halaman pipeline / node graph bukan jalur utama lagi.
-- `Model Intelligence` memakai endpoint `/api/models/intelligence/dashboard`.
-- Endpoint lama `/models/intelligence/dashboard` tetap dilayani untuk kompatibilitas bundle lama.
+---
 
-## Quick Start
+## ⚙️ Setup & Run (Docker)
 
-### Local backend
+1. **Clone the repository**
+   ```bash
+   git clone https://github.com/your‑org/pskc-project.git
+   cd pskc-project
+   ```
+2. **Create a `.env` file** (copy from `example.env` if present) and adjust any secrets.
+3. **Start the stack**
+   ```bash
+   docker compose up --build -d
+   ```
+   The following containers will be launched:
+   - `pskc-api` – FastAPI backend (exposed on `http://localhost:8000`)
+   - `pskc-frontend` – React UI (exposed on `http://localhost:3000`)
+   - `pskc-redis` – Redis cache
+   - `pskc-ml-worker` – ML worker (auto‑training & drift detection)
+   - `pskc-prefetch-worker` – Prefetch job processor
+4. **Verify health**
+   ```bash
+   curl http://localhost:8000/health
+   ```
+   You should see `{"status":"healthy"}`.
 
-```powershell
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-pip install -r requirements.txt
-Copy-Item .env.example .env
-uvicorn src.api.routes:app --reload --host 0.0.0.0 --port 8000
+---
+
+## 🛠️ Configuration (Environment Variables)
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `APP_ENV` | `development` | Application mode (`development`/`production`). |
+| `LOG_LEVEL` | `info` | Python logging level. |
+| `REDIS_HOST` | `redis` | Hostname of the Redis container. |
+| `REDIS_PORT` | `6379` | Redis port. |
+| `REDIS_PASSWORD` | `pskc_redis_secret` | Redis password (set in `.env`). |
+| `ML_UPDATE_INTERVAL_SECONDS` | `30` | How often the ML worker polls Redis for new events. |
+| `ML_SCHEDULED_TRAIN_INTERVAL_SECONDS` | `3600` | Minimum interval between scheduled trainings. |
+| `ML_DRIFT_THRESHOLD` | `0.12` | EWMA drop percentage that triggers a drift alert. |
+| `ML_ENABLE_RIVER` | `true` | Enable River online learning. |
+| `PREFETCH_RATE_LIMIT_RPS` | `10` | Jobs per second the prefetch worker may consume. |
+| `PREFETCH_MAX_RETRIES` | `3` | Maximum retry attempts before moving a job to DLQ. |
+
+---
+
+## 📡 API Endpoints
+
+### Core API (`/api`)
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/health` | Health check. |
+| `GET` | `/admin/db/tables` | List all SQLite tables with row counts. |
+| `GET` | `/admin/db/tables/{table}` | Paginated rows of a specific table (`?page=1&size=100`). |
+| `GET` | `/ml/status` | Current ML model status & sample count. |
+| `POST` | `/ml/training/train` | Trigger a training run (optional `force` & `reason`). |
+| `GET` | `/ml/training/progress` | Real‑time training progress (used by the UI). |
+
+### Prefetch API (`/prefetch` – internal)
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/prefetch/jobs` | Enqueue a prefetch job. |
+| `GET` | `/prefetch/stats` | Queue, retry & DLQ statistics. |
+| `POST` | `/prefetch/replay` | Replay jobs from DLQ back to the main queue. |
+
+---
+
+## 🎨 Frontend – Database Explorer
+
+The **Database Explorer** lives at `http://localhost:3000/db-explorer`. It provides:
+- Table selector dropdown.
+- Paginated data grid with smooth glass‑morphic styling.
+- Search & column‑sorting (future enhancement).
+- Real‑time refresh every 30 seconds.
+
+The UI is built with **React**, **Vite**, and vanilla CSS using a curated dark‑mode palette (HSL‑based gradients, subtle micro‑animations on hover, and Google Font *Inter*).
+
+---
+
+## 🤖 ML Worker & Drift Detection
+
+- **Drift detection** uses EWMA, ADWIN, and EDDM. When a drift is detected, the worker logs a warning and automatically triggers a retraining via the API.
+- **River** provides online incremental learning for cache‑hit prediction.
+- The worker respects the `ML_UPDATE_INTERVAL_SECONDS` and `ML_SCHEDULED_TRAIN_INTERVAL_SECONDS` settings.
+
+All drift‑related logs are emitted under `src.ml.drift` and can be observed with:
+```bash
+docker logs pskc-ml-worker -f | grep drift
 ```
 
-### Local frontend
+---
 
-```powershell
-Set-Location frontend
-npm install
-npm run dev
+## 📂 Prefetch Worker
+
+- Implements a **Redis‑backed rate‑limited queue** (`pskc:prefetch:jobs`).
+- Supports automatic retry with exponential back‑off and a dead‑letter queue (DLQ).
+- The recent‑queue timeout (`brpop` returning `None`) is now treated as a normal empty‑queue condition, avoiding spurious back‑off warnings.
+
+---
+
+## 🧪 Testing
+
+```bash
+# Backend tests (pytest)
+cd src
+pytest
+
+# Frontend tests (vitest)
+cd ../frontend
+npm run test
 ```
 
-### Docker
+---
 
-```powershell
-docker compose up -d --build frontend api redis prefetch-worker
-```
+## 🤝 Contributing
 
-Monitoring profile:
+1. Fork the repository.
+2. Create a feature branch (`git checkout -b feature/awesome‑feature`).
+3. Follow the **code‑style** guidelines (black, isort, flake8).
+4. Write unit tests for any new logic.
+5. Submit a Pull Request.
 
-```powershell
-docker compose --profile monitoring up -d prometheus grafana
-```
+---
 
-## Konfigurasi Penting
+## 📜 License
 
-Lihat [.env.example](.env.example) untuk daftar lengkap. Variabel yang paling penting:
+This project is licensed under the **MIT License**. See `LICENSE` for details.
 
-| Variable | Fungsi |
-| --- | --- |
-| `APP_ENV` | mode aplikasi |
-| `CACHE_ENCRYPTION_KEY` | material awal untuk derivasi master key cache |
-| `DATABASE_URL` | URL database jika ingin override default SQLite |
-| `DATABASE_PATH` | path file SQLite jika tidak memakai `DATABASE_URL` |
-| `REDIS_HOST`, `REDIS_PORT`, `REDIS_PASSWORD` | koneksi Redis shared cache dan queue |
-| `ML_MODEL_NAME` | nama logical model di registry |
-| `ML_MODEL_REGISTRY_DIR` | direktori artefak model aman |
-| `ML_MODEL_STAGE` | stage default model baru |
-| `ML_MODEL_SIGNING_KEY` | signing key metadata model |
-| `ML_TRAINING_QUALITY_PROFILE` | profile default full retraining (`fast`, `balanced`, `thorough`) |
-| `ML_TRAINING_TIME_BUDGET_MINUTES` | budget default full retraining |
-| `ML_TRAINING_TIME_BUDGET_MAX_MINUTES` | batas atas budget full retraining |
-| `TRUSTED_PROXIES` | CIDR proxy yang dipercaya untuk forwarded headers |
-| `HTTP_SECURITY_*` | hardening middleware HTTP |
-| `AUDIT_LOG_DIRECTORY` | lokasi audit log |
+---
 
-## Endpoint Penting
-
-| Method | Path | Fungsi |
-| --- | --- | --- |
-| `GET` | `/health` | health check |
-| `POST` | `/keys/store` | simpan key ke secure cache |
-| `POST` | `/keys/access` | ambil key dari L1/L2 atau fallback ke KMS |
-| `GET` | `/metrics` | ringkasan metrik dashboard |
-| `GET` | `/metrics/prometheus` | exporter Prometheus |
-| `GET` | `/ml/status` | status runtime model aktif |
-| `GET` | `/ml/registry` | ringkasan registry model |
-| `GET` | `/ml/lifecycle` | history lifecycle model |
-| `GET` | `/ml/evaluate` | evaluasi model aktif |
-| `POST` | `/ml/retrain` | manual retrain |
-| `GET` | `/ml/training/plan` | rekomendasi full-training profile, budget, dan hyperparameter |
-| `POST` | `/ml/training/train` | start full retraining dengan profile + time budget |
-| `POST` | `/ml/promote` | promote version ke stage target |
-| `POST` | `/ml/rollback` | rollback ke version aman |
-| `GET` | `/api/models/intelligence/dashboard` | payload utama Model Intelligence |
-| `POST` | `/simulation/live-session/start` | start realtime simulation |
-| `GET` | `/simulation/live-session/{id}` | snapshot realtime simulation |
-| `GET` | `/simulation/live-session/{id}/stream` | SSE realtime simulation |
-| `POST` | `/simulation/live-session/{id}/stop` | stop realtime simulation |
-| `GET` | `/prefetch/dlq` | inspeksi dead-letter queue |
-
-## Validasi yang Disarankan
-
-Focused backend validation:
-
-```powershell
-pytest tests/test_settings_database.py tests/test_database_schema_compatibility.py tests/test_model_intelligence_dashboard.py -q
-```
-
-Build frontend:
-
-```powershell
-Set-Location frontend
-npm run build
-```
-
-Smoke live via Docker:
-
-```powershell
-docker compose up -d --build api redis prefetch-worker
-python scripts/smoke_backend_runtime.py
-```
-
-Catatan implementasi saat ini:
-
-- startup sekarang memperbaiki schema SQLite lama untuk kolom observability tambahan seperti `per_key_metrics.hit_rate`
-- halaman ML Training sudah memakai planner backend untuk quality profile dan time budget
-- drift-triggered online learning tetap terpisah dari full retraining, jadi simulation tidak memicu full retrain blocking
-
-## Dokumentasi
-
-Dokumen yang paling berguna sekarang:
-
-- [docs/index.md](docs/index.md)
-- [docs/getting_started.md](docs/getting_started.md)
-- [docs/comprehensive_features.md](docs/comprehensive_features.md)
-- [docs/feature_roadmap.md](docs/feature_roadmap.md)
-- [docs/realtime_simulation.md](docs/realtime_simulation.md)
-- [docs/architecture/architecture.md](docs/architecture/architecture.md)
-- [docs/architecture/api_reference.md](docs/architecture/api_reference.md)
-- [docs/architecture/security_model.md](docs/architecture/security_model.md)
-- [docs/architecture/simulation_and_ml.md](docs/architecture/simulation_and_ml.md)
-- [docs/operations.md](docs/operations.md)
-- [docs/development.md](docs/development.md)
-
-## Known Gaps
-
-Hal yang masih belum matang penuh:
-
-- reverse proxy / production deployment profile yang benar-benar siap operasi
-- observability historis yang persisten, bukan hanya snapshot runtime
-- replay DLQ dan backpressure prefetch yang lebih matang
-- governance release model lintas environment
-- sebagian test legacy masih menargetkan arsitektur route lama
-
-## Apa yang Harus Dibaca Berikutnya
-
-- Jika Anda ingin menjalankan sistem: baca [docs/getting_started.md](docs/getting_started.md)
-- Jika Anda ingin tahu apa yang sudah ada: baca [docs/comprehensive_features.md](docs/comprehensive_features.md)
-- Jika Anda ingin tahu apa yang harus dibangun berikutnya: baca [docs/feature_roadmap.md](docs/feature_roadmap.md)
-- Jika Anda ingin memahami simulation realtime: baca [docs/realtime_simulation.md](docs/realtime_simulation.md)
+*Happy hacking! 🚀*

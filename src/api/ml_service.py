@@ -149,8 +149,16 @@ def initialize_ml_runtime() -> Dict[str, Any]:
     runtime = _bind_runtime_components()
     trainer = runtime["trainer"]
 
-    if not trainer.get_stats().get("auto_training"):
-        trainer.start_auto_training()
+    # NOTE: Auto-training loop inside the API container is DISABLED.
+    # The dedicated ML Worker container (pskc-ml-worker) already handles
+    # both scheduled training and drift-triggered retraining via the
+    # POST /ml/training/train endpoint.  Running two auto-training loops
+    # simultaneously caused training to fire every 30 seconds on startup
+    # regardless of user action.
+    logger.info(
+        "Auto-training loop disabled in API container — "
+        "ML Worker handles scheduled/drift training"
+    )
 
     return runtime
 
@@ -763,7 +771,28 @@ def generate_training_data(
     # Generate events
     events = []
     now = datetime.now(timezone.utc)
-    base_time = now - timedelta(minutes=30)  # Use recent 30 minutes for training data
+    # Spread events across the full duration window so the model learns
+    # hour-of-day and day-of-week patterns.  Keep the window recent enough
+    # that all events fall inside the training plan's window_seconds.
+    #
+    # Cap to the maximum training profile window (thorough = 14 days) so
+    # all generated events are actually usable during training.
+    MAX_TRAINING_WINDOW_SECONDS = 1_209_600  # 14 days (thorough profile)
+    requested_window = duration_hours * 3600
+    if requested_window > MAX_TRAINING_WINDOW_SECONDS:
+        logger.warning(
+            "duration_hours=%d (%ds) exceeds max training window (%ds / %dh). "
+            "Capping timestamp spread to %d hours so all events are usable for training.",
+            duration_hours,
+            requested_window,
+            MAX_TRAINING_WINDOW_SECONDS,
+            MAX_TRAINING_WINDOW_SECONDS // 3600,
+            MAX_TRAINING_WINDOW_SECONDS // 3600,
+        )
+        window_seconds = MAX_TRAINING_WINDOW_SECONDS
+    else:
+        window_seconds = requested_window
+    base_time = now - timedelta(seconds=window_seconds)
 
     # Create hot keys (frequently accessed)
     hot_keys = [f"{random.choice(key_patterns)}{random.randint(1, num_keys // 5)}" for _ in range(int(num_keys * traffic_config["hot_key_ratio"]))]
@@ -773,9 +802,8 @@ def generate_training_data(
     _progress_step = max(1, num_events // 20)  # report every 5%
 
     for i in range(num_events):
-        # Determine timestamp (spread over the recent window for training)
-        # Use last 30 minutes to ensure events are within training window
-        time_offset = random.uniform(0, 30 * 60)  # 30 minutes in seconds
+        # Spread timestamps across the full duration window
+        time_offset = random.uniform(0, window_seconds)
         timestamp = (base_time + timedelta(seconds=time_offset)).timestamp()
         
         # Determine if this is a sequential access (pattern learning)
@@ -826,19 +854,26 @@ def generate_training_data(
         
         last_key = key_id
 
-        # Update progress tracker periodically
+        # Update progress tracker periodically.
+        # IMPORTANT: Cap at num_events - 1 so the WebSocket does NOT signal
+        # "done" until we finish the actual import below.  Previously,
+        # reaching num_events here triggered the completion signal even
+        # though import_events() hadn't started yet.
         if (i + 1) % _progress_step == 0 or (i + 1) == num_events:
-            gen_tracker.update(i + 1)
+            gen_tracker.update(min(i + 1, num_events - 1))
 
     # Sort by timestamp
     events.sort(key=lambda x: x["timestamp"])
     
     # Import events into collector with data_source marked as "simulation"
+    # (bulk import mode skips periodic Redis saves for O(n) performance)
     imported = collector.import_events(events, data_source="simulation")
     
     # CRITICAL: Flush all events to Redis immediately so ML Worker can detect them
-    # (Otherwise last 1-49 events won't be in Redis until next periodic save)
     collector.flush_to_redis()
+
+    # NOW signal completion — import is done and data is in Redis.
+    gen_tracker.update(num_events)
     
     stats = collector.get_stats()
     

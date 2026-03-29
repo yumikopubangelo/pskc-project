@@ -117,9 +117,28 @@ class DatabaseConnection:
                 "sqlalchemy.url", str(cls._engine.url)
             )
 
-            command.upgrade(alembic_cfg, "head")
-            logger.info("Database schema is up-to-date (Alembic migrations applied)")
-            migrations_applied = True
+            import threading
+            
+            # Define the migration function
+            def run_migration():
+                command.upgrade(alembic_cfg, "head")
+
+            logger.info("Starting Alembic migrations (with 30s timeout)...")
+            migration_thread = threading.Thread(target=run_migration)
+            migration_thread.daemon = True
+            migration_thread.start()
+            migration_thread.join(timeout=30.0)
+
+            if migration_thread.is_alive():
+                logger.error(
+                    "CRITICAL: Alembic migrations timed out after 30 seconds! "
+                    "The database might be locked. Falling back to create_all."
+                )
+                Base.metadata.create_all(bind=cls._engine)
+                # We do not set migrations_applied = True because the migration didn't complete cleanly
+            else:
+                logger.info("Database schema is up-to-date (Alembic migrations applied successfully)")
+                migrations_applied = True
 
         except ImportError:
             # Alembic not installed — fall back to SQLAlchemy create_all

@@ -356,6 +356,66 @@ class PredictionLog(Base):
         return f"<PredictionLog(id={self.id}, version_id={self.version_id}, key='{self.key}', confidence={self.confidence})>"
 
 
+class TrainingSampleProfile(Base):
+    """
+    Stores statistical metadata (fingerprint) of the training dataset
+    used for a model version.  Not raw data — only aggregated distributions,
+    frequencies, and feature statistics.
+
+    Used by the TrafficPatternTracker to compare live traffic patterns
+    against the training baseline for concept-drift / pattern-divergence
+    detection.
+
+    Attributes:
+        id: Primary key
+        version_id: FK → ModelVersion this profile belongs to
+        total_samples: Number of samples in the training set
+        unique_keys: Number of distinct cache keys
+        unique_services: Number of distinct service IDs
+        temporal_profile: JSON – per-hour access histogram (24 buckets)
+        key_frequency_profile: JSON – top-50 keys and their counts
+        service_distribution: JSON – service → proportion mapping
+        cache_hit_rate: Overall cache-hit rate of the dataset
+        avg_latency_ms: Mean latency across the dataset
+        latency_p95_ms: 95th-percentile latency
+        feature_stats: JSON – per-RF-feature mean & std
+        created_at: When the profile was created
+    """
+    __tablename__ = "training_sample_profiles"
+
+    id = Column(Integer, primary_key=True, index=True)
+    version_id = Column(
+        Integer,
+        ForeignKey('model_versions.version_id', ondelete='CASCADE'),
+        nullable=False, index=True,
+    )
+    total_samples = Column(Integer, nullable=False, default=0)
+    unique_keys = Column(Integer, nullable=False, default=0)
+    unique_services = Column(Integer, nullable=False, default=0)
+    temporal_profile = Column(JSON, nullable=True)
+    key_frequency_profile = Column(JSON, nullable=True)
+    service_distribution = Column(JSON, nullable=True)
+    cache_hit_rate = Column(Float, nullable=True, default=0.0)
+    avg_latency_ms = Column(Float, nullable=True, default=0.0)
+    latency_p95_ms = Column(Float, nullable=True, default=0.0)
+    feature_stats = Column(JSON, nullable=True)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow, index=True)
+
+    # Relationships
+    version = relationship('ModelVersion', foreign_keys=[version_id])
+
+    __table_args__ = (
+        Index('idx_tsp_version_id', 'version_id'),
+        Index('idx_tsp_created_at', 'created_at'),
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<TrainingSampleProfile(id={self.id}, version_id={self.version_id}, "
+            f"total_samples={self.total_samples}, unique_keys={self.unique_keys})>"
+        )
+
+
 # ============================================================
 # Database Session Management
 # ============================================================

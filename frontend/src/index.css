@@ -135,6 +135,18 @@ body {
   }
 }
 
+@keyframes gradient-shift {
+  0% { background-position: 0% 50%; }
+  50% { background-position: 100% 50%; }
+  100% { background-position: 0% 50%; }
+}
+
+.progress-gradient-bar {
+  background: linear-gradient(90deg, #3b82f6, #10b981, #3b82f6);
+  background-size: 200% 200%;
+  animation: gradient-shift 3s ease infinite;
+}
+
 .animate-slide-in {
   animation: slideIn 0.5s ease-out forwards;
 }

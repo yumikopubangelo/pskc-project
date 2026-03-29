@@ -304,6 +304,10 @@ class PrefetchQueue:
 
         try:
             item = self._client.brpop(self._queue_key, timeout=effective_timeout)
+        except (TimeoutError, redis.exceptions.TimeoutError):
+            # brpop returned nothing because the queue is empty — this is normal,
+            # NOT a Redis failure.  Do not engage the backoff circuit-breaker.
+            return None
         except RedisError as exc:
             self._record_failure("dequeue", exc)
             return None

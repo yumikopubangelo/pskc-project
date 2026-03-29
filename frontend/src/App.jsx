@@ -6,6 +6,7 @@ import Simulation from './pages/Simulation'
 import ModelIntelligence from './pages/ModelIntelligence'
 import MLTraining from './pages/MLTraining'
 import SecurityTesting from './pages/SecurityTesting'
+import DatabaseExplorer from './pages/DatabaseExplorer'
 import Icon from './components/Icon'
 
 function App() {
@@ -18,6 +19,7 @@ function App() {
     { path: '/ml-training', label: 'ML Training', icon: 'cpu' },
     { path: '/model-intelligence', label: 'Model Intel', icon: 'chart' },
     { path: '/security-testing', label: 'Security', icon: 'shield' },
+    { path: '/database-explorer', label: 'DB Explorer', icon: 'database' },
   ]
 
   return (
@@ -96,6 +98,7 @@ function App() {
           <Route path="/ml-training" element={<MLTraining />} />
           <Route path="/model-intelligence" element={<ModelIntelligence />} />
           <Route path="/security-testing" element={<SecurityTesting />} />
+          <Route path="/database-explorer" element={<DatabaseExplorer />} />
         </Routes>
       </main>
 

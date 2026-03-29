@@ -100,7 +100,14 @@ class MLWorkerService:
                 socket_connect_timeout=5,
             )
             self._redis_client.ping()
-            logger.info(f"Connected to Redis at {self._redis_host}:{self._redis_port}")
+            
+            # Set initial offset to avoid re-processing historical data
+            try:
+                self._last_event_offset = self._redis_client.llen("pskc:ml:events")
+            except Exception:
+                self._last_event_offset = 0
+                
+            logger.info(f"Connected to Redis at {self._redis_host}:{self._redis_port} - Starting Event Offset: {self._last_event_offset}")
             return True
         except Exception as e:
             logger.error(f"Failed to connect to Redis: {e}")

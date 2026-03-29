@@ -195,12 +195,14 @@ class DataCollector:
             # Update aggregated stats
             self._update_stats(event)
             
-            # Periodic cleanup of historical stats
-            self._cleanup_historical_stats()
+            # Periodic cleanup of historical stats (skip during bulk import)
+            if not getattr(self, '_bulk_import_mode', False):
+                self._cleanup_historical_stats()
         
-        # Save to Redis periodically (every 50 events) to avoid O(n²) cost
-        # during bulk imports and to reduce lock contention.
-        if len(self._events) % 50 == 0:
+        # Save to Redis periodically (every 50 events).
+        # SKIP during bulk imports to avoid O(n²) cost — the caller is
+        # responsible for calling flush_to_redis() once after the import.
+        if not getattr(self, '_bulk_import_mode', False) and len(self._events) % 50 == 0:
             self._save_to_redis()
     
     def _cleanup_historical_stats(self):
@@ -320,16 +322,27 @@ class DataCollector:
         """
         Get access sequence for sequence modeling.
         
+        Args:
+            window_seconds: Time window in seconds. Use 0 to skip time filtering
+                           and return all events. None uses the default window.
+            max_events: Maximum number of events to return.
+        
         Returns list of events as dicts suitable for ML training.
         """
-        window_seconds = window_seconds or self._window_seconds
-        cutoff = time.time() - window_seconds
+        # window_seconds=0 means "all events, no time filter"
+        if window_seconds is None:
+            window_seconds = self._window_seconds
         
         with self._lock:
-            events = [
-                e for e in self._events
-                if e.timestamp >= cutoff
-            ]
+            if window_seconds > 0:
+                cutoff = time.time() - window_seconds
+                events = [
+                    e for e in self._events
+                    if e.timestamp >= cutoff
+                ]
+            else:
+                # No time filter — return all events
+                events = list(self._events)
         
         # Limit events
         events = events[-max_events:]
@@ -404,6 +417,9 @@ class DataCollector:
         """
         Import access events from external source.
         
+        Uses bulk import mode to skip periodic Redis saves (O(n²) → O(n)).
+        The caller must call flush_to_redis() after this method returns.
+        
         Args:
             events: List of event dicts with keys: key_id, service_id, timestamp, 
                    access_type, cache_hit, latency_ms
@@ -412,23 +428,29 @@ class DataCollector:
         Returns:
             Number of events imported
         """
+        # Enable bulk import mode: skips periodic Redis saves and historical
+        # stats cleanup inside record_access to avoid O(n²) overhead.
+        self._bulk_import_mode = True
         imported = 0
-        for event_data in events:
-            try:
-                self.record_access(
-                    key_id=event_data.get("key_id", ""),
-                    service_id=event_data.get("service_id", "default"),
-                    access_type=event_data.get("access_type", "read"),
-                    latency_ms=event_data.get("latency_ms", 0.0),
-                    cache_hit=event_data.get("cache_hit", False),
-                    timestamp=event_data.get("timestamp"),  # Pass the timestamp!
-                    data_source=data_source
-                )
-                imported += 1
-            except Exception as e:
-                logger.warning(f"Failed to import event: {e}")
+        try:
+            for event_data in events:
+                try:
+                    self.record_access(
+                        key_id=event_data.get("key_id", ""),
+                        service_id=event_data.get("service_id", "default"),
+                        access_type=event_data.get("access_type", "read"),
+                        latency_ms=event_data.get("latency_ms", 0.0),
+                        cache_hit=event_data.get("cache_hit", False),
+                        timestamp=event_data.get("timestamp"),
+                        data_source=data_source
+                    )
+                    imported += 1
+                except Exception as e:
+                    logger.warning(f"Failed to import event: {e}")
+        finally:
+            self._bulk_import_mode = False
         
-        logger.info(f"Imported {imported} events from {data_source}")
+        logger.info(f"Imported {imported}/{len(events)} events from {data_source}")
         return imported
     
     def get_stats(self) -> Dict[str, Any]:
@@ -513,8 +535,15 @@ class DataCollector:
                 })
                 for e in events_snapshot
             ]
-            self._redis.delete(self.REDIS_KEY_PREFIX)
-            self._redis.rpush(self.REDIS_KEY_PREFIX, *events_data)
+            # Use pipeline + batched rpush to handle large event counts
+            # without exceeding Redis buffer limits.
+            BATCH_SIZE = 5000
+            pipe = self._redis.pipeline()
+            pipe.delete(self.REDIS_KEY_PREFIX)
+            for start in range(0, len(events_data), BATCH_SIZE):
+                batch = events_data[start:start + BATCH_SIZE]
+                pipe.rpush(self.REDIS_KEY_PREFIX, *batch)
+            pipe.execute()
             logger.debug(f"Saved {len(events_snapshot)} events to Redis")
         except Exception as e:
             logger.warning(f"Could not save to Redis: {e}")
