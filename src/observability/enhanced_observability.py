@@ -153,10 +153,12 @@ class EnhancedObservabilityService:
         predicted_value: str,
         actual_value: Optional[str] = None,
         confidence: Optional[float] = None,
-        latency_ms: Optional[float] = None
+        latency_ms: Optional[float] = None,
+        record_log: bool = True,
+        update_metrics: bool = True
     ) -> bool:
         """
-        Record a prediction with all metrics.
+        Record a prediction with all metrics, supporting batch operations.
         
         Args:
             version_id: Model version ID
@@ -165,6 +167,8 @@ class EnhancedObservabilityService:
             actual_value: Actual value (if known)
             confidence: Model confidence (0-1)
             latency_ms: Prediction latency in milliseconds
+            record_log: Whether to also record prediction log (default True)
+            update_metrics: Whether to also update per-key metrics (default True)
             
         Returns:
             True if successful
@@ -172,18 +176,40 @@ class EnhancedObservabilityService:
         try:
             is_correct = (predicted_value == actual_value) if actual_value else None
             
-            # Store in database
-            prediction = KeyPrediction(
-                version_id=version_id,
-                key=key,
-                predicted_value=predicted_value,
-                actual_value=actual_value,
-                is_correct=is_correct,
-                confidence=confidence,
-                timestamp=datetime.utcnow()
-            )
-            self.db.add(prediction)
-            self.db.commit()
+            # Store in database using savepoint for rollback isolation
+            try:
+                prediction = KeyPrediction(
+                    version_id=version_id,
+                    key=key,
+                    predicted_value=predicted_value,
+                    actual_value=actual_value,
+                    is_correct=is_correct,
+                    confidence=confidence,
+                    timestamp=datetime.utcnow()
+                )
+                self.db.add(prediction)
+                
+                # Batch: add prediction log in same transaction if requested
+                if record_log:
+                    log_entry = PredictionLog(
+                        version_id=version_id,
+                        key=key,
+                        predicted_value=predicted_value,
+                        actual_value=actual_value,
+                        confidence=confidence,
+                        is_correct=is_correct,
+                        latency_ms=latency_ms,
+                        timestamp=datetime.utcnow(),
+                    )
+                    self.db.add(log_entry)
+                
+                # Commit once instead of twice - reduces lock contention
+                self.db.commit()
+                
+            except Exception as e:
+                self.db.rollback()
+                logger.error(f"Failed to record prediction: {e}")
+                return False
             
             # Update EWMA if correctness known
             if is_correct is not None:
@@ -193,9 +219,12 @@ class EnhancedObservabilityService:
             if latency_ms:
                 self.latency_buckets[key].append(latency_ms)
             
+            # Update metrics separately (if requested) to avoid lock blocking prediction records
+            if update_metrics:
+                self.update_per_key_metrics(version_id, key)
+            
             return True
         except Exception as e:
-            self.db.rollback()
             logger.error(f"Failed to record prediction: {e}")
             return False
 
@@ -209,11 +238,16 @@ class EnhancedObservabilityService:
         confidence: Optional[float] = None,
         latency_ms: Optional[float] = None,
     ) -> bool:
-        """Persist a detailed runtime prediction log for debugging and audit."""
+        """Persist a detailed runtime prediction log for debugging and audit.
+        
+        Note: This is now integrated into record_prediction() for batch operations.
+        This method is kept for backward compatibility.
+        """
+        # This is handled by record_prediction() now, but keep for compatibility
+        if not version_id:
+            return False
+        
         try:
-            if not version_id:
-                return False
-
             log_entry = PredictionLog(
                 version_id=version_id,
                 key=key,
@@ -229,7 +263,7 @@ class EnhancedObservabilityService:
             return True
         except Exception as e:
             self.db.rollback()
-            logger.error(f"Failed to record prediction log: {e}")
+            logger.debug(f"Failed to record prediction log: {e}")
             return False
     
     def update_per_key_metrics(
@@ -239,6 +273,7 @@ class EnhancedObservabilityService:
     ) -> bool:
         """
         Calculate and update per-key metrics from recent predictions.
+        Optimized to reduce database lock contention with atomic transactions.
         
         Args:
             version_id: Model version ID
@@ -262,9 +297,13 @@ class EnhancedObservabilityService:
             if not recent_predictions:
                 return True
             
-            # Calculate accuracy
+            # Calculate metrics
             correct = sum(1 for p in recent_predictions if p.is_correct)
             accuracy = correct / len(recent_predictions) if recent_predictions else 0
+            error_count = sum(1 for p in recent_predictions if p.is_correct is False)
+            avg_confidence = sum(
+                float(p.confidence or 0.0) for p in recent_predictions
+            ) / len(recent_predictions)
             
             # Get drift score
             drift_score = self.drift_detector.get_drift_score(key)
@@ -276,13 +315,8 @@ class EnhancedObservabilityService:
                 cache_stats.get("hits", 0) / total if total > 0 else 0
             )
             
-            # Update in database
+            # Update in database as single atomic transaction to reduce lock contention
             try:
-                avg_confidence = sum(
-                    float(p.confidence or 0.0) for p in recent_predictions
-                ) / len(recent_predictions)
-                error_count = sum(1 for p in recent_predictions if p.is_correct is False)
-
                 existing = self.db.query(PerKeyMetric).filter(
                     and_(
                         PerKeyMetric.version_id == version_id,
@@ -318,10 +352,10 @@ class EnhancedObservabilityService:
                 return True
             except Exception as e:
                 self.db.rollback()
-                logger.error(f"Failed to update per-key metrics for {key}: {e}")
+                logger.debug(f"Failed to update per-key metrics for {key}: {e}")
                 return False
         except Exception as e:
-            logger.error(f"Failed to update per-key metrics: {e}")
+            logger.debug(f"Failed to query metrics for {key}: {e}")
             return False
     
     def record_cache_operation(

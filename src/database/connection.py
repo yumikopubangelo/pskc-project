@@ -59,26 +59,42 @@ class DatabaseConnection:
 
         if url.get_backend_name() == "sqlite":
             database_path = url.database or ""
+            
+            # Increase timeout to 30s for better concurrent access
+            # Enable busy_timeout for retry logic
+            sqlite_connect_args = {
+                "check_same_thread": False, 
+                "timeout": 30,  # increased from 15
+            }
+            
             if database_path and database_path != ":memory:":
                 db_dir = os.path.dirname(os.path.abspath(database_path))
                 if db_dir:
                     os.makedirs(db_dir, exist_ok=True)
-
-            engine_kwargs.update(
-                {
-                    "connect_args": {"check_same_thread": False},
+                # File-based SQLite: Do NOT use StaticPool to avoid concurrency locks
+                engine_kwargs.update({
+                    "connect_args": sqlite_connect_args
+                })
+            else:
+                # Memory-based SQLite: Requires StaticPool so the DB isn't wiped on disconnect
+                from sqlalchemy.pool import StaticPool
+                engine_kwargs.update({
+                    "connect_args": sqlite_connect_args,
                     "poolclass": StaticPool,
-                }
-            )
+                })
 
         cls._engine = create_engine(database_url, **engine_kwargs)
         
-        # Enable foreign keys for SQLite
+        # Enable foreign keys and WAL mode for SQLite
         @event.listens_for(Engine, "connect")
         def set_sqlite_pragma(dbapi_conn, connection_record):
-            """Enable foreign key constraints in SQLite."""
+            """Enable foreign key constraints and WAL mode in SQLite for better concurrent access."""
             cursor = dbapi_conn.cursor()
             cursor.execute("PRAGMA foreign_keys=ON")
+            # Enable WAL (Write-Ahead Logging) mode for better concurrent read/write performance
+            # WAL allows readers and writers to not block each other
+            cursor.execute("PRAGMA journal_mode=WAL")
+            cursor.execute("PRAGMA synchronous=NORMAL")  # Reduce sync overhead
             cursor.close()
         
         # Create session factory
@@ -117,34 +133,15 @@ class DatabaseConnection:
                 "sqlalchemy.url", str(cls._engine.url)
             )
 
-            import threading
-            
-            # Define the migration function
-            def run_migration():
-                command.upgrade(alembic_cfg, "head")
-
-            logger.info("Starting Alembic migrations (with 30s timeout)...")
-            migration_thread = threading.Thread(target=run_migration)
-            migration_thread.daemon = True
-            migration_thread.start()
-            migration_thread.join(timeout=30.0)
-
-            if migration_thread.is_alive():
-                logger.error(
-                    "CRITICAL: Alembic migrations timed out after 30 seconds! "
-                    "The database might be locked. Falling back to create_all."
-                )
-                Base.metadata.create_all(bind=cls._engine)
-                # We do not set migrations_applied = True because the migration didn't complete cleanly
-            else:
-                logger.info("Database schema is up-to-date (Alembic migrations applied successfully)")
-                migrations_applied = True
+            logger.info("Starting Alembic migrations synchronously...")
+            command.upgrade(alembic_cfg, "head")
+            logger.info("Database schema is up-to-date (Alembic migrations applied successfully)")
+            migrations_applied = True
 
         except ImportError:
             # Alembic not installed — fall back to SQLAlchemy create_all
             logger.warning(
                 "Alembic not available; falling back to create_all. "
-                "Install alembic for proper migration support."
             )
             Base.metadata.create_all(bind=cls._engine)
             logger.info("Database tables created/verified via create_all")
@@ -153,7 +150,36 @@ class DatabaseConnection:
             logger.error(f"Error applying database migrations: {e}")
             raise
 
+        cls._ensure_metadata_tables_exist()
         cls._repair_schema_compatibility(migrations_applied=migrations_applied)
+
+    @classmethod
+    def _ensure_metadata_tables_exist(cls) -> None:
+        """
+        Ensure ORM-defined tables exist even if a new model was added before a
+        matching Alembic migration was shipped to an existing environment.
+
+        Alembic remains the source of truth for schema evolution, but this
+        additive pass keeps local/dev and long-lived SQLite databases upgrade-safe
+        when a brand-new table is referenced by runtime code before the DB has
+        seen the corresponding migration.
+        """
+        if cls._engine is None:
+            raise RuntimeError("Engine not initialized")
+
+        inspector = inspect(cls._engine)
+        existing_tables = set(inspector.get_table_names())
+        metadata_tables = set(Base.metadata.tables.keys())
+        missing_tables = sorted(metadata_tables - existing_tables)
+
+        if not missing_tables:
+            return
+
+        Base.metadata.create_all(bind=cls._engine)
+        logger.warning(
+            "Created missing ORM tables via metadata compatibility pass: %s",
+            ", ".join(missing_tables),
+        )
 
     @classmethod
     def _repair_schema_compatibility(cls, *, migrations_applied: bool) -> None:
