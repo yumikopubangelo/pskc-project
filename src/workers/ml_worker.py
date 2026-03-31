@@ -71,11 +71,16 @@ class MLWorkerService:
         self._drift_detector     = None
         self._traffic_tracker    = None
         self._last_train_time    = 0.0          # epoch saat terakhir kita trigger training
+        self._last_drift_train_time = 0.0       # epoch saat terakhir drift trigger training (rate limiting)
         self._last_event_offset  = 0            # offset Redis agar tidak re-proses event lama
         self._consecutive_errors = 0
         self._training_ongoing   = False         # flag untuk track progress training terjadwal
         self._pattern_divergence_threshold = float(
             os.environ.get('ML_PATTERN_DIVERGENCE_THRESHOLD', '0.35')
+        )
+        # Minimum interval between drift-triggered training (prevent API hang from rapid drifts)
+        self._min_drift_train_interval = int(
+            os.environ.get('ML_MIN_DRIFT_TRAIN_INTERVAL_SECONDS', '120')
         )
 
         logger.info("=" * 60)
@@ -85,6 +90,7 @@ class MLWorkerService:
         logger.info(f"Update interval : {self._update_interval}s")
         logger.info(f"Min samples     : {self._min_samples}")
         logger.info(f"Drift threshold : {self._drift_threshold}")
+        logger.info(f"Min drift train interval: {self._min_drift_train_interval}s (rate limiting)")
         logger.info(f"River enabled   : {self._enable_river}")
         logger.info(f"Redis           : {self._redis_host}:{self._redis_port}")
 
@@ -377,9 +383,26 @@ class MLWorkerService:
         scheduled_due    = time_since_train >= self._scheduled_train_interval
 
         if stats.get("drift_detected"):
-            logger.warning("Drift detected — triggering retraining via API")
-            ok = self._trigger_training(reason="drift_detected")
-            stats["training_triggered"] = ok
+            # Rate limit drift-triggered training to prevent API hang
+            time_since_drift_train = time.time() - self._last_drift_train_time
+            if time_since_drift_train >= self._min_drift_train_interval:
+                logger.warning(
+                    "Drift detected — triggering retraining via API "
+                    "(%.1f seconds since last drift train)",
+                    time_since_drift_train
+                )
+                ok = self._trigger_training(reason="drift_detected")
+                stats["training_triggered"] = ok
+                if ok:
+                    self._last_drift_train_time = time.time()
+            else:
+                logger.warning(
+                    "Drift detected but training skipped — cooldown active "
+                    "(%.1f/%.1f seconds elapsed)",
+                    time_since_drift_train,
+                    self._min_drift_train_interval
+                )
+                stats["training_triggered"] = False
 
         elif not stats.get("training_triggered") and scheduled_due:
             # Cek dulu apakah API punya cukup data
