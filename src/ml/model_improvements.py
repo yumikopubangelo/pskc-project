@@ -625,6 +625,23 @@ class RFPreprocessor:
         obj._is_fitted = True
         return obj
 
+    @classmethod
+    def make_passthrough(cls, input_n: int, output_n: int) -> "RFPreprocessor":
+        """Construct an identity preprocessor for legacy artifacts.
+
+        Accepts *input_n* raw features and returns the first *output_n* by
+        simple truncation — no normalization, no feature selection.  Used when
+        a saved model has no stored preprocessor but the RF sub-model records
+        how many features it was trained on via ``n_features_in_``.
+        """
+        obj = cls(n_select=output_n)
+        obj._mean = np.zeros(input_n, dtype=np.float32)
+        obj._scale = np.ones(input_n, dtype=np.float32)
+        obj._non_constant_mask = np.ones(input_n, dtype=bool)
+        obj._selected_indices = np.arange(output_n, dtype=int)
+        obj._is_fitted = True
+        return obj
+
 
 # ============================================================
 # 8. MODEL PERFORMANCE TRACKER

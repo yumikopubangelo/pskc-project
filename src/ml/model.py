@@ -562,6 +562,7 @@ class EnsembleModel:
             "rf":     rf_weight,
             "markov": markov_weight,
         }
+        self._rf_shape_warning_cache = set()
 
         self.is_trained = False
         logger.info(
@@ -760,7 +761,12 @@ class EnsembleModel:
         return self._static_weights
 
     def preprocess_rf(self, X_rf: np.ndarray) -> np.ndarray:
-        """Apply fitted RF preprocessor (normalize, drop constant, select features)."""
+        """Apply fitted RF preprocessor (normalize, drop constant, select features).
+
+        If no preprocessor is stored (legacy artifact), a passthrough preprocessor
+        is auto-constructed from the RF model's ``n_features_in_`` metadata and
+        cached on the instance so that subsequent calls skip this fallback entirely.
+        """
         if self.rf_preprocessor is not None and self.rf_preprocessor.is_fitted:
             return self.rf_preprocessor.transform(X_rf)
 
@@ -775,21 +781,31 @@ class EnsembleModel:
         if expected is None or expected <= 0 or X_arr.shape[1] == expected:
             return X_arr
 
+        # Legacy artifact: rf_preprocessor was not saved.  Build a passthrough
+        # preprocessor from the RF model's n_features_in_ so that all future
+        # calls take the normal preprocessor path without repeating this log.
+        from src.ml.model_improvements import RFPreprocessor  # lazy import
+        input_n = int(X_arr.shape[1])
         if X_arr.shape[1] > expected:
-            logger.warning(
-                "EnsembleModel: truncating RF features from %d to %d for compatibility.",
-                X_arr.shape[1],
+            logger.info(
+                "EnsembleModel: legacy artifact detected (%d raw features, RF expects %d). "
+                "Auto-constructing passthrough preprocessor — retrain to persist it.",
+                input_n,
                 expected,
             )
+            self.rf_preprocessor = RFPreprocessor.make_passthrough(input_n, expected)
             return X_arr[:, :expected]
 
-        logger.warning(
-            "EnsembleModel: padding RF features from %d to %d for compatibility.",
-            X_arr.shape[1],
+        # input < expected: pad then build a passthrough that pads too
+        logger.info(
+            "EnsembleModel: legacy artifact detected (%d raw features, RF expects %d). "
+            "Auto-constructing passthrough preprocessor with zero-padding — retrain to persist it.",
+            input_n,
             expected,
         )
+        self.rf_preprocessor = RFPreprocessor.make_passthrough(expected, expected)
         padded = np.zeros((X_arr.shape[0], expected), dtype=X_arr.dtype)
-        padded[:, : X_arr.shape[1]] = X_arr
+        padded[:, :input_n] = X_arr
         return padded
 
     def predict_proba(

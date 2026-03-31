@@ -51,11 +51,16 @@ class IncrementalModelPersistence:
 
     # Default filename for incremental model
     DEFAULT_INCREMENTAL_FILE = "incremental_model.pskc.json"
+    RECOVERY_INCREMENTAL_FILE = "incremental_model.recovered.pskc.json"
 
     def __init__(self, model_dir: str = None, model_name: str = None):
         self._model_dir = model_dir or settings.effective_ml_model_registry_dir
         self._model_name = model_name or settings.ml_model_name
         self._file_path = os.path.join(self._model_dir, self.DEFAULT_INCREMENTAL_FILE)
+        self._max_file_bytes = max(
+            1,
+            int(getattr(settings, "ml_incremental_model_max_mb", 128) or 128),
+        ) * 1024 * 1024
         
         # In-memory cache
         self._cache: Optional[Dict[str, Any]] = None
@@ -68,11 +73,57 @@ class IncrementalModelPersistence:
         
         logger.info(f"IncrementalModelPersistence initialized: {self._file_path}")
 
+    def _quarantine_oversized_file(self, file_size: int) -> None:
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        backup_path = f"{self._file_path}.oversized_{timestamp}.bak"
+        try:
+            os.replace(self._file_path, backup_path)
+            logger.warning(
+                "Incremental model file exceeded safety limit (%s bytes > %s bytes). "
+                "Moved to backup: %s",
+                file_size,
+                self._max_file_bytes,
+                backup_path,
+            )
+        except Exception as exc:
+            logger.error(
+                "Incremental model file exceeded safety limit but could not be quarantined: %r",
+                exc,
+            )
+
+    def _switch_to_recovery_file(self) -> None:
+        recovery_path = os.path.join(self._model_dir, self.RECOVERY_INCREMENTAL_FILE)
+        if self._file_path == recovery_path:
+            return
+        logger.warning(
+            "Switching incremental model persistence to recovery file: %s",
+            recovery_path,
+        )
+        self._file_path = recovery_path
+
     def _load(self) -> None:
         """Load model from file into memory"""
         if not os.path.exists(self._file_path):
             self._cache = None
             logger.info("No existing incremental model found, will create new one")
+            return
+
+        try:
+            file_size = os.path.getsize(self._file_path)
+        except OSError as exc:
+            logger.error("Failed to stat incremental model file: %r", exc)
+            self._cache = None
+            return
+
+        if file_size > self._max_file_bytes:
+            previous_path = self._file_path
+            self._quarantine_oversized_file(file_size)
+            if os.path.exists(previous_path):
+                self._switch_to_recovery_file()
+                if os.path.exists(self._file_path):
+                    self._load()
+                    return
+            self._cache = None
             return
             
         try:
@@ -84,7 +135,7 @@ class IncrementalModelPersistence:
                 f"current_version={self._cache.get('current_version', 'N/A')}"
             )
         except Exception as e:
-            logger.error(f"Failed to load incremental model: {e}")
+            logger.error("Failed to load incremental model: %r", e)
             self._cache = None
 
     def _persist(self) -> bool:
@@ -271,6 +322,23 @@ class IncrementalModelPersistence:
             "required_improvement": min_improvement,
             "required_sample_delta": min_sample_delta,
         }
+
+    def evaluate_update(
+        self,
+        *,
+        metrics: Optional[Dict[str, Any]] = None,
+        training_info: Optional[Dict[str, Any]] = None,
+        reason: str = "manual",
+    ) -> Dict[str, Any]:
+        """
+        Evaluate whether a training result should replace the active model
+        without mutating persistence state.
+        """
+        if self._cache is None:
+            self._cache = self._build_empty_cache()
+        else:
+            self._ensure_cache_defaults()
+        return self._evaluate_acceptance(metrics=metrics, training_info=training_info, reason=reason)
 
     def record_training_attempt(
         self,

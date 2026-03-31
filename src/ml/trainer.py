@@ -20,8 +20,9 @@
 # ============================================================
 import time
 import threading
+import os
 import numpy as np
-from collections import deque
+from collections import Counter, defaultdict, deque
 from typing import Dict, List, Optional, Tuple, Any, Union
 import logging
 from datetime import datetime, timezone, timedelta
@@ -90,6 +91,13 @@ TRAINING_PROFILE_DEFAULTS: Dict[str, Dict[str, Any]] = {
     },
 }
 
+SAMPLE_STRATEGY_OPTIONS = {
+    "auto",
+    "all",
+    "realistic_priority",
+    "realistic_only",
+}
+
 
 # ============================================================
 # Concept Drift Detector moved to src/ml/drift.py
@@ -126,14 +134,8 @@ class ModelTrainer:
         self._batch_size = batch_size
         self._context_window = context_window
         self._model_name = model_name or settings.ml_model_name
-        self._registry = registry or get_model_registry()
-        if incremental_persistence is not None:
-            self._incremental_persistence = incremental_persistence
-        else:
-            self._incremental_persistence = IncrementalModelPersistence(
-                model_dir=getattr(self._registry, "model_dir", settings.effective_ml_model_registry_dir),
-                model_name=self._model_name,
-            )
+        self._registry = registry
+        self._incremental_persistence = incremental_persistence
         self._active_model_version: Optional[str] = None
         self._active_artifact_path: Optional[str] = None
         self._model_source = "runtime"
@@ -184,6 +186,33 @@ class ModelTrainer:
             f"min_samples={min_samples}, drift_threshold={drift_threshold:.0%}, "
             f"context_window={context_window}"
         )
+
+    def _get_registry(self):
+        if self._registry is None:
+            self._registry = get_model_registry()
+        return self._registry
+
+    def _get_incremental_persistence(self) -> IncrementalModelPersistence:
+        if self._incremental_persistence is None:
+            registry = self._get_registry()
+            self._incremental_persistence = IncrementalModelPersistence(
+                model_dir=getattr(registry, "model_dir", settings.effective_ml_model_registry_dir),
+                model_name=self._model_name,
+            )
+        return self._incremental_persistence
+
+    def _get_incremental_info(self) -> Dict[str, Any]:
+        if self._incremental_persistence is None:
+            return {
+                "exists": False,
+                "model_name": self._model_name,
+                "file_path": os.path.join(
+                    settings.effective_ml_model_registry_dir,
+                    IncrementalModelPersistence.DEFAULT_INCREMENTAL_FILE,
+                ),
+                "lazy": True,
+            }
+        return self._incremental_persistence.get_info()
 
     # ----------------------------------------------------------
     # Model Property
@@ -248,13 +277,43 @@ class ModelTrainer:
         )
 
     def load_active_model(self) -> Dict[str, Any]:
-        # Try to load from incremental model first
-        incremental_persistence = self._incremental_persistence
+        # Prefer the secure registry as the runtime source of truth.
+        registry = self._get_registry()
+        active_version = registry.get_active_version(self._model_name)
+        if active_version is not None:
+            try:
+                loaded_model = registry.load_model(self._model_name, actor="trainer")
+            except SecurityError as e:
+                logger.error("Security error loading active model: %s", e)
+                return {"success": False, "reason": "security_error", "detail": str(e)}
+
+            if loaded_model is not None:
+                self._model = loaded_model
+                self._active_model_version = active_version.version
+                self._active_artifact_path = active_version.file_path
+                self._model_source = "registry"
+                self._last_train_time = max(self._last_train_time, float(active_version.created_at or time.time()))
+                logger.info(
+                    "Loaded active runtime model %s:%s from %s",
+                    self._model_name,
+                    active_version.version,
+                    active_version.file_path,
+                )
+                return {
+                    "success": True,
+                    "version": active_version.version,
+                    "artifact_path": active_version.file_path,
+                    "source": self._model_source,
+                }
+
+        # Backward-compatible fallback for legacy incremental checkpoints that
+        # still contain a full serialized model artifact.
+        incremental_persistence = self._get_incremental_persistence()
         if incremental_persistence.exists():
             model_data = incremental_persistence.get_model_data()
-            if model_data is not None:
+            if isinstance(model_data, dict) and model_data.get("artifact_type") == "pskc_ensemble_v1":
                 try:
-                    loaded_model = self._registry._deserialize_model_checkpoint(model_data)
+                    loaded_model = self._get_registry()._deserialize_model_checkpoint(model_data)
                     if loaded_model is not None:
                         model_info = incremental_persistence.get_info()
                         metadata = model_info.get("metadata", {})
@@ -266,7 +325,7 @@ class ModelTrainer:
                             metadata.get("last_accepted_at") or model_info.get("updated_at")
                         )
                         logger.info(
-                            "Loaded active incremental model %s:%s from %s",
+                            "Loaded legacy incremental model %s:%s from %s",
                             self._model_name,
                             self._active_model_version,
                             self._active_artifact_path,
@@ -279,38 +338,8 @@ class ModelTrainer:
                         }
                 except Exception as e:
                     logger.error(f"Failed to load incremental model: {e}")
-        
-        # Fallback to registry
-        active_version = self._registry.get_active_version(self._model_name)
-        if active_version is None:
-            return {"success": False, "reason": "no_active_version"}
 
-        try:
-            loaded_model = self._registry.load_model(self._model_name, actor="trainer")
-        except SecurityError as e:
-            logger.error("Security error loading active model: %s", e)
-            return {"success": False, "reason": "security_error", "detail": str(e)}
-
-        if loaded_model is None:
-            return {"success": False, "reason": "load_failed"}
-
-        self._model = loaded_model
-        self._active_model_version = active_version.version
-        self._active_artifact_path = active_version.file_path
-        self._model_source = "registry"
-        self._last_train_time = max(self._last_train_time, float(active_version.created_at or time.time()))
-        logger.info(
-            "Loaded active runtime model %s:%s from %s",
-            self._model_name,
-            active_version.version,
-            active_version.file_path,
-        )
-        return {
-            "success": True,
-            "version": active_version.version,
-            "artifact_path": active_version.file_path,
-            "source": self._model_source,
-        }
+        return {"success": False, "reason": "no_active_version"}
 
     def ensure_runtime_model_loaded(self) -> Dict[str, Any]:
         if self._model is not None and getattr(self._model, "is_trained", False):
@@ -343,6 +372,287 @@ class ModelTrainer:
         budget = int(value or configured_default)
         return max(5, min(configured_max, budget))
 
+    def _normalize_sample_strategy(self, sample_strategy: Optional[str]) -> str:
+        candidate = str(
+            sample_strategy
+            or getattr(settings, "ml_training_sample_strategy", "auto")
+            or "auto"
+        ).strip().lower()
+        return candidate if candidate in SAMPLE_STRATEGY_OPTIONS else "auto"
+
+    def _is_noisy_key(self, key_id: str) -> bool:
+        lowered = str(key_id or "").lower()
+        return any(token in lowered for token in ("noise", "random", "dummy", "temp", "junk", "test"))
+
+    def _is_high_churn_key(self, key_id: str) -> bool:
+        lowered = str(key_id or "").lower()
+        return any(token in lowered for token in (":session:", "session:", ":rot:", "rot:"))
+
+    def _select_training_events(
+        self,
+        access_data: List[Dict[str, Any]],
+        *,
+        sample_strategy: Optional[str] = None,
+    ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+        requested_strategy = self._normalize_sample_strategy(sample_strategy)
+        if not access_data:
+            return [], {
+                "requested_strategy": requested_strategy,
+                "applied_strategy": requested_strategy,
+                "recommendation": "No training events available yet.",
+                "total_events": 0,
+                "total_unique_keys": 0,
+                "selected_events": 0,
+                "selected_unique_keys": 0,
+                "coverage_ratio": 0.0,
+                "key_coverage_ratio": 0.0,
+            }
+
+        min_key_events = max(2, int(getattr(settings, "ml_training_realistic_key_min_events", 3) or 3))
+        score_threshold = float(getattr(settings, "ml_training_realistic_score_threshold", 0.55) or 0.55)
+        target_coverage = float(getattr(settings, "ml_training_realistic_target_coverage", 0.72) or 0.72)
+
+        key_counts: Counter = Counter()
+        key_services: Dict[str, set] = defaultdict(set)
+        key_cache_hits: Dict[str, int] = defaultdict(int)
+        key_source_counts: Dict[str, Counter] = defaultdict(Counter)
+        key_pattern_counts: Dict[str, Counter] = defaultdict(Counter)
+        key_hint_sums: Dict[str, float] = defaultdict(float)
+        key_hint_counts: Dict[str, int] = defaultdict(int)
+        key_timestamps: Dict[str, List[float]] = defaultdict(list)
+
+        noisy_events = 0
+        high_churn_events = 0
+        production_events = 0
+        realistic_sim_events = 0
+        random_sim_events = 0
+
+        for event in access_data:
+            key_id = str(event.get("key_id") or "")
+            if not key_id:
+                continue
+
+            service_id = str(event.get("service_id") or "default")
+            metadata = event.get("metadata") if isinstance(event.get("metadata"), dict) else {}
+            source = str(event.get("data_source") or "production").lower()
+            pattern_type = str(metadata.get("pattern_type") or "").lower()
+            realism_hint = metadata.get("realism_score_hint")
+
+            key_counts[key_id] += 1
+            key_services[key_id].add(service_id)
+            key_cache_hits[key_id] += int(bool(event.get("cache_hit")))
+            key_source_counts[key_id][source] += 1
+            key_pattern_counts[key_id][pattern_type or "unknown"] += 1
+
+            timestamp = float(event.get("timestamp") or 0.0)
+            if timestamp > 0:
+                key_timestamps[key_id].append(timestamp)
+
+            try:
+                if realism_hint is not None:
+                    key_hint_sums[key_id] += float(realism_hint)
+                    key_hint_counts[key_id] += 1
+            except (TypeError, ValueError):
+                pass
+
+            if self._is_noisy_key(key_id):
+                noisy_events += 1
+            if self._is_high_churn_key(key_id):
+                high_churn_events += 1
+            if source == "production":
+                production_events += 1
+            elif pattern_type == "realistic":
+                realistic_sim_events += 1
+            elif pattern_type == "random":
+                random_sim_events += 1
+
+        total_events = max(len(access_data), 1)
+        total_unique_keys = max(len(key_counts), 1)
+        low_support_keys = sum(1 for count in key_counts.values() if count < min_key_events)
+        low_support_ratio = low_support_keys / total_unique_keys
+        noisy_ratio = noisy_events / total_events
+        high_churn_ratio = high_churn_events / total_events
+        key_density = total_unique_keys / total_events
+
+        recommended_strategy = "all"
+        if (
+            noisy_ratio > 0.06
+            or high_churn_ratio > 0.12
+            or low_support_ratio > 0.45
+            or key_density > 0.08
+            or random_sim_events > realistic_sim_events
+        ):
+            recommended_strategy = "realistic_priority"
+
+        applied_strategy = recommended_strategy if requested_strategy == "auto" else requested_strategy
+
+        key_profiles: List[Dict[str, Any]] = []
+        for key_id, count in key_counts.items():
+            unique_services = len(key_services[key_id])
+            hit_rate = key_cache_hits[key_id] / max(count, 1)
+            source_counts = key_source_counts[key_id]
+            pattern_counts = key_pattern_counts[key_id]
+            production_share = source_counts.get("production", 0) / max(count, 1)
+            realistic_pattern_share = pattern_counts.get("realistic", 0) / max(count, 1)
+            random_pattern_share = pattern_counts.get("random", 0) / max(count, 1)
+            avg_hint = (
+                key_hint_sums[key_id] / key_hint_counts[key_id]
+                if key_hint_counts[key_id] > 0
+                else None
+            )
+
+            freq_score = min(1.0, math.log1p(count) / math.log1p(40))
+            service_score = min(1.0, unique_services / 3.0)
+            hit_score = min(1.0, hit_rate / 0.85) if hit_rate > 0 else 0.0
+
+            timestamps = sorted(key_timestamps.get(key_id, []))
+            if len(timestamps) >= 4:
+                intervals = [
+                    max(0.001, timestamps[idx] - timestamps[idx - 1])
+                    for idx in range(1, len(timestamps))
+                ]
+                mean_interval = sum(intervals) / len(intervals)
+                variance = sum((interval - mean_interval) ** 2 for interval in intervals) / len(intervals)
+                std_dev = math.sqrt(max(variance, 0.0))
+                coeff_var = std_dev / mean_interval if mean_interval > 0 else 2.0
+                regularity_score = max(0.0, 1.0 - min(coeff_var, 2.0) / 2.0)
+            elif len(timestamps) >= 2:
+                regularity_score = 0.55
+            else:
+                regularity_score = 0.35
+
+            source_bonus = 0.12 * production_share
+            realistic_bonus = 0.10 * realistic_pattern_share
+            hint_bonus = 0.10 * max(0.0, (avg_hint or 0.5) - 0.5)
+            low_count_penalty = 0.15 if count < min_key_events else 0.0
+            noise_penalty = 0.35 if self._is_noisy_key(key_id) else 0.0
+            churn_penalty = 0.15 if self._is_high_churn_key(key_id) else 0.0
+            random_penalty = 0.12 * random_pattern_share
+
+            realism_score = (
+                0.42 * freq_score
+                + 0.14 * service_score
+                + 0.18 * hit_score
+                + 0.16 * regularity_score
+                + source_bonus
+                + realistic_bonus
+                + hint_bonus
+                - low_count_penalty
+                - noise_penalty
+                - churn_penalty
+                - random_penalty
+            )
+            realism_score = max(0.0, min(1.0, realism_score))
+
+            key_profiles.append(
+                {
+                    "key_id": key_id,
+                    "count": count,
+                    "realism_score": round(realism_score, 4),
+                    "unique_services": unique_services,
+                    "hit_rate": round(hit_rate, 4),
+                    "production_share": round(production_share, 4),
+                    "pattern_realistic_share": round(realistic_pattern_share, 4),
+                    "random_pattern_share": round(random_pattern_share, 4),
+                }
+            )
+
+        ranked_profiles = sorted(
+            key_profiles,
+            key=lambda item: (item["realism_score"], item["count"], item["unique_services"]),
+            reverse=True,
+        )
+
+        selected_keys: set[str] = set()
+        if applied_strategy == "all":
+            selected_keys = {item["key_id"] for item in ranked_profiles}
+        elif applied_strategy == "realistic_only":
+            selected_keys = {
+                item["key_id"]
+                for item in ranked_profiles
+                if item["realism_score"] >= score_threshold and item["count"] >= min_key_events
+            }
+        else:
+            soft_threshold = score_threshold * 0.75
+            eligible_profiles = [
+                item
+                for item in ranked_profiles
+                if item["realism_score"] >= soft_threshold and item["count"] >= min_key_events
+            ]
+            candidate_profiles = eligible_profiles or ranked_profiles
+            minimum_selected_keys = min(len(candidate_profiles), max(2, int(total_unique_keys * 0.05)))
+            selected_event_budget = 0
+            for item in candidate_profiles:
+                selected_keys.add(item["key_id"])
+                selected_event_budget += item["count"]
+                if (
+                    selected_event_budget / total_events >= target_coverage
+                    and len(selected_keys) >= minimum_selected_keys
+                ):
+                    break
+
+        selected_events = [event for event in access_data if str(event.get("key_id") or "") in selected_keys]
+
+        fallback_used = False
+        minimum_selected_events = max(50, min(self._min_samples, 200))
+        if applied_strategy != "all" and len(selected_events) < minimum_selected_events:
+            selected_keys.clear()
+            running_events = 0
+            target_events = min(total_events, max(minimum_selected_events, int(total_events * 0.55)))
+            for item in ranked_profiles:
+                selected_keys.add(item["key_id"])
+                running_events += item["count"]
+                if running_events >= target_events:
+                    break
+            selected_events = [event for event in access_data if str(event.get("key_id") or "") in selected_keys]
+            fallback_used = True
+
+        selected_unique_keys = len(selected_keys)
+        coverage_ratio = len(selected_events) / total_events if total_events else 0.0
+        key_coverage_ratio = selected_unique_keys / total_unique_keys if total_unique_keys else 0.0
+        excluded_examples = [
+            item["key_id"]
+            for item in ranked_profiles
+            if item["key_id"] not in selected_keys
+        ][:8]
+        selected_examples = [
+            item
+            for item in ranked_profiles
+            if item["key_id"] in selected_keys
+        ][:8]
+
+        recommendation = {
+            "all": "Use all samples if the dataset is already dominated by stable, repeated keys.",
+            "realistic_priority": "Prioritise stable, repeated keys while keeping broad enough coverage for training.",
+            "realistic_only": "Use only the strongest realistic keys. Highest purity, but can underfit if coverage becomes too small.",
+        }.get(applied_strategy, "Backend chose the training sample mix automatically.")
+
+        selection_summary = {
+            "requested_strategy": requested_strategy,
+            "applied_strategy": applied_strategy,
+            "fallback_used": fallback_used,
+            "recommendation": recommendation,
+            "recommended_strategy": recommended_strategy,
+            "score_threshold": round(score_threshold, 2),
+            "min_key_events": min_key_events,
+            "target_coverage": round(target_coverage, 2),
+            "total_events": len(access_data),
+            "total_unique_keys": len(key_counts),
+            "selected_events": len(selected_events),
+            "selected_unique_keys": selected_unique_keys,
+            "coverage_ratio": round(coverage_ratio, 4),
+            "key_coverage_ratio": round(key_coverage_ratio, 4),
+            "noisy_event_ratio": round(noisy_ratio, 4),
+            "high_churn_event_ratio": round(high_churn_ratio, 4),
+            "low_support_key_ratio": round(low_support_ratio, 4),
+            "production_event_ratio": round(production_events / total_events, 4),
+            "realistic_simulation_event_ratio": round(realistic_sim_events / total_events, 4),
+            "random_simulation_event_ratio": round(random_sim_events / total_events, 4),
+            "selected_key_examples": selected_examples,
+            "excluded_key_examples": excluded_examples,
+        }
+        return selected_events, selection_summary
+
     def _estimate_training_minutes(
         self,
         *,
@@ -369,8 +679,10 @@ class ModelTrainer:
         unique_keys: int,
         quality_profile: Optional[str] = None,
         time_budget_minutes: Optional[int] = None,
+        sample_strategy: Optional[str] = None,
     ) -> Dict[str, Any]:
         profile_name = self._normalize_quality_profile(quality_profile)
+        normalized_sample_strategy = self._normalize_sample_strategy(sample_strategy)
         profile = TRAINING_PROFILE_DEFAULTS[profile_name]
         budget_minutes = self._clamp_time_budget_minutes(time_budget_minutes)
         tuner = HyperparameterTuner()
@@ -429,6 +741,7 @@ class ModelTrainer:
 
         return {
             "quality_profile": profile_name,
+            "sample_strategy": normalized_sample_strategy,
             "time_budget_minutes": budget_minutes,
             "window_seconds": int(profile["window_seconds"]),
             "max_events": int(profile["max_events"]),
@@ -447,6 +760,7 @@ class ModelTrainer:
         *,
         quality_profile: Optional[str] = None,
         time_budget_minutes: Optional[int] = None,
+        sample_strategy: Optional[str] = None,
     ) -> Dict[str, Any]:
         # Use modular DataLoader for sample stats
         sample_stats = self._data_loader.get_sample_stats()
@@ -455,22 +769,63 @@ class ModelTrainer:
 
         # Resolve profile and time budget
         profile_name = self._normalize_quality_profile(quality_profile)
+        normalized_sample_strategy = self._normalize_sample_strategy(sample_strategy)
         profile = TRAINING_PROFILE_DEFAULTS[profile_name]
         budget_minutes = self._clamp_time_budget_minutes(time_budget_minutes)
 
+        selection_preview = {
+            "requested_strategy": normalized_sample_strategy,
+            "applied_strategy": normalized_sample_strategy,
+            "selected_events": sample_count,
+            "selected_unique_keys": unique_keys,
+            "coverage_ratio": 1.0,
+            "key_coverage_ratio": 1.0,
+            "recommendation": "Use all available samples.",
+            "recommended_strategy": "all",
+        }
+
+        effective_sample_count = sample_count
+        effective_unique_keys = unique_keys
+        if sample_count > 0:
+            preview_limit = min(
+                int(getattr(settings, "ml_training_realistic_preview_events", 12000) or 12000),
+                int(profile.get("max_events", sample_count) or sample_count),
+            )
+            try:
+                preview_events = self._collector.get_access_sequence(
+                    window_seconds=int(profile.get("window_seconds", 604800)),
+                    max_events=max(200, preview_limit),
+                )
+                if preview_events:
+                    _, selection_preview = self._select_training_events(
+                        preview_events,
+                        sample_strategy=normalized_sample_strategy,
+                    )
+                    effective_sample_count = max(
+                        1,
+                        int(round(sample_count * float(selection_preview.get("coverage_ratio", 1.0) or 1.0))),
+                    )
+                    effective_unique_keys = max(
+                        1,
+                        int(round(unique_keys * float(selection_preview.get("key_coverage_ratio", 1.0) or 1.0))),
+                    )
+            except Exception:
+                logger.debug("Training selection preview unavailable", exc_info=True)
+
         # Use AdaptiveHyperparameterTuner for epoch/batch proposals
         adaptive_overrides = self._adaptive_tuner.propose(
-            sample_count=sample_count,
+            sample_count=effective_sample_count,
             time_budget_minutes=budget_minutes,
             profile=profile,
         )
 
         # Build the full training plan (uses upstream HyperparameterTuner internally)
         plan = self._build_training_plan(
-            sample_count=sample_count,
-            unique_keys=unique_keys,
+            sample_count=effective_sample_count,
+            unique_keys=effective_unique_keys,
             quality_profile=quality_profile,
             time_budget_minutes=time_budget_minutes,
+            sample_strategy=normalized_sample_strategy,
         )
 
         # Apply adaptive overrides to LSTM config if they would tighten the caps
@@ -482,8 +837,8 @@ class ModelTrainer:
 
         # Recalculate estimate using _adaptive_tuner
         estimated_minutes = self._adaptive_tuner.estimate_minutes(
-            sample_count=sample_count,
-            unique_keys=unique_keys,
+            sample_count=effective_sample_count,
+            unique_keys=effective_unique_keys,
             profile_name=profile_name,
             rf_trees=int(plan.get("hyperparameters", {}).get("random_forest", {}).get("n_estimators", 50)),
             lstm_epochs=int(lstm_cfg.get("epochs", 10)),
@@ -494,8 +849,8 @@ class ModelTrainer:
 
         # Build immediate frontend payload via ProgressManager
         plan_payload = self._progress_manager.initial_plan_payload(
-            sample_count=sample_count,
-            unique_keys=unique_keys,
+            sample_count=effective_sample_count,
+            unique_keys=effective_unique_keys,
             estimated_minutes=estimated_minutes,
             quality_profile=profile_name,
             time_budget_minutes=budget_minutes,
@@ -507,6 +862,9 @@ class ModelTrainer:
         return {
             "collector": collector_stats,
             "plan_preview": plan_payload,
+            "selection_preview": selection_preview,
+            "effective_sample_count": effective_sample_count,
+            "effective_unique_keys": effective_unique_keys,
             **plan,
         }
 
@@ -537,55 +895,107 @@ class ModelTrainer:
         val_samples: int,
         reason: str,
     ) -> Dict[str, Any]:
-        incremental_persistence = self._incremental_persistence
-        
-        # Serialize the model using the registry's serialization method
-        model_data = self._registry.serialize_model_checkpoint(model)
-        
+        incremental_persistence = self._get_incremental_persistence()
+
         # Prepare training info
         training_info = {
             "sample_count": sample_count,
             "train_samples": train_samples,
             "val_samples": val_samples,
         }
-        
-        # Update the incremental model
-        result = incremental_persistence.update(
-            model_data=model_data,
-            reason=reason,
+
+        decision = incremental_persistence.evaluate_update(
             metrics=metrics,
             training_info=training_info,
+            reason=reason,
         )
-        
-        if not result.get("success"):
-            logger.error("Failed to update incremental model: %s", result.get("reason"))
-            return {"success": False, "reason": result.get("reason")}
-        
-        if result.get("accepted"):
-            self._active_model_version = result.get("version")
-            self._active_artifact_path = incremental_persistence.get_info().get("file_path")
-            self._model_source = "incremental"
-            logger.info(
-                "Updated incremental model %s:%s at %s",
-                self._model_name,
-                self._active_model_version,
-                self._active_artifact_path,
+        accepted = bool(decision.get("accepted"))
+
+        if not accepted:
+            attempt_result = incremental_persistence.record_training_attempt(
+                reason=reason,
+                metrics=metrics,
+                training_info=training_info,
+                status="rejected",
+                detail=decision.get("reason"),
             )
-        else:
             logger.info(
                 "Retained active model %s:%s after training attempt (%s)",
                 self._model_name,
                 self._active_model_version,
-                result.get("decision_reason"),
+                decision.get("reason"),
             )
-        
+            return {
+                "success": bool(attempt_result.get("success")),
+                "accepted": False,
+                "version": self._active_model_version,
+                "artifact_path": self._active_artifact_path,
+                "decision_reason": decision.get("reason"),
+                "attempt_count": attempt_result.get("attempt_count"),
+            }
+
+        registry = self._get_registry()
+        registry_version = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        registry_saved = registry.save_model(
+            model_name=self._model_name,
+            model=model,
+            version=registry_version,
+            metrics=metrics,
+            description=(
+                f"Trained on {sample_count} samples | "
+                f"val={float(metrics.get('accuracy', 0.0) or 0.0):.2%} | "
+                f"top10={float(metrics.get('top_10_accuracy', 0.0) or 0.0):.2%}"
+            ),
+            provenance={
+                "source": "trainer.full_retrain",
+                "reason": reason,
+                "training_info": training_info,
+            },
+            stage=settings.ml_model_stage,
+            actor="trainer",
+            activate=True,
+        )
+        if not registry_saved:
+            logger.error("Failed to persist active model to secure registry")
+            return {"success": False, "reason": "registry_save_failed"}
+
+        active_registry_version = registry.get_active_version(self._model_name)
+        registry_artifact_path = active_registry_version.file_path if active_registry_version else None
+
+        metadata_result = incremental_persistence.update(
+            model_data={
+                "artifact_type": "pskc_registry_reference_v1",
+                "registry_version": registry_version,
+                "artifact_path": registry_artifact_path,
+                "source": "registry",
+            },
+            reason=reason,
+            metrics=metrics,
+            training_info=training_info,
+        )
+        if not metadata_result.get("success"):
+            logger.warning(
+                "Secure registry save succeeded, but incremental metadata persistence failed: %s",
+                metadata_result.get("reason"),
+            )
+
+        self._active_model_version = registry_version
+        self._active_artifact_path = registry_artifact_path
+        self._model_source = "registry"
+        logger.info(
+            "Saved active model to secure registry %s:%s at %s",
+            self._model_name,
+            self._active_model_version,
+            self._active_artifact_path,
+        )
+
         return {
             "success": True,
-            "accepted": bool(result.get("accepted")),
-            "version": result.get("version"),
+            "accepted": True,
+            "version": registry_version,
             "artifact_path": self._active_artifact_path,
-            "decision_reason": result.get("decision_reason"),
-            "attempt_count": result.get("attempt_count"),
+            "decision_reason": decision.get("reason"),
+            "attempt_count": metadata_result.get("attempt_count"),
         }
 
     def _record_training_run_in_database(
@@ -684,6 +1094,32 @@ class ModelTrainer:
             logger.error("Failed to persist training run to database: %s", exc)
             return {"success": False, "reason": str(exc)}
 
+    def _save_sample_profile(
+        self,
+        db_record: Dict[str, Any],
+        access_data: List[Dict[str, Any]],
+        X_rf: np.ndarray,
+    ) -> None:
+        """
+        Extract and persist a training sample profile after a training run.
+        Non-fatal: failures are logged but do not affect overall training.
+        """
+        version_id = db_record.get("version_id") if db_record else None
+        if not version_id:
+            return
+        try:
+            from src.ml.sample_profiler import SampleProfiler
+            from src.database.connection import DatabaseConnection
+
+            profile = SampleProfiler.extract_profile(access_data, X_rf)
+            db = DatabaseConnection.get_session()
+            try:
+                SampleProfiler.save_profile(version_id, profile, db)
+            finally:
+                db.close()
+        except Exception as exc:
+            logger.debug("Failed to save sample profile: %s", exc)
+
     def train_online(self, reason: str = "drift_detected") -> Dict[str, Any]:
         """
         Lightweight drift-triggered online learning path.
@@ -756,6 +1192,7 @@ class ModelTrainer:
         reason: str = "scheduled",
         quality_profile: Optional[str] = None,
         time_budget_minutes: Optional[int] = None,
+        sample_strategy: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Train the model on collected data.
@@ -770,6 +1207,7 @@ class ModelTrainer:
             reason: Why training was triggered ("scheduled" | "drift_detected" | "automatic" | "manual")
             quality_profile: "fast" | "balanced" | "thorough" for full retraining
             time_budget_minutes: Requested upper bound for the full retrain budget
+            sample_strategy: "auto" | "all" | "realistic_priority" | "realistic_only"
 
         Returns:
             Training results dict
@@ -838,6 +1276,7 @@ class ModelTrainer:
                 if is_automatic:
                     training_plan = {
                         "quality_profile": "online",
+                        "sample_strategy": "online",
                         "time_budget_minutes": 5,
                         "window_seconds": 21600,
                         "max_events": 50000,
@@ -851,6 +1290,7 @@ class ModelTrainer:
                         unique_keys=int(stats.get("unique_keys", 0) or 0),
                         quality_profile=quality_profile,
                         time_budget_minutes=time_budget_minutes,
+                        sample_strategy=sample_strategy,
                     )
 
                 window_seconds = int(training_plan.get("window_seconds", 604800))
@@ -884,6 +1324,24 @@ class ModelTrainer:
                     tracker.finish_training(success=False)
                     return {"success": False, "reason": "no_data"}
 
+                training_selection = {
+                    "requested_strategy": training_plan.get("sample_strategy", "all"),
+                    "applied_strategy": "all",
+                    "selected_events": len(access_data),
+                    "selected_unique_keys": len({item.get("key_id") for item in access_data}),
+                    "coverage_ratio": 1.0,
+                    "key_coverage_ratio": 1.0,
+                    "recommendation": "Using all currently loaded events.",
+                }
+                if not is_automatic:
+                    selected_access_data, training_selection = self._select_training_events(
+                        access_data,
+                        sample_strategy=training_plan.get("sample_strategy"),
+                    )
+                    if selected_access_data:
+                        access_data = selected_access_data
+                    training_plan["selection_preview"] = training_selection
+
                 tracker.update_progress(
                     phase=TrainingPhase.PREPROCESSING,
                     progress_percent=15.0,
@@ -892,6 +1350,8 @@ class ModelTrainer:
                     message=f"Loaded {len(access_data)} events, preprocessing...",
                     details={
                         "total_samples": len(access_data),
+                        "selected_unique_keys": training_selection.get("selected_unique_keys"),
+                        "sample_strategy": training_selection.get("applied_strategy"),
                         "quality_profile": training_plan.get("quality_profile"),
                         "time_budget_minutes": training_plan.get("time_budget_minutes"),
                         "estimated_training_minutes": training_plan.get("estimated_training_minutes"),
@@ -983,6 +1443,8 @@ class ModelTrainer:
                 details={
                     "samples_processed": len(access_data),
                     "total_samples": len(access_data),
+                    "selected_unique_keys": training_selection.get("selected_unique_keys"),
+                    "sample_strategy": training_selection.get("applied_strategy"),
                     "features_count": X_rf_train.shape[1] if len(X_rf_train) > 0 else 0,
                     "train_samples": len(X_rf_train),
                     "val_samples": len(X_rf_val),
@@ -1057,9 +1519,11 @@ class ModelTrainer:
                 "train_samples": len(X_rf_train),
                 "val_samples": len(X_rf_val),
                 "quality_profile": training_plan.get("quality_profile"),
+                "sample_strategy": training_selection.get("applied_strategy"),
                 "time_budget_minutes": training_plan.get("time_budget_minutes"),
                 "estimated_training_minutes": training_plan.get("estimated_training_minutes"),
                 "hyperparameters": training_plan.get("hyperparameters"),
+                "sample_selection": training_selection,
             }
 
             # Check if model accuracy meets minimum threshold for active model
@@ -1068,7 +1532,7 @@ class ModelTrainer:
                     f"Model accuracy {val_accuracy:.2%} is below threshold {self._min_accuracy_for_active:.2%}. "
                     f"Model will not be set as active."
                 )
-                attempt_result = self._incremental_persistence.record_training_attempt(
+                attempt_result = self._get_incremental_persistence().record_training_attempt(
                     reason=reason,
                     metrics=val_metrics,
                     training_info=training_info,
@@ -1084,6 +1548,10 @@ class ModelTrainer:
                     decision_reason="accuracy_below_threshold",
                     training_time_s=round(training_time, 2),
                     completed_at=completed_at,
+                )
+                # Save training sample profile for pattern comparison
+                self._save_sample_profile(
+                    db_training_record, access_data, X_rf_train
                 )
                 result = {
                     "success": True,
@@ -1104,9 +1572,11 @@ class ModelTrainer:
                     "db_version_id": db_training_record.get("version_id"),
                     "db_version_number": db_training_record.get("version_number"),
                     "quality_profile": training_plan.get("quality_profile"),
+                    "sample_strategy": training_selection.get("applied_strategy"),
                     "time_budget_minutes": training_plan.get("time_budget_minutes"),
                     "estimated_training_minutes": training_plan.get("estimated_training_minutes"),
                     "hyperparameters": training_plan.get("hyperparameters"),
+                    "sample_selection": training_selection,
                 }
                 self._training_history.append(result)
                 self._record_training_metrics(
@@ -1130,6 +1600,7 @@ class ModelTrainer:
                         "model_accepted": False,
                         "training_time_s": round(training_time, 2),
                         "sample_count": len(access_data),
+                        "sample_strategy": training_selection.get("applied_strategy"),
                         "quality_profile": training_plan.get("quality_profile"),
                         "time_budget_minutes": training_plan.get("time_budget_minutes"),
                         "estimated_training_minutes": training_plan.get("estimated_training_minutes"),
@@ -1180,6 +1651,10 @@ class ModelTrainer:
                 training_time_s=round(training_time, 2),
                 completed_at=completed_at,
             )
+            # Save training sample profile for pattern comparison
+            self._save_sample_profile(
+                db_training_record, access_data, X_rf_train
+            )
 
             result = {
                 "success": True,
@@ -1203,9 +1678,11 @@ class ModelTrainer:
                 "db_version_id": db_training_record.get("version_id"),
                 "db_version_number": db_training_record.get("version_number"),
                 "quality_profile": training_plan.get("quality_profile"),
+                "sample_strategy": training_selection.get("applied_strategy"),
                 "time_budget_minutes": training_plan.get("time_budget_minutes"),
                 "estimated_training_minutes": training_plan.get("estimated_training_minutes"),
                 "hyperparameters": training_plan.get("hyperparameters"),
+                "sample_selection": training_selection,
             }
 
             self._training_history.append(result)
@@ -1235,6 +1712,7 @@ class ModelTrainer:
                     "model_accepted": accepted,
                     "training_time_s": round(training_time, 2),
                     "sample_count": len(access_data),
+                    "sample_strategy": training_selection.get("applied_strategy"),
                     "quality_profile": training_plan.get("quality_profile"),
                     "time_budget_minutes": training_plan.get("time_budget_minutes"),
                     "estimated_training_minutes": training_plan.get("estimated_training_minutes"),
@@ -1496,8 +1974,9 @@ class ModelTrainer:
     # ----------------------------------------------------------
 
     def get_stats(self) -> Dict[str, Any]:
-        incremental_info = self._incremental_persistence.get_info()
+        incremental_info = self._get_incremental_info()
         training_plan = self.get_training_plan()
+        current_model = self._model
         return {
             "training_count":  self._training_count,
             "last_train_time": self._last_train_time,
@@ -1508,7 +1987,7 @@ class ModelTrainer:
             "is_training_scheduled": self._is_training_scheduled,
             "is_training_automatic": self._is_training_automatic,
             "drift_stats":     self._drift_detector.get_stats(),
-            "model_stats":     self.model.get_model_stats(),
+            "model_stats":     current_model.get_model_stats() if current_model is not None else {},
             "collector_stats": self._collector.get_stats(),
             "model_name":      self._model_name,
             "active_version":  self._active_model_version,

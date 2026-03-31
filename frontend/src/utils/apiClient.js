@@ -86,15 +86,15 @@ class ApiClient {
 
   // Cache operations
   async getCacheStats() {
-    return this.request('/cache/stats');
+    return this.request('/keys/cache/stats');
   }
 
   async getCacheKeys() {
-    return this.request('/cache/keys');
+    return this.request('/keys/keys');
   }
 
   async invalidateKey(key) {
-    return this.request(`/cache/invalidate/${key}`, {
+    return this.request(`/keys/invalidate/${key}`, {
       method: 'POST',
     });
   }
@@ -210,6 +210,10 @@ class ApiClient {
       key_mode: pick(options.keyMode, options.key_mode) || 'auto',
       virtual_nodes: pick(options.virtualNodes, options.virtual_nodes) || 3,
     };
+    const concurrentWorkers = pick(options.concurrentWorkers, options.concurrent_workers);
+    if (concurrentWorkers) {
+      params.concurrent_workers = concurrentWorkers;
+    }
     const maxRequests = pick(options.maxRequests, options.max_requests);
     if (maxRequests) {
       params.max_requests = maxRequests;
@@ -217,6 +221,7 @@ class ApiClient {
     return this.request('/simulation/live-session/start', {
       method: 'POST',
       params,
+      timeout: 30000,
     });
   }
 
@@ -255,6 +260,10 @@ class ApiClient {
 
   async getAccuracyChartData() {
     return this.request('/metrics/accuracy');
+  }
+
+  async getPrefetchMetrics() {
+    return this.request('/metrics/prefetch');
   }
 
   // Keys

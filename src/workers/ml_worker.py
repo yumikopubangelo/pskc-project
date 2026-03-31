@@ -69,10 +69,14 @@ class MLWorkerService:
         # State internal
         self._river_learner      = None
         self._drift_detector     = None
+        self._traffic_tracker    = None
         self._last_train_time    = 0.0          # epoch saat terakhir kita trigger training
         self._last_event_offset  = 0            # offset Redis agar tidak re-proses event lama
         self._consecutive_errors = 0
         self._training_ongoing   = False         # flag untuk track progress training terjadwal
+        self._pattern_divergence_threshold = float(
+            os.environ.get('ML_PATTERN_DIVERGENCE_THRESHOLD', '0.35')
+        )
 
         logger.info("=" * 60)
         logger.info("PSKC ML WORKER SERVICE  (API-integrated mode)")
@@ -114,9 +118,10 @@ class MLWorkerService:
             return False
 
     def _initialize_local_components(self):
-        """Inisialisasi komponen lokal (drift detector + River)."""
+        """Inisialisasi komponen lokal (drift detector + River + traffic tracker)."""
         from src.ml.trainer import DriftDetector  # noqa: F401 (ModelTrainer not needed here)
         from src.ml.river_online_learning import RiverOnlineLearner, is_river_available
+        from src.ml.traffic_pattern_tracker import TrafficPatternTracker
 
         self._drift_detector = DriftDetector(
             drift_threshold=self._drift_threshold,
@@ -124,6 +129,13 @@ class MLWorkerService:
             ewma_alpha=0.3,
         )
         logger.info("Drift detector initialized")
+
+        # Traffic pattern tracker (uses the same Redis connection)
+        self._traffic_tracker = TrafficPatternTracker(
+            redis_client=self._redis_client,
+            ttl_seconds=3600,
+        )
+        logger.info("Traffic pattern tracker initialized")
 
         if self._enable_river:
             if is_river_available():
@@ -259,6 +271,13 @@ class MLWorkerService:
             except Exception:
                 pass
 
+            # Traffic pattern tracker — feed every event
+            if self._traffic_tracker:
+                try:
+                    self._traffic_tracker.record_event(event)
+                except Exception:
+                    pass
+
             # River online learning
             if self._river_learner:
                 try:
@@ -276,12 +295,23 @@ class MLWorkerService:
                 except Exception as e:
                     logger.debug(f"River update error: {e}")
 
+        # Spike detection — capture events if spike
+        spike_detected = False
+        if self._traffic_tracker:
+            try:
+                spike_detected = self._traffic_tracker.detect_spike()
+                if spike_detected:
+                    self._traffic_tracker.capture_spike_events(events)
+            except Exception:
+                pass
+
         drift_detected = "drift" in drift_signals
         return {
             "new_events": len(events),
             "river_updates": river_updates,
             "drift_detected": drift_detected,
             "drift_signals": list(set(drift_signals)),
+            "spike_detected": spike_detected,
         }
 
     # ------------------------------------------------------------------
@@ -325,7 +355,24 @@ class MLWorkerService:
             else:
                 logger.debug("Could not fetch training progress")
 
-        # 4. Putuskan apakah perlu training via API
+        # 4. Pattern divergence check
+        if self._traffic_tracker and not stats.get("drift_detected"):
+            try:
+                pattern_comparison = self._check_pattern_divergence()
+                if pattern_comparison:
+                    stats["pattern_comparison"] = pattern_comparison
+                    if pattern_comparison.get("divergence_score", 0) > self._pattern_divergence_threshold:
+                        logger.warning(
+                            "Pattern divergence detected (%.2f > %.2f) — triggering retraining",
+                            pattern_comparison["divergence_score"],
+                            self._pattern_divergence_threshold,
+                        )
+                        ok = self._trigger_training(reason="pattern_divergence")
+                        stats["training_triggered"] = ok
+            except Exception as e:
+                logger.debug(f"Pattern divergence check failed: {e}")
+
+        # 5. Putuskan apakah perlu training via API
         time_since_train = time.time() - self._last_train_time
         scheduled_due    = time_since_train >= self._scheduled_train_interval
 
@@ -334,7 +381,7 @@ class MLWorkerService:
             ok = self._trigger_training(reason="drift_detected")
             stats["training_triggered"] = ok
 
-        elif scheduled_due:
+        elif not stats.get("training_triggered") and scheduled_due:
             # Cek dulu apakah API punya cukup data
             ml_status = self._api_get("/ml/status")
             if ml_status:
@@ -355,6 +402,42 @@ class MLWorkerService:
                 self._last_train_time = time.time()
 
         return stats
+
+    def _check_pattern_divergence(self) -> Optional[Dict[str, Any]]:
+        """
+        Load the latest training baseline profile from the API and
+        compare it to the live traffic pattern captured in Redis.
+
+        Returns the comparison result dict, or None if baseline is
+        not available.
+        """
+        if not self._traffic_tracker:
+            return None
+
+        live_pattern = self._traffic_tracker.get_live_pattern()
+        if not live_pattern or live_pattern.get("total_samples", 0) < 50:
+            # Not enough live data to compare
+            return None
+
+        # Fetch baseline from API
+        baseline = self._api_get("/ml/pattern/baseline")
+        if not baseline or not baseline.get("total_samples"):
+            return None
+
+        from src.ml.sample_profiler import SampleProfiler
+        comparison = SampleProfiler.compare_profiles(baseline, live_pattern)
+        comparison["baseline_samples"] = baseline.get("total_samples", 0)
+        comparison["live_samples"] = live_pattern.get("total_samples", 0)
+
+        if comparison.get("divergence_score", 0) > 0.1:
+            logger.info(
+                "Pattern comparison: divergence=%.3f, temporal=%.3f, key_overlap=%.3f",
+                comparison.get("divergence_score", 0),
+                comparison.get("temporal_divergence", 0),
+                comparison.get("key_overlap_ratio", 0),
+            )
+
+        return comparison
 
     def _run_worker_loop(self):
         logger.info("ML worker loop started")

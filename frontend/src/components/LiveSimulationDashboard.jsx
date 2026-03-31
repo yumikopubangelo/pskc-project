@@ -56,6 +56,7 @@ const LiveSimulationDashboard = () => {
   const [selectedScenario, setSelectedScenario] = useState('test');
   const [selectedTraffic, setSelectedTraffic] = useState('normal');
   const [virtualNodes, setVirtualNodes] = useState(3);
+  const [concurrentWorkers, setConcurrentWorkers] = useState(2);
   const [maxRequests, setMaxRequests] = useState(1000);
   const [modelPreference, setModelPreference] = useState('best_available');
   const [keyMode, setKeyMode] = useState('auto');
@@ -174,6 +175,7 @@ const LiveSimulationDashboard = () => {
         scenario: selectedScenario,
         trafficType: selectedTraffic,
         virtualNodes,
+        concurrentWorkers,
         maxRequests,
         modelPreference,
         keyMode,
@@ -187,7 +189,7 @@ const LiveSimulationDashboard = () => {
     } finally {
       setIsStarting(false);
     }
-  }, [keyMode, maxRequests, modelPreference, selectedScenario, selectedTraffic, simulateKms, startStream, virtualNodes]);
+  }, [concurrentWorkers, keyMode, maxRequests, modelPreference, selectedScenario, selectedTraffic, simulateKms, startStream, virtualNodes]);
 
   const stopSession = useCallback(async () => {
     if (!sessionIdRef.current) return;
@@ -234,6 +236,7 @@ const LiveSimulationDashboard = () => {
   const drift = session?.observability?.drift || {};
   const riverOnline = session?.observability?.river_online || {};
   const kmsPressure = session?.observability?.kms_pressure || {};
+  const throughput = session?.throughput || session?.observability?.throughput || {};
 
   // Per-key accuracy data for bar chart
   const perKeyAccuracyData = (session?.per_key_accuracy || []).map((k) => ({
@@ -283,6 +286,9 @@ const LiveSimulationDashboard = () => {
                 </span>
                 <span className="text-slate-400">
                   Requests: {formatNumber(session.requests_processed)}
+                </span>
+                <span className="text-slate-400">
+                  Workers: {formatNumber(session.concurrent_workers || concurrentWorkers)}
                 </span>
                 <span className="text-slate-500">
                   Transport: {transportMode.toUpperCase()}
@@ -384,6 +390,19 @@ const LiveSimulationDashboard = () => {
           </div>
 
           <div>
+            <label className="mb-1 block text-sm text-slate-400">Concurrent Workers</label>
+            <input
+              type="number"
+              min="1"
+              max="12"
+              value={concurrentWorkers}
+              onChange={(e) => setConcurrentWorkers(Number(e.target.value))}
+              disabled={isRunning}
+              className="w-full rounded-lg border border-dark-border bg-dark-bg px-3 py-2 text-white focus:border-accent-blue focus:outline-none disabled:opacity-50"
+            />
+          </div>
+
+          <div>
             <label className="mb-1 block text-sm text-slate-400">Model Preference</label>
             <select
               value={modelPreference}
@@ -436,6 +455,14 @@ const LiveSimulationDashboard = () => {
             Karena itu, bukti yang paling sehat biasanya terlihat sebagai `L2 hit`, lalu request itu sendiri
             mempromosikan key ke `L1` node yang sedang melayani.
           </p>
+          <p className="mt-2">
+            `Observed Throughput` adalah laju request session secara keseluruhan. Sementara kartu `PSKC KMS Fallback Rate`
+            dan `Direct KMS Baseline Rate` hanya menunjukkan laju lane KMS, bukan total throughput session.
+          </p>
+          <p className="mt-2">
+            `Virtual Nodes` mensimulasikan banyak API node dengan L1 terpisah. `Concurrent Workers` mengatur berapa banyak
+            worker session yang mendorong request stream secara paralel. Untuk demo throughput, biasanya worker lebih berpengaruh daripada node.
+          </p>
         </div>
       </div>
 
@@ -465,6 +492,12 @@ const LiveSimulationDashboard = () => {
               value={formatPercent(benchmark.latency_reduction_percent)}
               hint={`${formatMs(session.comparison?.avg_latency_saved_ms)} saved`}
               valueClassName="text-accent-blue"
+            />
+            <MetricTile
+              label="Observed Throughput"
+              value={`${formatNumber(throughput.observed_rps)} rps`}
+              hint={`Target ${formatNumber(throughput.configured_rps)} rps`}
+              valueClassName="text-sky-300"
             />
             <MetricTile
               label="Cache Efficiency"
@@ -502,14 +535,14 @@ const LiveSimulationDashboard = () => {
                   hint="Grounded next-request samples"
                 />
                 <MetricTile
-                  label="PSKC KMS Pressure"
+                  label="PSKC KMS Fallback Rate"
                   value={`${formatNumber(kmsPressure.pskc_recent_rps)} rps`}
-                  hint={`Avg ${formatMs(kmsPressure.pskc_avg_latency_ms)}`}
+                  hint={`Fallback lane avg ${formatMs(kmsPressure.pskc_avg_latency_ms)}`}
                 />
                 <MetricTile
-                  label="Direct KMS Pressure"
+                  label="Direct KMS Baseline Rate"
                   value={`${formatNumber(kmsPressure.direct_recent_rps)} rps`}
-                  hint={`Avg ${formatMs(kmsPressure.direct_avg_latency_ms)}`}
+                  hint={`Baseline lane avg ${formatMs(kmsPressure.direct_avg_latency_ms)}`}
                 />
                 <MetricTile
                   label="Tracked Keys"
@@ -524,6 +557,7 @@ const LiveSimulationDashboard = () => {
               <div className="space-y-3 text-sm">
                 <ProofRow label="Redis shared cache" value={session.component_status?.redis_available} />
                 <ProofRow label="Prefetch worker active" value={(session.prefetch?.active_workers || []).length > 0} />
+                <ProofRow label="Simulation workers" value={formatNumber(session.concurrent_workers)} />
                 <ProofRow label="Selected model loaded" value={session.model?.loaded} />
                 <ProofRow label="Worker completions" value={formatNumber(session.prefetch?.worker_completed_delta)} />
                 <ProofRow label="Queue length" value={formatNumber(session.prefetch?.queue_length)} />

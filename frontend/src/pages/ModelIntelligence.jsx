@@ -104,7 +104,10 @@ const ModelIntelligence = () => {
   const trainingPaths = data?.training_paths || {}
   const latestVersion = summary.latest_version
   const activeVersion = summary.active_version
+  const runtimeStatus = summary.runtime_status || {}
   const selectedVersionData = versions.find(item => item.version_id === selectedVersion) || null
+  const runtimeValidationSamples = runtimeStatus.accepted_validation_samples
+  const latestFullTrainingSamples = trainingPaths.full_training?.latest_run?.samples_count
 
   const trendData = accuracyTrend.map(item => ({
     version: formatVersion(item.version),
@@ -212,6 +215,19 @@ const ModelIntelligence = () => {
           sub={riverOnline.model_type || 'adaptive_forest'}
           color={riverOnline.initialized ? 'text-emerald-400' : 'text-slate-500'}
         />
+      </div>
+
+      <div className="bg-dark-card rounded-xl border border-dark-border p-4 text-sm text-slate-300">
+        <div className="font-medium text-white mb-2">How to read these numbers</div>
+        <div>
+          Runtime Model Status is showing the active registry model that serves requests right now.
+          Its current accuracy basis is {runtimeValidationSamples == null ? 'unknown validation coverage' : `${formatNumber(runtimeValidationSamples)} validation samples`}.
+        </div>
+        <div className="mt-1">
+          The version table below is full-training history from the database. Its “Train Samples” column is the total dataset used for that training run,
+          while “Eval Basis” is the sample count used to score that specific version.
+          {latestFullTrainingSamples != null ? ` Latest full training run used ${formatNumber(latestFullTrainingSamples)} rows.` : ''}
+        </div>
       </div>
 
       <div className="grid grid-cols-1 xl:grid-cols-3 gap-6">
@@ -374,8 +390,9 @@ const ModelIntelligence = () => {
                 <th className="pb-3 pr-4">Runtime Label</th>
                 <th className="pb-3 pr-4">Top-1</th>
                 <th className="pb-3 pr-4">Top-10</th>
-                <th className="pb-3 pr-4">Training Samples</th>
-                <th className="pb-3 pr-4">Prediction Accuracy</th>
+                <th className="pb-3 pr-4">Train Samples</th>
+                <th className="pb-3 pr-4">Eval Basis</th>
+                <th className="pb-3 pr-4">Logged Pred Accuracy</th>
                 <th className="pb-3 pr-4">Created</th>
               </tr>
             </thead>
@@ -383,6 +400,9 @@ const ModelIntelligence = () => {
               {versions.map(version => {
                 const acc = version.metrics?.accuracy ?? version.metrics?.val_accuracy
                 const top10 = version.metrics?.top_10_accuracy ?? version.metrics?.val_top_10_accuracy
+                const evalBasis = version.metrics?.n_samples
+                  ?? version.metrics_json?.n_samples
+                  ?? version.training?.validation_samples
                 const status = String(version.status || '').toLowerCase()
                 return (
                   <tr
@@ -403,6 +423,9 @@ const ModelIntelligence = () => {
                     <td className="py-3 pr-4 text-white">{formatPercent(acc)}</td>
                     <td className="py-3 pr-4 text-white">{formatPercent(top10)}</td>
                     <td className="py-3 pr-4 text-slate-300">{formatNumber(version.training?.samples_count)}</td>
+                    <td className="py-3 pr-4 text-slate-300">
+                      {evalBasis == null ? 'N/A' : `${formatNumber(evalBasis)} eval`}
+                    </td>
                     <td className="py-3 pr-4 text-slate-300">
                       {formatPercent(version.predictions?.accuracy)}
                       <span className="text-xs text-slate-500 ml-2">
@@ -426,10 +449,23 @@ const ModelIntelligence = () => {
               <StatusPill status={String(selectedVersionData.status || '').toLowerCase()} />
             </div>
             <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+              <DetailCard label="Source" value={selectedVersionData.source || 'database'} />
               <DetailCard label="Runtime Version" value={selectedVersionData.runtime_version || 'N/A'} />
               <DetailCard label="Created" value={formatTimestamp(selectedVersionData.created_at)} />
               <DetailCard label="Train Duration" value={formatDuration(selectedVersionData.training?.duration_seconds)} />
               <DetailCard label="Predictions Logged" value={formatNumber(selectedVersionData.predictions?.total)} />
+              <DetailCard
+                label="Train Samples"
+                value={formatNumber(selectedVersionData.training?.samples_count)}
+              />
+              <DetailCard
+                label="Eval Basis"
+                value={
+                  selectedVersionData.metrics?.n_samples != null || selectedVersionData.metrics_json?.n_samples != null
+                    ? `${formatNumber(selectedVersionData.metrics?.n_samples ?? selectedVersionData.metrics_json?.n_samples)} eval`
+                    : 'N/A'
+                }
+              />
             </div>
             <div>
               <div className="text-sm text-slate-400 mb-2">Metrics</div>

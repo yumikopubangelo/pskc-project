@@ -4,9 +4,15 @@
 import asyncio
 import functools
 import logging
+from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
 from datetime import datetime, timezone
 from fastapi import APIRouter, Query, HTTPException, status, WebSocket, WebSocketDisconnect
+
+# Dedicated executor for CPU-bound training/generation tasks.
+# Kept separate from the default asyncio thread pool so that long-running
+# training jobs do not starve simulation workers or other I/O-bound tasks.
+_TRAINING_EXECUTOR = ThreadPoolExecutor(max_workers=2, thread_name_prefix="ml-training")
 
 from src.api.ml_service import (
     generate_training_data,
@@ -34,6 +40,7 @@ def create_training_router() -> APIRouter:
         num_keys: Optional[int] = Query(default=None, ge=10),
         num_services: Optional[int] = Query(default=None, ge=1),
         scenario: str = Query(default="dynamic", description="Scenario: siakad, sevima, pddikti, dynamic"),
+        pattern_type: str = Query(default="realistic", description="Pattern generation mode: realistic (Markov chains) or random (stress)"),
         traffic_profile: str = Query(default="normal", description="Traffic profile: normal, heavy, prime_time, overload"),
         duration_hours: Optional[int] = Query(default=None, ge=1),
     ):
@@ -60,13 +67,14 @@ def create_training_router() -> APIRouter:
             async def run_generation_in_background():
                 loop = asyncio.get_event_loop()
                 await loop.run_in_executor(
-                    None,
+                    _TRAINING_EXECUTOR,
                     functools.partial(
                         generate_training_data,
                         num_events=num_events,
                         num_keys=num_keys,
                         num_services=num_services,
                         scenario=scenario,
+                        pattern_type=pattern_type,
                         traffic_profile=traffic_profile,
                         duration_hours=duration_hours,
                     ),
@@ -100,6 +108,7 @@ def create_training_router() -> APIRouter:
         num_keys: Optional[int] = Query(default=None, ge=10),
         num_services: Optional[int] = Query(default=None, ge=1),
         scenario: str = Query(default="dynamic"),
+        pattern_type: str = Query(default="realistic"),
         traffic_profile: str = Query(default="normal"),
         duration_hours: Optional[int] = Query(default=None, ge=1),
     ):
@@ -176,6 +185,7 @@ def create_training_router() -> APIRouter:
         reason: str = Query(default="manual", description="Reason for training: manual, drift_detected, scheduled"),
         quality_profile: str = Query(default="balanced", description="Training quality profile: fast, balanced, thorough"),
         time_budget_minutes: int = Query(default=30, ge=5, le=60, description="Requested time budget in minutes"),
+        sample_strategy: str = Query(default="auto", description="Training sample strategy: auto, all, realistic_priority, realistic_only"),
     ):
         """
         Train the ML model using collected data.
@@ -205,13 +215,14 @@ def create_training_router() -> APIRouter:
             async def run_training_in_background():
                 loop = asyncio.get_event_loop()
                 await loop.run_in_executor(
-                    None,
+                    _TRAINING_EXECUTOR,
                     functools.partial(
                         train_model,
                         force=force,
                         reason=reason,
                         quality_profile=quality_profile,
                         time_budget_minutes=time_budget_minutes,
+                        sample_strategy=sample_strategy,
                     ),
                 )
             
@@ -228,6 +239,7 @@ def create_training_router() -> APIRouter:
                     "force": force,
                     "quality_profile": quality_profile,
                     "time_budget_minutes": time_budget_minutes,
+                    "sample_strategy": sample_strategy,
                     "websocket_url": "/ml/training/ws",
                     "progress_endpoint": "/ml/training/progress",
                     "instructions": "Connect to WebSocket or poll progress endpoint for real-time updates"
@@ -255,8 +267,9 @@ def create_training_router() -> APIRouter:
         trainer = get_model_trainer()
         was_locked = trainer._is_training
         trainer._is_training = False
-        reset_result = trainer._incremental_persistence.reset()
-        trainer._model.is_trained = False
+        reset_result = trainer._get_incremental_persistence().reset()
+        if trainer._model is not None:
+            trainer._model.is_trained = False
         trainer._active_model_version = None
         
         try:
@@ -326,11 +339,13 @@ def create_training_router() -> APIRouter:
     async def get_training_plan_endpoint(
         quality_profile: str = Query(default="balanced", description="Training quality profile: fast, balanced, thorough"),
         time_budget_minutes: int = Query(default=30, ge=5, le=60, description="Requested time budget in minutes"),
+        sample_strategy: str = Query(default="auto", description="Training sample strategy: auto, all, realistic_priority, realistic_only"),
     ):
         """Return a training recommendation and bounded runtime plan."""
         return get_training_plan(
             quality_profile=quality_profile,
             time_budget_minutes=time_budget_minutes,
+            sample_strategy=sample_strategy,
         )
 
     @router.post("/train-improved")

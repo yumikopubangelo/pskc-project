@@ -27,6 +27,8 @@ services:
       APP_ENV: development
       APP_PORT: 8000
       LOG_LEVEL: debug
+      WATCHFILES_FORCE_POLLING: "true"
+      WATCHFILES_POLL_DELAY_MS: 1000
       FIPS_SELF_TEST_ENABLED: "true"
       AUDIT_LOG_DIRECTORY: /app/logs/api
 
@@ -67,8 +69,13 @@ services:
       - ./migrations:/app/migrations  # mount migrations so container sees updates
       - ./simulation:/app/simulation  # mount simulation scripts
       - ./logs:/app/logs
-    command: >
-      uvicorn src.api.routes:app --host 0.0.0.0 --port 8000 --reload
+    command:
+      - uvicorn
+      - src.api.routes:app
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
     depends_on:
       redis:
         condition: service_healthy
@@ -123,7 +130,7 @@ services:
     environment:
       - VITE_API_MODE=auto
       - VITE_API_URL=/api
-      - VITE_API_PROXY_TARGET=http://host.docker.internal:8000
+      - VITE_API_PROXY_TARGET=http://api:8000
     volumes:
       - ./frontend/src:/app/src
       - ./frontend/public:/app/public

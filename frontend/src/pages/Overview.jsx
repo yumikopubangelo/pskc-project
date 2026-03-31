@@ -1,345 +1,318 @@
-import React, { useEffect, useMemo, useState } from 'react'
+import React, { useEffect, useState } from 'react'
 import { motion } from 'framer-motion'
 import Icon from '../components/Icon'
 import { apiClient } from '../utils/apiClient'
 
-const toneClasses = {
-  blue: {
-    iconWrap: 'bg-accent-blue/20 border-accent-blue/30',
-    iconText: 'text-accent-blue',
-    badge: 'bg-accent-blue/20 text-accent-blue border border-accent-blue/35',
-  },
-  green: {
-    iconWrap: 'bg-accent-green/20 border-accent-green/30',
-    iconText: 'text-accent-green',
-    badge: 'bg-accent-green/20 text-accent-green border border-accent-green/35',
-  },
-  red: {
-    iconWrap: 'bg-danger-red/20 border-danger-red/30',
-    iconText: 'text-danger-red',
-    badge: 'bg-danger-red/20 text-danger-red border border-danger-red/35',
-  },
-  orange: {
-    iconWrap: 'bg-warning-orange/20 border-warning-orange/30',
-    iconText: 'text-warning-orange',
-    badge: 'bg-warning-orange/20 text-warning-orange border border-warning-orange/35',
-  },
+function StatCard({ label, value, helper, icon, tone = 'text-white' }) {
+  return (
+    <div className="rounded-2xl border border-dark-border bg-dark-card/80 p-5 shadow-[0_20px_60px_rgba(0,0,0,0.18)]">
+      <div className="flex items-center justify-between mb-4">
+        <div className="text-sm text-slate-400">{label}</div>
+        <div className="w-10 h-10 rounded-xl border border-dark-border bg-dark-bg/70 flex items-center justify-center text-slate-200">
+          <Icon name={icon} className="w-5 h-5" />
+        </div>
+      </div>
+      <div className={`text-3xl font-bold ${tone}`}>{value}</div>
+      <div className="mt-2 text-xs text-slate-500">{helper}</div>
+    </div>
+  )
+}
+
+function FlowCard({ step, title, body, icon }) {
+  return (
+    <div className="rounded-2xl border border-dark-border bg-dark-card/70 p-5">
+      <div className="flex items-start justify-between gap-4 mb-4">
+        <div>
+          <div className="text-xs uppercase tracking-[0.2em] text-accent-blue mb-1">{step}</div>
+          <div className="text-lg font-semibold text-white">{title}</div>
+        </div>
+        <div className="w-10 h-10 rounded-xl bg-dark-bg/70 border border-dark-border flex items-center justify-center text-accent-blue">
+          <Icon name={icon} className="w-5 h-5" />
+        </div>
+      </div>
+      <p className="text-sm leading-6 text-slate-400">{body}</p>
+    </div>
+  )
 }
 
 function Overview() {
-  const backendOnly = { allowMockFallback: false }
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
-  const [backendState, setBackendState] = useState({
+  const [snapshot, setSnapshot] = useState({
     connected: false,
     cacheHitRate: 0,
     avgLatency: 0,
     totalRequests: 0,
     activeKeys: 0,
-    keysCached: 0,
-    modelStatus: 'not_trained',
-    modelLoaded: false,
-    sampleCount: 0,
+    cachedKeys: 0,
+    modelVersion: 'N/A',
+    modelStage: 'unknown',
+    modelAccuracy: null,
+    modelTop10Accuracy: null,
+    modelStatus: 'unknown',
+    validationSamples: null,
+    confidence: 'low',
   })
 
   useEffect(() => {
+    let active = true
+
     const fetchOverview = async () => {
       try {
         const [health, metrics, cacheStats, modelStatus] = await Promise.all([
-          apiClient.getHealth(backendOnly),
-          apiClient.getMetrics(backendOnly),
-          apiClient.getCacheStats(backendOnly),
-          apiClient.getModelStatus(backendOnly),
+          apiClient.getHealth(),
+          apiClient.getMetrics(),
+          apiClient.getCacheStats(),
+          apiClient.getModelStatus(),
         ])
 
-        setBackendState({
+        if (!active) {
+          return
+        }
+
+        setSnapshot({
           connected: health.status === 'healthy',
-          cacheHitRate: (metrics.cache_hit_rate || 0) * 100,
-          avgLatency: metrics.avg_latency_ms || 0,
-          totalRequests: metrics.total_requests || 0,
-          activeKeys: metrics.active_keys || 0,
-          keysCached: cacheStats.size || 0,
+          cacheHitRate: Number(metrics.cache_hit_rate || 0) * 100,
+          avgLatency: Number(metrics.avg_latency_ms || 0),
+          totalRequests: Number(metrics.total_requests || 0),
+          activeKeys: Number(metrics.active_keys || 0),
+          cachedKeys: Number(cacheStats.size || 0),
+          modelVersion: modelStatus.model_version || 'N/A',
+          modelStage: modelStatus.model_stage || 'unknown',
+          modelAccuracy: modelStatus.model_accuracy,
+          modelTop10Accuracy: modelStatus.model_top_10_accuracy,
           modelStatus: modelStatus.status_code || 'unknown',
-          modelLoaded: Boolean(modelStatus.model_loaded),
-          sampleCount: modelStatus.sample_count || 0,
+          validationSamples: modelStatus.accepted_validation_samples,
+          confidence: modelStatus.accuracy_confidence || 'low',
         })
         setError(null)
       } catch (err) {
+        if (!active) {
+          return
+        }
         console.error('Failed to load overview data:', err)
-        setBackendState({
-          connected: false,
-          cacheHitRate: 0,
-          avgLatency: 0,
-          totalRequests: 0,
-          activeKeys: 0,
-          keysCached: 0,
-          modelStatus: 'unavailable',
-          modelLoaded: false,
-          sampleCount: 0,
-        })
-        setError('Backend overview data is unavailable')
+        setError('Backend overview data is currently unavailable.')
       } finally {
-        setLoading(false)
+        if (active) {
+          setLoading(false)
+        }
       }
     }
 
     fetchOverview()
     const interval = setInterval(fetchOverview, 5000)
-    return () => clearInterval(interval)
+    return () => {
+      active = false
+      clearInterval(interval)
+    }
   }, [])
 
-  const modelStatusLabel = useMemo(() => {
-    if (backendState.modelLoaded) {
-      return 'Model loaded'
-    }
-    if (backendState.modelStatus === 'artifact_present') {
-      return 'Artifact present'
-    }
-    if (backendState.modelStatus === 'not_trained') {
-      return 'Not trained'
-    }
-    return backendState.modelStatus.replace(/_/g, ' ')
-  }, [backendState.modelLoaded, backendState.modelStatus])
+  const connectionLabel = error
+    ? 'Backend unavailable'
+    : loading
+      ? 'Reading backend snapshot'
+      : snapshot.connected
+        ? 'Backend connected'
+        : 'Waiting for backend'
 
-  const features = [
-    {
-      title: 'Prediktif',
-      description:
-        'Status model dan pipeline prediksi dibaca langsung dari backend. Jika model belum ada, halaman ini menampilkannya apa adanya.',
-      icon: 'brain',
-      tone: 'blue',
-      stats: modelStatusLabel,
-    },
-    {
-      title: 'Latensi Rendah',
-      description:
-        'Ringkasan latensi dan throughput diambil dari endpoint metrics backend, bukan angka presentasi yang ditulis manual.',
-      icon: 'lightning',
-      tone: 'green',
-      stats: backendState.totalRequests > 0 ? `${Math.round(backendState.avgLatency)}ms avg` : 'No traffic yet',
-    },
-    {
-      title: 'Aman',
-      description:
-        'Status cache aktif, total key yang tersimpan, dan jalur request nyata dipantau dari FastAPI runtime yang sedang berjalan.',
-      icon: 'shield',
-      tone: 'red',
-      stats: `${backendState.activeKeys} active keys`,
-    },
-    {
-      title: 'Adaptif',
-      description:
-        'Cache hit rate dan perubahan perilaku request tercermin dari metrik backend yang terus diperbarui setiap beberapa detik.',
-      icon: 'refresh',
-      tone: 'orange',
-      stats: `${backendState.cacheHitRate.toFixed(1)}% hit`,
-    },
-  ]
-
-  const stats = [
-    { value: `${backendState.cacheHitRate.toFixed(1)}%`, label: 'Cache Hit Rate', valueClass: 'text-accent-blue' },
-    { value: `${Math.round(backendState.avgLatency)}ms`, label: 'Avg Latency', valueClass: 'text-accent-green' },
-    { value: backendState.totalRequests.toLocaleString(), label: 'Total Requests', valueClass: 'text-accent-blue' },
-    { value: modelStatusLabel, label: 'Model Status', valueClass: 'text-accent-green' },
-  ]
-
-  const steps = [
-    {
-      step: '01',
-      title: 'Data Collection',
-      description: 'Backend merekam key access, hit/miss cache, dan latency request yang sudah benar-benar terjadi.',
-      icon: 'database',
-    },
-    {
-      step: '02',
-      title: 'ML Prediction',
-      description: 'Artefak model dan status pipeline ML dibaca dari backend. Jika belum terlatih, status itu ditampilkan langsung.',
-      icon: 'brain',
-    },
-    {
-      step: '03',
-      title: 'Pre-caching',
-      description: 'Dashboard dan simulation console memakai hasil backend, sehingga efek cache dapat dibandingkan tanpa angka demo lokal.',
-      icon: 'lightning',
-    },
-  ]
-
-  const containerVariants = {
-    hidden: { opacity: 0 },
-    visible: {
-      opacity: 1,
-      transition: {
-        staggerChildren: 0.2,
-      },
-    },
-  }
-
-  const itemVariants = {
-    hidden: { opacity: 0, y: 20 },
-    visible: { opacity: 1, y: 0, transition: { duration: 0.5 } },
-  }
-
-  const connectionLabel = error ? 'Backend unavailable' : loading ? 'Loading backend' : backendState.connected ? 'Backend connected' : 'Waiting for backend'
+  const modelStatusLabel = snapshot.modelStatus.replace(/_/g, ' ')
 
   return (
     <div className="min-h-screen">
-      <section className="relative py-20 lg:py-32 overflow-hidden">
-        <div className="absolute inset-0 grid-pattern opacity-30" />
-        <div className="absolute top-20 left-10 w-72 h-72 bg-accent-blue/20 rounded-full blur-3xl animate-pulse-slow" />
-        <div
-          className="absolute bottom-20 right-10 w-96 h-96 bg-accent-green/10 rounded-full blur-3xl animate-pulse-slow"
-          style={{ animationDelay: '1s' }}
-        />
+      <section className="relative overflow-hidden py-20 lg:py-28">
+        <div className="absolute inset-0 bg-[radial-gradient(circle_at_top_left,_rgba(37,99,235,0.16),_transparent_32%),radial-gradient(circle_at_bottom_right,_rgba(16,185,129,0.12),_transparent_28%)]" />
+        <div className="absolute inset-0 grid-pattern opacity-20" />
 
         <div className="relative max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
           <motion.div
-            initial={{ opacity: 0, y: 30 }}
+            initial={{ opacity: 0, y: 20 }}
             animate={{ opacity: 1, y: 0 }}
-            transition={{ duration: 0.8 }}
-            className="text-center"
+            transition={{ duration: 0.5 }}
+            className="max-w-4xl"
           >
-            <div className="inline-flex items-center gap-2 bg-accent-blue/10 border border-accent-blue/30 rounded-full px-4 py-2 mb-8">
+            <div className="inline-flex items-center gap-2 rounded-full border border-accent-blue/30 bg-accent-blue/10 px-4 py-2 text-sm text-accent-blue">
               <span className={`w-2 h-2 rounded-full ${error ? 'bg-danger-red' : 'bg-accent-green animate-pulse'}`} />
-              <span className="text-accent-blue font-mono text-sm">{connectionLabel}</span>
+              <span>{connectionLabel}</span>
             </div>
 
-            <h1 className="hero-title text-4xl md:text-6xl lg:text-7xl font-display font-bold mb-6">
-              <span className="text-white">Predictive </span>
-              <span className="text-gradient">Secure Key</span>
-              <br />
-              <span className="text-white">Caching</span>
+            <h1 className="mt-8 text-4xl md:text-6xl font-display font-bold leading-tight text-white">
+              PSKC:
+              <span className="block text-gradient mt-2">Predictive Secure Key Caching</span>
             </h1>
 
-            <p className="text-xl text-slate-400 max-w-3xl mx-auto mb-10">
-              Landing page ini sekarang memakai status backend nyata untuk ringkasan performa, cache, dan model ML.
+            <p className="mt-6 max-w-3xl text-lg md:text-xl leading-8 text-slate-300">
+              PSKC adalah arsitektur cache kunci yang mencoba memprediksi kunci apa yang akan diminta berikutnya,
+              lalu memanaskannya secara aman ke cache berlapis sebelum request jatuh ke KMS.
+              Tujuannya sederhana: menurunkan latency, mengurangi tekanan ke KMS, dan tetap menjaga jalur pengambilan kunci tetap aman dan terukur.
             </p>
 
-            <div className="flex flex-col sm:flex-row gap-4 justify-center">
-              <a href="/model-intelligence" className="btn-primary text-lg px-8 py-4 inline-flex items-center justify-center gap-2">
-                <span>Open Model Intelligence</span>
-                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 8l4 4m0 0l-4 4m4-4H3" />
-                </svg>
-              </a>
-              <a href="/simulation" className="btn-secondary text-lg px-8 py-4 inline-flex items-center justify-center gap-2">
-                <span>Run Simulation</span>
-              </a>
-            </div>
-          </motion.div>
-
-          {error ? (
-            <div className="mt-8 rounded-xl border border-danger-red/40 bg-danger-red/10 px-4 py-3 text-sm text-slate-200 text-center">
-              {error}. Halaman tetap terbuka, tetapi metrik di bawah menampilkan state kosong yang jujur.
-            </div>
-          ) : null}
-
-          <motion.div
-            initial={{ opacity: 0, y: 40 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ duration: 0.8, delay: 0.4 }}
-            className="mt-20 grid grid-cols-2 md:grid-cols-4 gap-4"
-          >
-            {stats.map((stat) => (
-              <div key={stat.label} className="metric-card text-center">
-                <div className={`text-3xl font-bold mb-1 ${stat.valueClass}`}>{stat.value}</div>
-                <div className="text-slate-400 text-sm">{stat.label}</div>
-              </div>
-            ))}
-          </motion.div>
-        </div>
-      </section>
-
-      <section className="py-20 relative">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-          <motion.div initial={{ opacity: 0 }} whileInView={{ opacity: 1 }} viewport={{ once: true }} className="text-center mb-16">
-            <h2 className="text-3xl md:text-4xl font-display font-bold text-white mb-4">Key Features</h2>
-            <p className="text-slate-400 max-w-2xl mx-auto">
-              Bagian ini tetap menjelaskan kapabilitas PSKC, tetapi badge statusnya sekarang diambil dari backend yang aktif.
-            </p>
-          </motion.div>
-
-          <motion.div
-            variants={containerVariants}
-            initial="hidden"
-            whileInView="visible"
-            viewport={{ once: true }}
-            className="grid grid-cols-1 md:grid-cols-2 gap-6"
-          >
-            {features.map((feature) => {
-              const tone = toneClasses[feature.tone]
-              return (
-                <motion.div key={feature.title} variants={itemVariants} className="card-hover gradient-card rounded-xl p-6 border border-dark-border">
-                  <div className="flex items-start gap-4">
-                    <div className={`w-14 h-14 rounded-xl border flex items-center justify-center flex-shrink-0 ${tone.iconWrap}`}>
-                      <Icon name={feature.icon} className={`w-7 h-7 ${tone.iconText}`} />
-                    </div>
-                    <div className="flex-1">
-                      <div className="flex items-center justify-between mb-2 gap-3">
-                        <h3 className="text-xl font-semibold text-white">{feature.title}</h3>
-                        <span className={`text-xs font-mono px-2 py-1 rounded whitespace-nowrap ${tone.badge}`}>{feature.stats}</span>
-                      </div>
-                      <p className="text-slate-400 leading-relaxed">{feature.description}</p>
-                    </div>
-                  </div>
-                </motion.div>
-              )
-            })}
-          </motion.div>
-        </div>
-      </section>
-
-      <section className="py-20 bg-dark-card/50">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-          <motion.div initial={{ opacity: 0 }} whileInView={{ opacity: 1 }} viewport={{ once: true }} className="text-center mb-16">
-            <h2 className="text-3xl md:text-4xl font-display font-bold text-white mb-4">How PSKC Works</h2>
-            <p className="text-slate-400 max-w-2xl mx-auto">Pipa data dan cache sekarang dipresentasikan dengan konteks status runtime backend.</p>
-          </motion.div>
-
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-8">
-            {steps.map((item, index) => (
-              <motion.div
-                key={item.step}
-                initial={{ opacity: 0, y: 20 }}
-                whileInView={{ opacity: 1, y: 0 }}
-                viewport={{ once: true }}
-                transition={{ delay: index * 0.2 }}
-                className="relative"
+            <div className="mt-10 flex flex-col sm:flex-row gap-4">
+              <a
+                href="/dashboard"
+                className="inline-flex items-center justify-center gap-2 rounded-xl bg-accent-blue px-6 py-3 text-white font-medium hover:bg-blue-500 transition-colors"
               >
-                <div className="text-6xl font-display font-bold text-dark-border absolute -top-4 -left-2">{item.step}</div>
-                <div className="pt-8 pl-4">
-                  <div className="w-11 h-11 rounded-lg bg-accent-blue/15 border border-accent-blue/30 flex items-center justify-center mb-4">
-                    <Icon name={item.icon} className="w-6 h-6 text-accent-blue" />
-                  </div>
-                  <h3 className="text-xl font-semibold text-white mb-2">{item.title}</h3>
-                  <p className="text-slate-400">{item.description}</p>
+                <Icon name="gauge" className="w-5 h-5" />
+                Open Runtime Dashboard
+              </a>
+              <a
+                href="/simulation"
+                className="inline-flex items-center justify-center gap-2 rounded-xl border border-dark-border bg-dark-card/70 px-6 py-3 text-slate-200 hover:border-accent-blue/50 transition-colors"
+              >
+                <Icon name="play" className="w-5 h-5" />
+                Open Realtime Simulation
+              </a>
+              <a
+                href="/model-intelligence"
+                className="inline-flex items-center justify-center gap-2 rounded-xl border border-dark-border bg-dark-card/70 px-6 py-3 text-slate-200 hover:border-accent-blue/50 transition-colors"
+              >
+                <Icon name="brain" className="w-5 h-5" />
+                Open Model Intelligence
+              </a>
+            </div>
+          </motion.div>
+
+          <motion.div
+            initial={{ opacity: 0, y: 24 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: 0.5, delay: 0.1 }}
+            className="mt-14 grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4"
+          >
+            <StatCard
+              label="Cache Hit Rate"
+              value={`${snapshot.cacheHitRate.toFixed(1)}%`}
+              helper="Proporsi request yang tidak perlu fetch ulang dari KMS."
+              icon="target"
+              tone="text-accent-green"
+            />
+            <StatCard
+              label="Average Latency"
+              value={`${Math.round(snapshot.avgLatency)} ms`}
+              helper="Rata-rata latency request yang dicatat backend."
+              icon="lightning"
+              tone="text-accent-blue"
+            />
+            <StatCard
+              label="Requests Observed"
+              value={snapshot.totalRequests.toLocaleString()}
+              helper="Jumlah request yang sudah tercatat oleh runtime metrics."
+              icon="activity"
+              tone="text-white"
+            />
+            <StatCard
+              label="Runtime Model"
+              value={snapshot.modelVersion}
+              helper={`${snapshot.modelStage} • ${snapshot.validationSamples == null ? 'unknown eval basis' : `${snapshot.validationSamples} val samples`}`}
+              icon="brain"
+              tone="text-warning-orange"
+            />
+          </motion.div>
+        </div>
+      </section>
+
+      <section className="py-16">
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+          <div className="grid grid-cols-1 lg:grid-cols-[1.2fr_0.8fr] gap-6">
+            <div className="rounded-3xl border border-dark-border bg-dark-card/80 p-8">
+              <div className="text-sm uppercase tracking-[0.24em] text-accent-blue mb-3">What PSKC does</div>
+              <h2 className="text-2xl md:text-3xl font-display font-bold text-white mb-4">
+                Mengurangi fallback ke KMS tanpa mengorbankan keamanan
+              </h2>
+              <div className="space-y-4 text-slate-300 leading-7">
+                <p>
+                  Dalam sistem biasa, saat kunci tidak ada di cache, request harus langsung mengambil ke KMS.
+                  Pada traffic tinggi, ini menambah latency dan membebani layanan kunci pusat.
+                </p>
+                <p>
+                  PSKC menambahkan dua hal penting: prediksi akses berikutnya dan cache berlapis.
+                  Prediksi dipakai untuk memberi tahu prefetch worker kunci mana yang layak dipanaskan,
+                  sementara cache berlapis memberi jalur cepat melalui L1 dan L2 sebelum melakukan fallback ke KMS.
+                </p>
+                <p>
+                  Nilai utamanya bukan sekadar “AI ada”, tetapi bahwa seluruh alurnya bisa diukur:
+                  cache hit rate, latency, drift model, queue prefetch, dan runtime model yang aktif.
+                </p>
+              </div>
+            </div>
+
+            <div className="rounded-3xl border border-dark-border bg-dark-card/80 p-8">
+              <div className="text-sm uppercase tracking-[0.24em] text-accent-blue mb-3">Live backend proof</div>
+              <div className="space-y-5">
+                <div>
+                  <div className="text-sm text-slate-400 mb-1">Connection</div>
+                  <div className="text-lg font-semibold text-white">{snapshot.connected ? 'Healthy' : 'Unavailable'}</div>
                 </div>
-              </motion.div>
-            ))}
+                <div>
+                  <div className="text-sm text-slate-400 mb-1">Cached Keys</div>
+                  <div className="text-lg font-semibold text-white">{snapshot.cachedKeys.toLocaleString()}</div>
+                </div>
+                <div>
+                  <div className="text-sm text-slate-400 mb-1">Active Keys Seen</div>
+                  <div className="text-lg font-semibold text-white">{snapshot.activeKeys.toLocaleString()}</div>
+                </div>
+                <div>
+                  <div className="text-sm text-slate-400 mb-1">Runtime Accuracy</div>
+                  <div className="text-lg font-semibold text-white">
+                    {snapshot.modelAccuracy == null ? 'N/A' : `${(snapshot.modelAccuracy * 100).toFixed(1)}%`}
+                  </div>
+                  <div className="text-xs text-slate-500 mt-1">
+                    {snapshot.modelTop10Accuracy == null
+                      ? `${snapshot.confidence} confidence • top-10 not available`
+                      : `Top-10 ${(snapshot.modelTop10Accuracy * 100).toFixed(1)}% • ${snapshot.confidence} confidence`}
+                  </div>
+                </div>
+                <div>
+                  <div className="text-sm text-slate-400 mb-1">Runtime Status</div>
+                  <div className="text-lg font-semibold text-white capitalize">{modelStatusLabel}</div>
+                </div>
+              </div>
+              {error ? (
+                <div className="mt-6 rounded-xl border border-danger-red/40 bg-danger-red/10 px-4 py-3 text-sm text-slate-200">
+                  {error}
+                </div>
+              ) : null}
+            </div>
           </div>
         </div>
       </section>
 
-      <section className="py-20">
-        <div className="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8">
-          <motion.div
-            initial={{ opacity: 0, scale: 0.95 }}
-            whileInView={{ opacity: 1, scale: 1 }}
-            viewport={{ once: true }}
-            className="gradient-card rounded-2xl p-8 md:p-12 text-center border border-dark-border"
-          >
-            <h2 className="text-3xl md:text-4xl font-display font-bold text-white mb-4">Ready to Inspect Real Backend State?</h2>
-            <p className="text-slate-400 mb-8 max-w-xl mx-auto">
-              Simulation realtime, dashboard, dan model intelligence sekarang memakai backend sebagai sumber data utama, bukan angka demo lokal.
-            </p>
-            <div className="flex flex-col sm:flex-row gap-4 justify-center">
-              <a href="/dashboard" className="btn-primary px-8 py-3">
-                View Dashboard
-              </a>
-              <a href="/simulation" className="btn-secondary px-8 py-3">
-                Open Realtime Simulation
-              </a>
-            </div>
-          </motion.div>
+      <section className="py-16">
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+          <div className="mb-10">
+            <div className="text-sm uppercase tracking-[0.24em] text-accent-blue mb-3">Request flow</div>
+            <h2 className="text-2xl md:text-3xl font-display font-bold text-white">Bagaimana PSKC bekerja di runtime</h2>
+          </div>
+          <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-5 gap-4">
+            <FlowCard
+              step="01"
+              icon="grid"
+              title="Request arrives"
+              body="Request datang dengan key id dan service id. Sistem mengaudit request dan memeriksa jalur yang aman."
+            />
+            <FlowCard
+              step="02"
+              icon="lightning"
+              title="L1 cache"
+              body="API node memeriksa cache lokal paling cepat. Jika key ada di sini, latency menjadi paling rendah."
+            />
+            <FlowCard
+              step="03"
+              icon="database"
+              title="L2 Redis"
+              body="Jika L1 miss, sistem mencoba shared encrypted cache di Redis. Hit di L2 masih jauh lebih murah daripada ke KMS."
+            />
+            <FlowCard
+              step="04"
+              icon="shield"
+              title="KMS fallback"
+              body="Jika L1 dan L2 miss, request mengambil key dari KMS. Jalur ini aman, tetapi lebih mahal secara latency."
+            />
+            <FlowCard
+              step="05"
+              icon="brain"
+              title="Predict and prefetch"
+              body="Model memprediksi jalur request berikutnya, lalu worker mem-prefetch key yang dianggap paling layak ke cache."
+            />
+          </div>
         </div>
       </section>
     </div>

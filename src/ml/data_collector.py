@@ -6,7 +6,7 @@ import time
 import threading
 from typing import Dict, List, Optional, Any
 from dataclasses import dataclass, field
-from collections import defaultdict, deque
+from collections import Counter, defaultdict, deque
 from datetime import datetime, timedelta
 import logging
 import json
@@ -112,6 +112,9 @@ class DataCollector:
         
         # Aggregated statistics
         self._key_stats: Dict[str, KeyAccessStats] = {}
+        self._service_counts: Counter[str] = Counter()
+        self._simulation_event_count = 0
+        self._production_event_count = 0
         
         # Time windows for different time scales
         self._recent_events: deque = deque(maxlen=25000)  # ~last few hours
@@ -272,10 +275,33 @@ class DataCollector:
         stats.access_by_service[event.service_id] = (
             stats.access_by_service.get(event.service_id, 0) + 1
         )
+        self._service_counts[event.service_id] += 1
+
+        if event.data_source == "simulation":
+            self._simulation_event_count += 1
+        else:
+            self._production_event_count += 1
         
         # Update hourly counts
         hour = datetime.fromtimestamp(event.timestamp).hour
         stats.hourly_access_counts[hour] += 1
+
+    def _rebuild_global_counters(self) -> None:
+        """Rebuild global counters from current in-memory events."""
+        service_counts: Counter[str] = Counter()
+        simulation_events = 0
+        production_events = 0
+
+        for event in self._events:
+            service_counts[event.service_id] += 1
+            if event.data_source == "simulation":
+                simulation_events += 1
+            else:
+                production_events += 1
+
+        self._service_counts = service_counts
+        self._simulation_event_count = simulation_events
+        self._production_event_count = production_events
     
     def get_key_stats(self, key_id: str) -> Optional[KeyAccessStats]:
         """Get aggregated stats for a key"""
@@ -356,7 +382,9 @@ class DataCollector:
                 "hour": datetime.fromtimestamp(e.timestamp).hour,
                 "day_of_week": datetime.fromtimestamp(e.timestamp).weekday(),
                 "cache_hit": int(e.cache_hit),
-                "latency_ms": e.latency_ms
+                "latency_ms": e.latency_ms,
+                "data_source": e.data_source,
+                "metadata": dict(e.metadata or {}),
             }
             for e in events
         ]
@@ -442,7 +470,21 @@ class DataCollector:
                         latency_ms=event_data.get("latency_ms", 0.0),
                         cache_hit=event_data.get("cache_hit", False),
                         timestamp=event_data.get("timestamp"),
-                        data_source=data_source
+                        data_source=data_source,
+                        **{
+                            key: value
+                            for key, value in event_data.items()
+                            if key
+                            not in {
+                                "key_id",
+                                "service_id",
+                                "access_type",
+                                "latency_ms",
+                                "cache_hit",
+                                "timestamp",
+                                "data_source",
+                            }
+                        },
                     )
                     imported += 1
                 except Exception as e:
@@ -456,20 +498,16 @@ class DataCollector:
     def get_stats(self) -> Dict[str, Any]:
         """Get collector statistics"""
         with self._lock:
-            # Count events by data source
-            simulation_events = sum(1 for e in self._events if e.data_source == "simulation")
-            production_events = len(self._events) - simulation_events
-            
             return {
                 "total_events": len(self._events),
                 "unique_keys": len(self._key_stats),
-                "unique_services": len(set(e.service_id for e in self._events)),
+                "unique_services": len(self._service_counts),
                 "window_seconds": self._window_seconds,
-                "simulation_events": simulation_events,
-                "production_events": production_events,
+                "simulation_events": self._simulation_event_count,
+                "production_events": self._production_event_count,
                 "data_source_breakdown": {
-                    "simulation": simulation_events,
-                    "production": production_events
+                    "simulation": self._simulation_event_count,
+                    "production": self._production_event_count,
                 }
             }
     
@@ -484,6 +522,8 @@ class DataCollector:
             
             while self._recent_events and self._recent_events[0].timestamp < cutoff:
                 self._recent_events.popleft()
+
+            self._rebuild_global_counters()
         
         logger.info(f"Cleared events older than {hours} hours")
     
@@ -503,6 +543,8 @@ class DataCollector:
                         access_type=event_dict.get("access_type", "read"),
                         latency_ms=event_dict.get("latency_ms", 0.0),
                         cache_hit=event_dict.get("cache_hit", False),
+                        metadata=event_dict.get("metadata", {}) or {},
+                        data_source=event_dict.get("data_source", "production") or "production",
                     )
                     self._events.append(event)
                     self._recent_events.append(event)
@@ -532,6 +574,8 @@ class DataCollector:
                     "access_type": e.access_type,
                     "latency_ms": e.latency_ms,
                     "cache_hit": e.cache_hit,
+                    "data_source": e.data_source,
+                    "metadata": e.metadata,
                 })
                 for e in events_snapshot
             ]

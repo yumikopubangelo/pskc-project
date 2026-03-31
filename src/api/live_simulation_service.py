@@ -33,6 +33,7 @@ _LIVE_SESSIONS: Dict[str, Dict[str, Any]] = {}
 _TRACE_LIMIT = 80
 _KEY_BREAKDOWN_LIMIT = 15
 _DEFAULT_VIRTUAL_NODES = 3
+_DEFAULT_CONCURRENT_WORKERS = 2
 _KMS_LATENCY_BOUNDS_MS: Dict[str, Tuple[float, float]] = {
     "normal": (150.0, 230.0),       # ~190ms avg (matches paper)
     "heavy_load": (200.0, 350.0),   # ~275ms avg
@@ -63,9 +64,26 @@ _KEY_MODE_PROFILES: Dict[str, Dict[str, float]] = {
     "high_churn": {"rotation_rate": 0.55, "ephemeral_rate": 0.18, "rotation_window": 6, "variant_pool": 18},
 }
 
+_DEFAULT_WORKERS_BY_TRAFFIC = {
+    "normal": 2,
+    "heavy_load": 3,
+    "prime_time": 4,
+    "degraded": 2,
+    "overload": 6,
+}
+
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _iso_to_timestamp(value: Optional[str]) -> float:
+    if not value:
+        return time.time()
+    try:
+        return datetime.fromisoformat(value).timestamp()
+    except ValueError:
+        return time.time()
 
 
 def _float_or_zero(value: Any) -> float:
@@ -121,6 +139,18 @@ def _normalize_key_mode(key_mode: str, traffic_type: str) -> str:
     if normalized in _KEY_MODE_PROFILES:
         return normalized
     return _KEY_MODE_DEFAULT_BY_TRAFFIC.get(traffic_type, "mixed")
+
+
+def _resolve_concurrent_workers(
+    requested_workers: Optional[int],
+    *,
+    traffic_type: str,
+    virtual_nodes: int,
+) -> int:
+    if requested_workers is None:
+        default_workers = _DEFAULT_WORKERS_BY_TRAFFIC.get(traffic_type, _DEFAULT_CONCURRENT_WORKERS)
+        return max(1, min(int(virtual_nodes or 1), int(default_workers)))
+    return max(1, min(int(virtual_nodes or 1), int(requested_workers)))
 
 
 def _prune_time_window(window: deque[float], *, now: Optional[float] = None) -> None:
@@ -268,13 +298,25 @@ async def _fetch_key_with_kms_latency(
     service_id: str,
     target_latency_ms: float,
 ) -> Tuple[Optional[bytes], float]:
-    started_at = time.perf_counter()
-    key_data = await fetcher.fetch_key(key_id, service_id)
-    elapsed_ms = (time.perf_counter() - started_at) * 1000
-    if elapsed_ms < target_latency_ms:
-        await asyncio.sleep((target_latency_ms - elapsed_ms) / 1000.0)
-        elapsed_ms = target_latency_ms
-    return key_data, round(elapsed_ms, 2)
+    key_data: Optional[bytes] = None
+
+    # Keep the simulation wall-clock fast. We only use a quick best-effort fetch
+    # when an external endpoint is configured; otherwise we synthesize stable
+    # key material and treat ``target_latency_ms`` as simulated latency.
+    if getattr(fetcher, "_endpoint", None):
+        try:
+            key_data = await asyncio.wait_for(
+                fetcher.fetch_key(key_id, service_id),
+                timeout=0.05,
+            )
+        except Exception:
+            key_data = None
+
+    if key_data is None:
+        key_material = f"simulated:{service_id}:{key_id}".encode("utf-8")
+        key_data = (key_material * 4)[:32]
+
+    return key_data, round(float(target_latency_ms), 2)
 
 
 def _build_virtual_nodes(app_state: Any, virtual_nodes: int) -> List[Dict[str, Any]]:
@@ -513,7 +555,10 @@ def _bootstrap_model_if_needed(
 ) -> Dict[str, Any]:
     trainer = get_model_trainer()
     collector = get_data_collector()
-    if trainer.ensure_runtime_model_loaded().get("success"):
+
+    # First, try to ensure runtime model is loaded (fast operation)
+    load_result = trainer.ensure_runtime_model_loaded()
+    if load_result.get("success"):
         return {
             "seeded": False,
             "trained": False,
@@ -529,6 +574,9 @@ def _bootstrap_model_if_needed(
             "reason": "seed_data_disabled",
         }
 
+    # For live simulation, we should NOT block on training
+    # Instead, just seed the data and let the simulation use any available model
+    # Training can happen in background if needed
     rng = random.Random(f"{session_id}:bootstrap")
     seed_events = _build_seed_events(
         run_id=session_id,
@@ -539,19 +587,15 @@ def _bootstrap_model_if_needed(
         stable_services=True,
     )
     imported = collector.import_events(seed_events)
-    train_result = trainer.train(force=True, reason="live_simulation_bootstrap")
+
+    # Don't block on training - just return that we seeded data
+    # Simulation can proceed with any available model or synthetic predictions
     return {
         "seeded": True,
-        "trained": bool(train_result.get("success")),
+        "trained": False,  # Don't train synchronously during simulation preparation
         "events_imported": imported,
-        "reason": train_result.get("reason") or "live_simulation_bootstrap",
-        "train_result": {
-            "success": bool(train_result.get("success")),
-            "model_accepted": bool(train_result.get("model_accepted", False)),
-            "active_version": train_result.get("active_version"),
-            "val_accuracy": train_result.get("val_accuracy"),
-            "val_top_10_accuracy": train_result.get("val_top_10_accuracy"),
-        },
+        "reason": "live_simulation_bootstrap_seeded_only",
+        "note": "Training deferred to avoid blocking simulation start",
     }
 
 
@@ -691,6 +735,17 @@ def _refresh_session_view(session: Dict[str, Any], app_state: Any, queue_stats: 
             "selected_model_is_active_runtime": session["selected_model"].get("is_active_runtime", False),
         }
     )
+    configured_rps = float(TRAFFIC_PROFILES.get(session["traffic_type"], TRAFFIC_PROFILES["normal"])["rps"])
+    completed_requests = int(state.get("completed_requests", 0))
+    elapsed_seconds = max(0.001, time.time() - float(state.get("started_at_ts", time.time())))
+    throughput = {
+        "configured_rps": round(configured_rps, 2),
+        "observed_rps": round(completed_requests / elapsed_seconds, 2),
+        "elapsed_seconds": round(elapsed_seconds, 2),
+        "throughput_ratio": round(min(1.0, (completed_requests / elapsed_seconds) / configured_rps), 4)
+        if configured_rps > 0
+        else 0.0,
+    }
     latency_breakdown = [
         {
             "path": "l1_hit",
@@ -759,9 +814,11 @@ def _refresh_session_view(session: Dict[str, Any], app_state: Any, queue_stats: 
             "pskc_avg_latency_ms": pskc_metrics["kms_avg_latency_ms"],
             "direct_avg_latency_ms": baseline_metrics["direct_kms_avg_latency_ms"],
         },
+        "throughput": throughput,
     }
     session["updated_at"] = _now_iso()
-    session["requests_processed"] = state["requests_processed"]
+    session["requests_processed"] = completed_requests
+    session["requests_issued"] = int(state.get("issued_requests", 0))
     session["component_status"] = component_status
     session["model"] = session["selected_model"]
     session["live_accuracy"] = live_accuracy
@@ -769,6 +826,7 @@ def _refresh_session_view(session: Dict[str, Any], app_state: Any, queue_stats: 
     session["pskc_metrics"] = pskc_metrics
     session["baseline_metrics"] = baseline_metrics
     session["comparison"] = comparison
+    session["throughput"] = throughput
     session["observability"] = observability
     session["trace"] = list(state["trace"])
     session["key_breakdown"] = _session_key_breakdown(state)
@@ -869,7 +927,7 @@ async def _process_live_request(
     key_id = request_item["key_id"]
     service_id = request_item["service_id"]
     ip_address = request_item["ip_address"]
-    request_index = state["requests_processed"] + 1
+    request_index = int(request_item.get("_request_index") or (state.get("completed_requests", 0) + 1))
     cache_layer_before = secure_manager.inspect_cache_path(key_id, service_id)
     cache_origin_before = state["cache_origins"].get(_cache_origin_key(service_id, key_id))
     prefetched_before_request = cache_layer_before in {"l1", "l2"}
@@ -920,7 +978,7 @@ async def _process_live_request(
         if prefetched_by_worker and predicted_on_previous:
             state["verified_prefetch_hits"] += 1
 
-    request_started = time.perf_counter()
+    request_overhead_ms = _resolve_request_overhead_ms(session, lane="pskc")
     key_data, cache_hit, _, allowed = secure_manager.secure_get(key_id, service_id, ip_address)
     kms_latency_ms = None
     if not allowed:
@@ -952,7 +1010,18 @@ async def _process_live_request(
         else:
             path = "late_cache_hit"
 
-    total_latency_ms = round((time.perf_counter() - request_started) * 1000, 2)
+    if path == "l1_hit":
+        total_latency_ms = round(max(1.0, request_overhead_ms * 0.4), 2)
+    elif path == "l2_hit":
+        total_latency_ms = round(max(2.0, request_overhead_ms * 0.75), 2)
+    elif path == "late_cache_hit":
+        total_latency_ms = round(max(3.0, request_overhead_ms * 0.95), 2)
+    elif path == "blocked":
+        total_latency_ms = round(max(1.0, request_overhead_ms * 0.35), 2)
+    elif path == "kms_miss":
+        total_latency_ms = round((kms_latency_ms or 0.0) + request_overhead_ms + 8.0, 2)
+    else:
+        total_latency_ms = round((kms_latency_ms or 0.0) + request_overhead_ms, 2)
     state["path_counts"][path] = state["path_counts"].get(path, 0) + 1
     state["pskc_latencies"].append(total_latency_ms)
     state["path_latency_samples"][path].append(total_latency_ms)
@@ -1055,7 +1124,7 @@ async def _process_live_request(
 
     queue_after_iteration = queue.get_stats()
     state["previous_worker_events"] = queue_after_iteration.get("recent_worker_events", [])
-    state["requests_processed"] = request_index
+    state["completed_requests"] = int(state.get("completed_requests", 0)) + 1
     state["trace"].append(
         {
             "index": request_index,
@@ -1098,6 +1167,70 @@ async def _process_live_request(
         state["trace"] = state["trace"][-_TRACE_LIMIT:]
 
 
+async def _claim_next_live_request(
+    session: Dict[str, Any],
+    *,
+    rng: random.Random,
+) -> Optional[Dict[str, Any]]:
+    state = session["_state"]
+    lock = state["issue_lock"]
+
+    async with lock:
+        max_requests = session.get("max_requests")
+        issued_requests = int(state.get("issued_requests", 0))
+        if max_requests and issued_requests >= max_requests:
+            return None
+
+        buffer = state.setdefault("request_buffer", [])
+        if not buffer:
+            buffer.extend(
+                _generate_live_buffer(
+                    session=session,
+                    rng=rng,
+                    request_count=120,
+                )
+            )
+
+        if not buffer:
+            return None
+
+        next_request = dict(buffer.pop(0))
+        next_index = issued_requests + 1
+        state["issued_requests"] = next_index
+        next_request["_request_index"] = next_index
+        return next_request
+
+
+async def _run_live_worker(
+    *,
+    session: Dict[str, Any],
+    app_state: Any,
+    predictor: Optional[KeyPredictor],
+    worker_index: int,
+) -> None:
+    traffic_profile = TRAFFIC_PROFILES.get(session["traffic_type"], TRAFFIC_PROFILES["normal"])
+    configured_rps = float(traffic_profile["rps"])
+    worker_count = max(1, int(session.get("concurrent_workers", 1)))
+    per_worker_interval_seconds = max(0.001, worker_count / configured_rps) if configured_rps > 0 else 0.05
+    rng = random.Random(f"{session['session_id']}:worker:{worker_index}")
+
+    while not session["_stop_requested"]:
+        request_item = await _claim_next_live_request(session, rng=rng)
+        if request_item is None:
+            break
+
+        await _process_live_request(
+            session=session,
+            app_state=app_state,
+            predictor=predictor,
+            request_item=request_item,
+        )
+        _refresh_session_view(session, app_state, get_prefetch_queue().get_stats())
+
+        if per_worker_interval_seconds > 0:
+            await asyncio.sleep(per_worker_interval_seconds)
+
+
 async def _run_live_session(session_id: str, app_state: Any) -> None:
     with _SESSION_LOCK:
         session = _LIVE_SESSIONS.get(session_id)
@@ -1106,57 +1239,55 @@ async def _run_live_session(session_id: str, app_state: Any) -> None:
 
     queue = get_prefetch_queue()
     try:
+        # Let the start endpoint return its response before heavy preparation
+        # begins, otherwise the event loop can be starved and the caller sees a
+        # request timeout even though the session was created successfully.
+        await asyncio.sleep(0)
+
         session["status"] = "preparing"
-        session["_state"]["virtual_nodes"] = _build_virtual_nodes(app_state, session.get("virtual_nodes", _DEFAULT_VIRTUAL_NODES))
-        session["preparation"] = {
-            "cleared_simulation_cache_entries": _clear_live_cache_namespace(app_state),
-        }
-        session["preparation"].update(
-            _bootstrap_model_if_needed(
-                session_id=session_id,
-                scenario=session["scenario"],
-                traffic_type=session["traffic_type"],
-                seed_data=session["seed_data"],
-            )
+        session["_state"]["virtual_nodes"] = await asyncio.to_thread(
+            _build_virtual_nodes,
+            app_state,
+            session.get("virtual_nodes", _DEFAULT_VIRTUAL_NODES),
         )
-        predictor, model_meta = _select_simulation_predictor(
+        session["preparation"] = {
+            "cleared_simulation_cache_entries": await asyncio.to_thread(
+                _clear_live_cache_namespace,
+                app_state,
+            ),
+        }
+        session["preparation"].update(await asyncio.to_thread(
+            _bootstrap_model_if_needed,
+            session_id=session_id,
+            scenario=session["scenario"],
+            traffic_type=session["traffic_type"],
+            seed_data=session["seed_data"],
+        )
+        )
+        predictor, model_meta = await asyncio.to_thread(
+            _select_simulation_predictor,
             preference=session["model_preference"],
         )
         session["selected_model"] = model_meta
         session["_state"]["predictor"] = predictor
         session["status"] = "running"
-
-        rng = random.Random(session_id)
-        buffer: List[Dict[str, Any]] = []
         queue_before = queue.get_stats()
         session["_state"]["queue_completed_before"] = int(queue_before.get("stats", {}).get("completed_total", 0))
         session["_state"]["previous_worker_events"] = queue_before.get("recent_worker_events", [])
-        interval_seconds = max(
-            0.05,
-            1.0 / float(TRAFFIC_PROFILES.get(session["traffic_type"], TRAFFIC_PROFILES["normal"])["rps"]),
-        )
 
-        while not session["_stop_requested"]:
-            max_requests = session.get("max_requests")
-            if max_requests and session["_state"]["requests_processed"] >= max_requests:
-                session["status"] = "completed"
-                break
-
-            if not buffer:
-                buffer = _generate_live_buffer(
+        worker_count = max(1, int(session.get("concurrent_workers", 1)))
+        worker_tasks = [
+            asyncio.create_task(
+                _run_live_worker(
                     session=session,
-                    rng=rng,
-                    request_count=120,
+                    app_state=app_state,
+                    predictor=predictor,
+                    worker_index=worker_index,
                 )
-
-            await _process_live_request(
-                session=session,
-                app_state=app_state,
-                predictor=predictor,
-                request_item=buffer.pop(0),
             )
-            _refresh_session_view(session, app_state, queue.get_stats())
-            await asyncio.sleep(interval_seconds)
+            for worker_index in range(worker_count)
+        ]
+        await asyncio.gather(*worker_tasks)
 
         if session["_stop_requested"] and session["status"] == "running":
             session["status"] = "stopped"
@@ -1182,10 +1313,16 @@ async def start_live_simulation_session(
     model_preference: str = "best_available",
     key_mode: str = "auto",
     virtual_nodes: int = _DEFAULT_VIRTUAL_NODES,
+    concurrent_workers: Optional[int] = None,
     max_requests: Optional[int] = None,
 ) -> Dict[str, Any]:
     session_id = str(uuid.uuid4())
     resolved_key_mode = _normalize_key_mode(key_mode, traffic_type)
+    resolved_workers = _resolve_concurrent_workers(
+        concurrent_workers,
+        traffic_type=traffic_type,
+        virtual_nodes=virtual_nodes,
+    )
     session = {
         "session_id": session_id,
         "status": "starting",
@@ -1196,6 +1333,7 @@ async def start_live_simulation_session(
         "model_preference": model_preference,
         "key_mode": resolved_key_mode,
         "virtual_nodes": max(1, int(virtual_nodes or _DEFAULT_VIRTUAL_NODES)),
+        "concurrent_workers": resolved_workers,
         "max_requests": max_requests,
         "started_at": _now_iso(),
         "updated_at": _now_iso(),
@@ -1251,6 +1389,7 @@ async def start_live_simulation_session(
             "latency_improvement_percent": 0.0,
         },
         "requests_processed": 0,
+        "requests_issued": 0,
         "honesty_checks": {
             "uses_ground_truth_next_request": True,
             "prediction_sample_count": 0,
@@ -1266,7 +1405,9 @@ async def start_live_simulation_session(
         "_stop_requested": False,
         "_task": None,
         "_state": {
-            "requests_processed": 0,
+            "started_at_ts": time.time(),
+            "issued_requests": 0,
+            "completed_requests": 0,
             "pskc_latencies": [],
             "baseline_latencies": [],
             "path_counts": {
@@ -1289,6 +1430,7 @@ async def start_live_simulation_session(
             "previous_worker_events": [],
             "queue_completed_before": 0,
             "trace": [],
+            "request_buffer": [],
             "key_breakdown": {},
             "per_key_predictions": {},
             "accuracy_trend": [],
@@ -1319,6 +1461,7 @@ async def start_live_simulation_session(
             "last_key_by_service": {},
             "virtual_nodes": [],
             "predictor": None,
+            "issue_lock": asyncio.Lock(),
         },
     }
     with _SESSION_LOCK:

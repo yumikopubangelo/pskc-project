@@ -1,7 +1,8 @@
 {
   "permissions": {
     "allow": [
-      "Bash(python -m pytest tests/test_full_metrics_pipeline.py -x -v --tb=short)"
+      "Bash(python -m pytest tests/test_full_metrics_pipeline.py -x -v --tb=short)",
+      "Bash(docker compose:*)"
     ]
   }
 }

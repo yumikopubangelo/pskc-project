@@ -39,6 +39,33 @@ const qualityProfiles = [
   },
 ]
 
+const sampleStrategies = [
+  {
+    value: 'auto',
+    label: 'Auto',
+    description: 'Backend memilih campuran sample terbaik berdasarkan churn, noise, dan stabilitas key.',
+    accent: 'border-emerald-500/40 bg-emerald-500/10 text-emerald-300',
+  },
+  {
+    value: 'realistic_priority',
+    label: 'Realistic Priority',
+    description: 'Utamakan key yang stabil dan berulang, tetapi tetap jaga coverage agar model tidak terlalu sempit.',
+    accent: 'border-sky-500/40 bg-sky-500/10 text-sky-300',
+  },
+  {
+    value: 'realistic_only',
+    label: 'Realistic Only',
+    description: 'Hanya pakai key dengan skor realism tinggi. Cocok untuk membersihkan dataset yang sangat noisy.',
+    accent: 'border-amber-500/40 bg-amber-500/10 text-amber-300',
+  },
+  {
+    value: 'all',
+    label: 'All Samples',
+    description: 'Gunakan semua sample tanpa filtering. Cocok jika Anda memang ingin model belajar seluruh distribusi data campuran.',
+    accent: 'border-slate-500/40 bg-slate-500/10 text-slate-200',
+  },
+]
+
 const formatTimestamp = value => {
   if (!value) return 'N/A'
   try {
@@ -118,7 +145,9 @@ const MLTraining = () => {
   const [trafficProfile, setTrafficProfile] = useState('normal')
   const [durationHours, setDurationHours] = useState(24)
   const [qualityProfile, setQualityProfile] = useState('balanced')
+  const [sampleStrategy, setSampleStrategy] = useState('auto')
   const [timeBudgetMinutes, setTimeBudgetMinutes] = useState(30)
+  const [patternType, setPatternType] = useState('realistic')
 
   const [generating, setGenerating] = useState(false)
   const [training, setTraining] = useState(false)
@@ -143,6 +172,10 @@ const MLTraining = () => {
     () => qualityProfiles.find(item => item.value === qualityProfile) || qualityProfiles[1],
     [qualityProfile],
   )
+  const selectedSampleStrategy = useMemo(
+    () => sampleStrategies.find(item => item.value === sampleStrategy) || sampleStrategies[0],
+    [sampleStrategy],
+  )
 
   const loadMLStatus = useCallback(async () => {
     try {
@@ -165,6 +198,7 @@ const MLTraining = () => {
       const response = await apiClient.getTrainingPlan({
         quality_profile: qualityProfile,
         time_budget_minutes: timeBudgetMinutes,
+        sample_strategy: sampleStrategy,
       })
       setTrainingPlan(response)
     } catch (err) {
@@ -172,7 +206,7 @@ const MLTraining = () => {
     } finally {
       setLoadingPlan(false)
     }
-  }, [qualityProfile, timeBudgetMinutes])
+  }, [qualityProfile, sampleStrategy, timeBudgetMinutes])
 
   const estimateDataGeneration = useCallback(async () => {
     if (!numEvents || !numKeys || !numServices || !durationHours) {
@@ -188,6 +222,7 @@ const MLTraining = () => {
           num_keys: numKeys,
           num_services: numServices,
           scenario,
+          pattern_type: patternType,
           traffic_profile: trafficProfile,
           duration_hours: durationHours,
         },
@@ -199,7 +234,7 @@ const MLTraining = () => {
     } finally {
       setEstimatingData(false)
     }
-  }, [durationHours, numEvents, numKeys, numServices, scenario, trafficProfile])
+  }, [durationHours, numEvents, numKeys, numServices, scenario, trafficProfile, patternType])
 
   const checkSavedProgress = useCallback(async () => {
     try {
@@ -272,15 +307,21 @@ const MLTraining = () => {
         details.time_budget_minutes ??
         trainingStartedInfo?.time_budget_minutes ??
         timeBudgetMinutes,
+      sample_strategy:
+        details.sample_strategy ??
+        details.sample_selection?.applied_strategy ??
+        trainingStartedInfo?.sample_strategy ??
+        sampleStrategy,
       estimated_training_minutes:
         details.estimated_training_minutes ??
         trainingPlan?.estimated_training_minutes,
       active_version: statusResponse?.model_version,
       status_detail: statusResponse?.status_detail,
       accuracy_confidence: statusResponse?.last_attempt_accuracy_confidence,
+      sample_selection: details.sample_selection ?? trainingPlan?.selection_preview,
     })
     setTrainingStartedInfo(null)
-  }, [loadMLStatus, loadTrainingPlan, qualityProfile, timeBudgetMinutes, trainingPlan, trainingStartedInfo])
+  }, [loadMLStatus, loadTrainingPlan, qualityProfile, sampleStrategy, timeBudgetMinutes, trainingPlan, trainingStartedInfo])
 
   const handleGenerateData = async () => {
     if (!numEvents || numEvents <= 0 || !numKeys || numKeys <= 0 || !numServices || numServices <= 0 || !durationHours || durationHours <= 0) {
@@ -303,6 +344,7 @@ const MLTraining = () => {
         num_keys: numKeys,
         num_services: numServices,
         scenario,
+        pattern_type: patternType,
         traffic_profile: trafficProfile,
         duration_hours: durationHours,
       })
@@ -329,6 +371,7 @@ const MLTraining = () => {
         reason: 'manual',
         quality_profile: qualityProfile,
         time_budget_minutes: timeBudgetMinutes,
+        sample_strategy: sampleStrategy,
       })
       setTrainingStartedInfo(response)
     } catch (err) {
@@ -504,6 +547,31 @@ const MLTraining = () => {
                   </label>
                 </div>
 
+                <div className="rounded-2xl border border-dark-border bg-dark-bg p-4 flex flex-col md:flex-row md:items-center justify-between gap-4">
+                  <div>
+                    <div className="text-sm font-medium text-white">Generation Engine</div>
+                    <div className="mt-1 text-xs text-slate-500">
+                      Realistic patterns use structured user flows for high ML accuracy. Randomized acts as a stress test.
+                    </div>
+                  </div>
+                  <div className="flex bg-dark-card rounded-lg p-1 border border-dark-border self-start md:self-auto shrink-0">
+                    <button
+                      type="button"
+                      onClick={() => setPatternType('realistic')}
+                      className={`px-3 py-1.5 text-xs font-semibold rounded-md transition ${patternType === 'realistic' ? 'bg-emerald-500/20 text-emerald-300' : 'text-slate-400 hover:text-slate-200'}`}
+                    >
+                      Realistic (Accurate)
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setPatternType('random')}
+                      className={`px-3 py-1.5 text-xs font-semibold rounded-md transition ${patternType === 'random' ? 'bg-amber-500/20 text-amber-300' : 'text-slate-400 hover:text-slate-200'}`}
+                    >
+                      Random (Stress Test)
+                    </button>
+                  </div>
+                </div>
+
                 {estimatedData ? (
                   <div className="rounded-2xl border border-sky-500/30 bg-sky-500/10 p-4">
                     <div className="mb-3 text-sm font-medium text-sky-200">Generation Estimate</div>
@@ -537,6 +605,7 @@ const MLTraining = () => {
                     </div>
                     <div className="mt-3 grid gap-2 md:grid-cols-3">
                       <InfoRow label="Scenario" value={generateResult.scenario || scenario} />
+                      <InfoRow label="Pattern Type" value={generateResult.pattern_type || patternType} />
                       <InfoRow label="Requested Events" value={formatNumber(numEvents)} />
                       <InfoRow label="Traffic Profile" value={trafficProfile} />
                     </div>
@@ -565,6 +634,15 @@ const MLTraining = () => {
               <div className="mt-6">
                 <div className="mb-3 text-sm font-medium text-slate-300">Quality Profile</div>
                 <SelectGrid items={qualityProfiles} selected={qualityProfile} onSelect={setQualityProfile} />
+              </div>
+
+              <div className="mt-6">
+                <div className="mb-3 text-sm font-medium text-slate-300">Sample Strategy</div>
+                <SelectGrid items={sampleStrategies} selected={sampleStrategy} onSelect={setSampleStrategy} />
+                <div className="mt-3 rounded-2xl border border-dark-border bg-dark-bg px-4 py-3 text-sm text-slate-300">
+                  <div className="font-medium text-white">{selectedSampleStrategy.label}</div>
+                  <div className="mt-1 text-xs text-slate-400">{selectedSampleStrategy.description}</div>
+                </div>
               </div>
 
               <div className="mt-6 rounded-2xl border border-dark-border bg-dark-bg p-4">
@@ -617,6 +695,18 @@ const MLTraining = () => {
                         value={formatNumber(trainingPlan.collector?.unique_keys)}
                         hint={`Services ${formatNumber(trainingPlan.collector?.unique_services)}`}
                       />
+                      <SummaryTile
+                        label="Effective Samples"
+                        value={formatNumber(trainingPlan.effective_sample_count ?? trainingPlan.collector?.total_events)}
+                        hint={`Strategy ${trainingPlan.selection_preview?.applied_strategy || sampleStrategy}`}
+                        accent="text-violet-300"
+                      />
+                      <SummaryTile
+                        label="Effective Keys"
+                        value={formatNumber(trainingPlan.effective_unique_keys ?? trainingPlan.collector?.unique_keys)}
+                        hint={`Coverage ${formatPercent(trainingPlan.selection_preview?.key_coverage_ratio ?? 1)}`}
+                        accent="text-cyan-300"
+                      />
                     </div>
 
                     <div className="grid gap-4 md:grid-cols-2">
@@ -637,9 +727,41 @@ const MLTraining = () => {
                           <InfoRow label="Augmentation Factor" value={`${Number(trainingPlan.hyperparameters?.training?.augmentation_factor || 0).toFixed(2)}x`} />
                           <InfoRow label="Balancing Strategy" value={String(trainingPlan.hyperparameters?.training?.data_balancing || 'auto')} />
                           <InfoRow label="Profile" value={trainingPlan.quality_profile} valueClassName="text-emerald-300" />
+                          <InfoRow label="Sample Strategy" value={trainingPlan.selection_preview?.applied_strategy || trainingPlan.sample_strategy} valueClassName="text-sky-300" />
                         </div>
                       </div>
                     </div>
+
+                    {trainingPlan.selection_preview ? (
+                      <div className="rounded-2xl border border-violet-500/25 bg-violet-500/10 p-4">
+                        <div className="text-sm font-semibold text-white">Realistic Sample Selection Preview</div>
+                        <div className="mt-3 grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+                          <InfoRow label="Selected Events" value={formatNumber(trainingPlan.selection_preview.selected_events)} valueClassName="text-violet-200" />
+                          <InfoRow label="Selected Keys" value={formatNumber(trainingPlan.selection_preview.selected_unique_keys)} />
+                          <InfoRow label="Event Coverage" value={formatPercent(trainingPlan.selection_preview.coverage_ratio)} />
+                          <InfoRow label="Recommended" value={trainingPlan.selection_preview.recommended_strategy || 'all'} />
+                          <InfoRow label="Noise Ratio" value={formatPercent(trainingPlan.selection_preview.noisy_event_ratio)} />
+                          <InfoRow label="High Churn Ratio" value={formatPercent(trainingPlan.selection_preview.high_churn_event_ratio)} />
+                          <InfoRow label="Low Support Keys" value={formatPercent(trainingPlan.selection_preview.low_support_key_ratio)} />
+                          <InfoRow label="Production Share" value={formatPercent(trainingPlan.selection_preview.production_event_ratio)} />
+                        </div>
+                        <div className="mt-4 rounded-xl border border-violet-500/20 bg-violet-500/5 p-3 text-sm text-violet-100">
+                          {trainingPlan.selection_preview.recommendation}
+                        </div>
+                        {trainingPlan.selection_preview.selected_key_examples?.length ? (
+                          <div className="mt-4">
+                            <div className="text-xs uppercase tracking-[0.16em] text-slate-400">Top Realistic Keys</div>
+                            <div className="mt-2 flex flex-wrap gap-2">
+                              {trainingPlan.selection_preview.selected_key_examples.slice(0, 6).map(item => (
+                                <span key={item.key_id} className="rounded-full border border-violet-500/25 bg-dark-bg px-3 py-1 text-xs text-slate-200">
+                                  {item.key_id} · score {Number(item.realism_score || 0).toFixed(2)}
+                                </span>
+                              ))}
+                            </div>
+                          </div>
+                        ) : null}
+                      </div>
+                    ) : null}
 
                     <div className="rounded-2xl border border-amber-500/25 bg-amber-500/10 p-4 text-sm text-amber-100">
                       {trainingPlan.notes}
@@ -710,9 +832,20 @@ const MLTraining = () => {
                 <div className="mt-4 grid gap-4 md:grid-cols-2 xl:grid-cols-4">
                   <SummaryTile label="Validation Top-1" value={formatPercent(trainSummary.val_accuracy)} hint={trainSummary.accuracy_confidence || 'attempt confidence'} />
                   <SummaryTile label="Validation Top-10" value={formatPercent(trainSummary.val_top_10_accuracy)} hint={`Profile ${trainSummary.quality_profile || qualityProfile}`} />
-                  <SummaryTile label="Samples Used" value={formatNumber(trainSummary.sample_count)} hint={`Budget ${trainSummary.time_budget_minutes || timeBudgetMinutes} min`} />
+                  <SummaryTile label="Samples Used" value={formatNumber(trainSummary.sample_count)} hint={`Strategy ${trainSummary.sample_strategy || sampleStrategy}`} />
                   <SummaryTile label="Training Time" value={formatDuration(trainSummary.training_time_s)} hint={`Estimated ${trainSummary.estimated_training_minutes || trainingPlan?.estimated_training_minutes || 0} min`} />
                 </div>
+                {trainSummary.sample_selection ? (
+                  <div className="mt-4 rounded-2xl border border-dark-border bg-dark-bg p-4">
+                    <div className="text-sm font-semibold text-white">Training Sample Evidence</div>
+                    <div className="mt-3 grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+                      <InfoRow label="Applied Strategy" value={trainSummary.sample_selection.applied_strategy || trainSummary.sample_strategy || sampleStrategy} />
+                      <InfoRow label="Selected Events" value={formatNumber(trainSummary.sample_selection.selected_events || trainSummary.sample_count)} />
+                      <InfoRow label="Selected Keys" value={formatNumber(trainSummary.sample_selection.selected_unique_keys)} />
+                      <InfoRow label="Event Coverage" value={formatPercent(trainSummary.sample_selection.coverage_ratio)} />
+                    </div>
+                  </div>
+                ) : null}
               </div>
             ) : null}
           </div>

@@ -196,6 +196,24 @@ def test_model_registry_rejects_tampered_signed_metadata(tmp_path):
         reloaded_registry.load_model("pskc_model")
 
 
+def test_model_registry_loads_artifact_with_windows_style_relative_path(tmp_path):
+    registry = ModelRegistry(model_dir=str(tmp_path))
+    model = _build_trained_ensemble_model()
+    assert registry.save_model(model_name="pskc_model", model=model, version="v1") is True
+
+    registry_metadata_path = tmp_path / "registry.json"
+    payload = json.loads(registry_metadata_path.read_text(encoding="utf-8"))
+    payload["pskc_model"][0]["file_path"] = f"data\\\\models\\\\{os.path.basename(payload['pskc_model'][0]['file_path'])}"
+    registry_metadata_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+
+    reloaded_registry = ModelRegistry(model_dir=str(tmp_path))
+    loaded_model = reloaded_registry.load_model("pskc_model")
+
+    assert loaded_model is not None
+    assert loaded_model.is_trained is True
+    assert reloaded_registry.get_active_version("pskc_model").file_path.endswith(".pskc.json")
+
+
 def test_model_registry_promote_and_rollback_update_active_version_and_lifecycle(tmp_path):
     registry = ModelRegistry(model_dir=str(tmp_path))
     model = _build_trained_ensemble_model()
@@ -383,6 +401,40 @@ def test_incremental_persistence_rejects_version_bump_without_meaningful_improve
     history = incremental.get_history(limit=5)
     assert history[-1]["accepted"] is False
     assert history[-1]["decision_reason"] == "no_meaningful_improvement"
+
+
+def test_incremental_persistence_quarantines_oversized_artifacts(tmp_path, monkeypatch):
+    monkeypatch.setattr("config.settings.settings.ml_incremental_model_max_mb", 1)
+    oversized_path = tmp_path / IncrementalModelPersistence.DEFAULT_INCREMENTAL_FILE
+    oversized_path.write_text("x" * (2 * 1024 * 1024), encoding="utf-8")
+
+    incremental = IncrementalModelPersistence(model_dir=str(tmp_path), model_name="pskc_model")
+
+    assert incremental.exists() is False
+    assert not oversized_path.exists()
+    backups = list(tmp_path.glob("incremental_model.pskc.json.oversized_*.bak"))
+    assert backups
+
+
+def test_incremental_persistence_switches_to_recovery_file_when_oversized_artifact_is_locked(tmp_path, monkeypatch):
+    monkeypatch.setattr("config.settings.settings.ml_incremental_model_max_mb", 1)
+    oversized_path = tmp_path / IncrementalModelPersistence.DEFAULT_INCREMENTAL_FILE
+    oversized_path.write_text("x" * (2 * 1024 * 1024), encoding="utf-8")
+
+    original_replace = os.replace
+
+    def _locked_replace(src, dst):
+        if str(src) == str(oversized_path):
+            raise PermissionError("file is locked")
+        return original_replace(src, dst)
+
+    monkeypatch.setattr("src.ml.incremental_model.os.replace", _locked_replace)
+
+    incremental = IncrementalModelPersistence(model_dir=str(tmp_path), model_name="pskc_model")
+    info = incremental.get_info()
+
+    assert info["file_path"].endswith(IncrementalModelPersistence.RECOVERY_INCREMENTAL_FILE)
+    assert incremental.exists() is False
 
 
 def test_trainer_retains_active_version_when_retrain_does_not_improve(tmp_path, monkeypatch):

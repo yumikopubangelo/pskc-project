@@ -160,6 +160,7 @@ def create_simulation_router() -> APIRouter:
         model_preference: str = Query(default="best_available", description="best_available or active_runtime"),
         key_mode: str = Query(default="auto", description="auto, stable, mixed, or high_churn"),
         virtual_nodes: int = Query(default=3, ge=1, le=12, description="Number of virtual API nodes with isolated L1 caches"),
+        concurrent_workers: Optional[int] = Query(default=None, ge=1, le=12, description="Concurrent simulation workers sharing the request stream"),
         max_requests: Optional[int] = Query(default=None, ge=10, le=5000, description="Optional finite request budget for automation"),
     ):
         """Start a realtime simulation session that keeps running until stopped."""
@@ -173,6 +174,7 @@ def create_simulation_router() -> APIRouter:
                 model_preference=model_preference,
                 key_mode=key_mode,
                 virtual_nodes=virtual_nodes,
+                concurrent_workers=concurrent_workers,
                 max_requests=max_requests,
             )
         except Exception as exc:

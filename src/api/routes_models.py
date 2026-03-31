@@ -8,7 +8,7 @@ API endpoints for model version management and lifecycle.
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from sqlalchemy import desc, func
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional, List
 import logging
 
@@ -362,6 +362,8 @@ async def model_intelligence_dashboard(db: Session = Depends(get_db)):
     try:
         from src.ml.predictor import get_key_predictor
         from src.ml.trainer import get_model_trainer
+        from src.api.ml_service import get_ml_status_payload
+        from src.ml.model_registry import get_model_registry
 
         # 1. All model versions with metrics
         versions = (
@@ -436,6 +438,7 @@ async def model_intelligence_dashboard(db: Session = Depends(get_db)):
                 "version_number": v.version_number,
                 "status": v.status,
                 "created_at": v.created_at.isoformat(),
+                "source": "database_history",
                 "metrics": metrics_dict,
                 "metrics_json": v.metrics_json or {},
                 "training": training_info,
@@ -640,8 +643,42 @@ async def model_intelligence_dashboard(db: Session = Depends(get_db)):
             .filter(KeyPrediction.is_correct == True)
             .scalar()
         ) or 0
-        active_version = next((item for item in version_data if str(item.get("status")).lower() == "production"), None)
-        latest_version = version_data[0] if version_data else None
+        runtime_status = get_ml_status_payload()
+        registry_latest_version = None
+        try:
+            registry_latest_version = get_model_registry().get_latest_version(runtime_status.get("model_name") or "pskc_model")
+        except Exception:
+            registry_latest_version = None
+        db_active_version = next((item for item in version_data if str(item.get("status")).lower() == "production"), None)
+        latest_version = (
+            {
+                "version_id": None,
+                "version_number": registry_latest_version.version,
+                "status": registry_latest_version.stage,
+                "created_at": datetime.fromtimestamp(registry_latest_version.created_at, tz=timezone.utc).isoformat()
+                if registry_latest_version and registry_latest_version.created_at
+                else None,
+                "runtime_version": registry_latest_version.version,
+                "metrics": dict(registry_latest_version.metrics or {}),
+                "source": "runtime_registry",
+            }
+            if registry_latest_version is not None
+            else (version_data[0] if version_data else None)
+        )
+        active_version = {
+            "version_id": None,
+            "version_number": runtime_status.get("model_version"),
+            "status": runtime_status.get("model_stage"),
+            "created_at": runtime_status.get("last_trained_at"),
+            "runtime_version": runtime_status.get("model_version"),
+            "metrics": {
+                "accuracy": runtime_status.get("model_accuracy"),
+                "top_10_accuracy": runtime_status.get("model_top_10_accuracy"),
+            },
+            "predictions": None,
+            "source": "runtime_registry",
+            "database_version": db_active_version,
+        } if runtime_status.get("model_version") else db_active_version
 
         return {
             "summary": {
@@ -649,10 +686,14 @@ async def model_intelligence_dashboard(db: Session = Depends(get_db)):
                 "accepted_versions": sum(1 for item in version_data if str(item.get("status")).lower() != "rejected"),
                 "rejected_versions": sum(1 for item in version_data if str(item.get("status")).lower() == "rejected"),
                 "total_predictions": total_predictions,
-                "overall_accuracy": round(total_correct / total_predictions, 4) if total_predictions > 0 else None,
+                "overall_accuracy": runtime_status.get("model_accuracy")
+                if runtime_status.get("model_accuracy") is not None
+                else (round(total_correct / total_predictions, 4) if total_predictions > 0 else None),
+                "runtime_top_10_accuracy": runtime_status.get("model_top_10_accuracy"),
                 "latest_version": latest_version,
                 "active_version": active_version,
                 "latest_training": training_history[0] if training_history else None,
+                "runtime_status": runtime_status,
             },
             "versions": version_data,
             "training_history": training_history,

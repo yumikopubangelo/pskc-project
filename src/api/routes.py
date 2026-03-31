@@ -47,6 +47,7 @@ from src.api.routes_models import router as models_router, legacy_router as lega
 from src.api.routes_observability import router as observability_router
 from src.api.routes_dashboard import router as dashboard_router
 from src.api.routes_admin_db import router as admin_db_router
+from src.api.routes_pattern import router as pattern_router
 
 logger = logging.getLogger(__name__)
 
@@ -222,5 +223,6 @@ app.include_router(legacy_models_router)
 app.include_router(observability_router)
 app.include_router(dashboard_router)
 app.include_router(admin_db_router)
+app.include_router(pattern_router)
 
 logger.info("All route modules registered successfully")

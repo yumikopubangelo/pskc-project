@@ -26,7 +26,10 @@ if database_url:
 
 # Interpret the config file for Python logging if present
 if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
+    # Preserve the existing application loggers when Alembic is executed
+    # programmatically during API startup. Otherwise Uvicorn access logs can
+    # disappear after migrations finish even though requests still work.
+    fileConfig(config.config_file_name, disable_existing_loggers=False)
 
 # Metadata object for 'autogenerate' support
 target_metadata = Base.metadata

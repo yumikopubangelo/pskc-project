@@ -52,9 +52,9 @@ def extract_client_ip(request: Request) -> Optional[str]:
 
 def create_key_router() -> APIRouter:
     """Create and return the key management router"""
-    router = APIRouter(prefix="/keys", tags=["keys"])
+    router = APIRouter(tags=["keys"])
 
-    @router.post("/access", response_model=KeyAccessResponse)
+    @router.post("/keys/access", response_model=KeyAccessResponse)
     async def access_key(
         req_body: KeyAccessRequest, 
         request: Request,
@@ -150,7 +150,7 @@ def create_key_router() -> APIRouter:
                 detail="Failed to access key",
             )
 
-    @router.post("/store", response_model=KeyStoreResponse)
+    @router.post("/keys/store", response_model=KeyStoreResponse)
     async def store_key(
         req_body: KeyStoreRequest, 
         request: Request,
@@ -191,7 +191,8 @@ def create_key_router() -> APIRouter:
                 detail="Failed to store key",
             )
 
-    @router.get("/cache/stats")
+    @router.get("/keys/cache/stats")
+    @router.get("/cache/stats", include_in_schema=False)
     async def get_cache_stats(
         secure_manager: SecureCacheManager = Depends(get_secure_cache_manager)
     ):
@@ -212,7 +213,8 @@ def create_key_router() -> APIRouter:
             total_requests=total
         )
 
-    @router.get("/keys")
+    @router.get("/keys/keys")
+    @router.get("/cache/keys", include_in_schema=False)
     async def get_cache_keys(
         secure_manager: SecureCacheManager = Depends(get_secure_cache_manager)
     ):
@@ -220,7 +222,8 @@ def create_key_router() -> APIRouter:
         keys = secure_manager.get_cache_keys()
         return {"keys": keys, "count": len(keys)}
 
-    @router.post("/invalidate/{key}")
+    @router.post("/keys/invalidate/{key}")
+    @router.post("/cache/invalidate/{key}", include_in_schema=False)
     async def invalidate_key(
         key: str,
         secure_manager: SecureCacheManager = Depends(get_secure_cache_manager)

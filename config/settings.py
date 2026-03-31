@@ -106,6 +106,30 @@ class AppSettings(BaseSettings):
         default=60,
         alias="ML_TRAINING_TIME_BUDGET_MAX_MINUTES",
     )
+    ml_training_sample_strategy: str = Field(
+        default="auto",
+        alias="ML_TRAINING_SAMPLE_STRATEGY",
+    )
+    ml_training_realistic_key_min_events: int = Field(
+        default=3,
+        alias="ML_TRAINING_REALISTIC_KEY_MIN_EVENTS",
+    )
+    ml_training_realistic_score_threshold: float = Field(
+        default=0.55,
+        alias="ML_TRAINING_REALISTIC_SCORE_THRESHOLD",
+    )
+    ml_training_realistic_target_coverage: float = Field(
+        default=0.72,
+        alias="ML_TRAINING_REALISTIC_TARGET_COVERAGE",
+    )
+    ml_training_realistic_preview_events: int = Field(
+        default=12000,
+        alias="ML_TRAINING_REALISTIC_PREVIEW_EVENTS",
+    )
+    ml_incremental_model_max_mb: int = Field(
+        default=128,
+        alias="ML_INCREMENTAL_MODEL_MAX_MB",
+    )
     
     # ============================================================
     # ML Hyperparameter Configuration (LSTM, RF, Markov, Ensemble)
