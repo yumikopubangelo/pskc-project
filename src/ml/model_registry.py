@@ -3,6 +3,7 @@ import hashlib
 import hmac
 import json
 import logging
+import ntpath
 import os
 import threading
 import time
@@ -99,19 +100,27 @@ class PortableRandomForestModel:
         label_encoder_classes: List[str],
         n_estimators: int,
         max_depth: Optional[int],
+        n_features_in: int = 0,
     ):
         self._trees = trees
         self.n_estimators = n_estimators
         self.max_depth = max_depth
+        self.n_features_in = n_features_in  # exact width used during fit
         self.label_encoder = PortableLabelEncoder(label_encoder_classes)
         self.is_trained = True
+        # Flags to prevent repeated noisy warnings when feature widths mismatch.
+        # If a single instance sees repeated mismatches during batch operations
+        # we only emit one warning per instance to avoid log flooding & I/O stalls.
+        self._warned_truncate = False
+        self._warned_pad = False
 
     @classmethod
     def from_sklearn_wrapper(cls, rf_wrapper: Any) -> "PortableRandomForestModel":
         if rf_wrapper is None or not getattr(rf_wrapper, "is_trained", False):
             raise ValueError("RandomForest wrapper is not trained")
 
-        estimators = getattr(getattr(rf_wrapper, "model", None), "estimators_", None)
+        rf_model = getattr(rf_wrapper, "model", None)
+        estimators = getattr(rf_model, "estimators_", None)
         if estimators is None:
             raise ValueError("RandomForest wrapper does not expose estimators_")
 
@@ -133,11 +142,18 @@ class PortableRandomForestModel:
         if classes is None:
             raise ValueError("RandomForest wrapper does not expose label encoder classes")
 
+        # Prefer sklearn's authoritative n_features_in_ over the tree-scan heuristic.
+        # The heuristic only counts the highest feature index used in a split, which
+        # can be lower than the actual training width when some features are never
+        # chosen as a split criterion.
+        n_features_in = int(getattr(rf_model, "n_features_in_", 0))
+
         return cls(
             trees=trees,
             label_encoder_classes=[str(item) for item in classes.tolist()],
             n_estimators=int(getattr(rf_wrapper, "n_estimators", len(trees))),
             max_depth=getattr(rf_wrapper, "max_depth", None),
+            n_features_in=n_features_in,
         )
 
     @classmethod
@@ -147,6 +163,7 @@ class PortableRandomForestModel:
             label_encoder_classes=list(payload.get("label_encoder_classes", [])),
             n_estimators=int(payload.get("n_estimators", 0)),
             max_depth=payload.get("max_depth"),
+            n_features_in=int(payload.get("n_features_in", 0)),
         )
 
     def to_checkpoint(self) -> Dict[str, Any]:
@@ -154,12 +171,21 @@ class PortableRandomForestModel:
             "artifact_type": "portable_random_forest_v1",
             "n_estimators": self.n_estimators,
             "max_depth": self.max_depth,
+            "n_features_in": self.n_features_in,
             "label_encoder_classes": self.label_encoder.classes_.tolist(),
             "trees": self._trees,
         }
 
     def expected_feature_count(self) -> int:
-        """Infer the feature width expected by the stored forest."""
+        """Return the feature width expected by this forest.
+
+        Prefers the explicit ``n_features_in`` stored during serialization (which
+        mirrors sklearn's ``n_features_in_``).  Falls back to scanning tree split
+        nodes for artifacts saved before this field was added.
+        """
+        if self.n_features_in > 0:
+            return self.n_features_in
+        # Legacy fallback: derive from the highest feature index used in a split.
         max_feature_index = -1
         for tree in self._trees:
             for feature_index in tree.get("feature", []):
@@ -170,21 +196,34 @@ class PortableRandomForestModel:
     def _align_features(self, X: np.ndarray) -> np.ndarray:
         X_arr = np.atleast_2d(np.asarray(X, dtype=np.float64))
         expected = self.expected_feature_count()
+        # If the model has no explicit expectation or the input matches, accept as-is.
         if expected <= 0 or X_arr.shape[1] == expected:
             return X_arr
+
+        # If the incoming example has more features than the model was saved with,
+        # do not silently truncate — return the full input. Tree split indices
+        # are derived from the saved trees and will only index into the features
+        # that were actually used during training; extra trailing features can be
+        # safely ignored by the trees. Emit a single warning per instance to
+        # avoid log flooding.
         if X_arr.shape[1] > expected:
+            if not getattr(self, "_warned_truncate", False):
+                logger.warning(
+                    "PortableRandomForestModel: input has %d features but model expects %d; keeping all features (extra features will be ignored by tree splits).",
+                    X_arr.shape[1],
+                    expected,
+                )
+                self._warned_truncate = True
+            return X_arr
+
+        # If input has fewer features than expected, pad with zeros on the right.
+        if not getattr(self, "_warned_pad", False):
             logger.warning(
-                "PortableRandomForestModel: truncating feature width from %d to %d for compatibility.",
+                "PortableRandomForestModel: padding feature width from %d to %d for compatibility.",
                 X_arr.shape[1],
                 expected,
             )
-            return X_arr[:, :expected]
-
-        logger.warning(
-            "PortableRandomForestModel: padding feature width from %d to %d for compatibility.",
-            X_arr.shape[1],
-            expected,
-        )
+            self._warned_pad = True
         padded = np.zeros((len(X_arr), expected), dtype=np.float64)
         padded[:, : X_arr.shape[1]] = X_arr
         return padded
@@ -283,6 +322,8 @@ class ModelRegistry:
         self._versions: Dict[str, List[ModelVersion]] = {}
         self._active_models: Dict[str, ModelVersion] = {}
         self._checksums: Dict[str, str] = {}
+        self._checksum_cache: Dict[str, str] = {}  # path -> checksum (in-memory cache)
+        self._loaded_model_cache: Dict[str, Any] = {}  # path -> deserialized model
         self._fips_module = self._build_signing_module()
 
         os.makedirs(model_dir, exist_ok=True)
@@ -339,6 +380,33 @@ class ModelRegistry:
 
     def _registry_metadata_path(self) -> str:
         return os.path.join(self._model_dir, "registry.json")
+
+    def _normalize_model_path(self, file_path: str) -> str:
+        if not file_path:
+            return file_path
+
+        normalized = str(file_path).strip()
+        if os.path.exists(normalized):
+            return normalized
+
+        candidates = []
+        candidates.append(normalized)
+        candidates.append(normalized.replace("\\", os.sep))
+        candidates.append(normalized.replace("/", os.sep))
+
+        basename = ntpath.basename(normalized) or os.path.basename(normalized)
+        if basename:
+            candidates.append(os.path.join(self._model_dir, basename))
+
+        seen = set()
+        for candidate in candidates:
+            if not candidate or candidate in seen:
+                continue
+            seen.add(candidate)
+            if os.path.exists(candidate):
+                return candidate
+
+        return candidates[-1] if candidates else normalized
 
     def _lifecycle_log_path(self) -> str:
         return os.path.join(self._model_dir, "lifecycle.jsonl")
@@ -458,6 +526,10 @@ class ModelRegistry:
             f.write(json.dumps(event, sort_keys=True) + "\n")
 
     def _compute_checksum(self, file_path: str) -> str:
+        # Check in-memory cache first to avoid re-reading large files
+        if file_path in self._checksum_cache:
+            return self._checksum_cache[file_path]
+        
         hasher = hashlib.sha256()
         with open(file_path, "rb") as f:
             while True:
@@ -465,7 +537,11 @@ class ModelRegistry:
                 if not chunk:
                     break
                 hasher.update(chunk)
-        return hasher.hexdigest()
+        checksum = hasher.hexdigest()
+        
+        # Cache the computed checksum
+        self._checksum_cache[file_path] = checksum
+        return checksum
 
     def _persist_checksums(self) -> None:
         with open(self._checksum_manifest_path(), "w", encoding="utf-8") as f:
@@ -525,17 +601,25 @@ class ModelRegistry:
             json.dump(data, f, indent=2, sort_keys=True)
 
     def _resolve_version(self, model_name: str, version: Optional[str] = None) -> Optional[ModelVersion]:
-        if version is None:
-            return self.get_active_version(model_name)
-
-        return next(
+        resolved = self.get_active_version(model_name) if version is None else next(
             (item for item in self._versions.get(model_name, []) if item.version == version),
             None,
         )
+        if resolved is not None:
+            normalized_path = self._normalize_model_path(resolved.file_path)
+            if normalized_path and normalized_path != resolved.file_path:
+                resolved.file_path = normalized_path
+                self._save_registry()
+        return resolved
 
-    def _ensure_version_security_metadata(self, model_name: str, version: ModelVersion) -> None:
+    def _ensure_version_security_metadata(self, model_name: str, version: ModelVersion) -> str:
+        """
+        Backfills or validates security metadata (checksums, signatures, artifact types, provenance).
+        Returns the computed checksum for reuse in subsequent verification.
+        """
+        version.file_path = self._normalize_model_path(version.file_path)
         if not os.path.exists(version.file_path):
-            return
+            return ""
 
         actual_checksum = self._compute_checksum(version.file_path)
         filename = os.path.basename(version.file_path)
@@ -583,12 +667,24 @@ class ModelRegistry:
                 stage=version.stage,
                 details={"file_path": version.file_path},
             )
+        
+        return actual_checksum
 
-    def _verify_artifact_integrity(self, model_name: str, version: ModelVersion) -> None:
+    def _verify_artifact_integrity(self, model_name: str, version: ModelVersion, cached_checksum: str = "") -> None:
+        """
+        Strict verification of model artifact integrity before loading.
+        Uses cached_checksum if provided to avoid redundant file reads.
+        """
+        version.file_path = self._normalize_model_path(version.file_path)
         if not os.path.exists(version.file_path):
             raise SecurityError(f"Model file not found: {version.file_path}")
 
-        actual_checksum = self._compute_checksum(version.file_path)
+        # Reuse checksum from _ensure_version_security_metadata if available
+        if cached_checksum:
+            actual_checksum = cached_checksum
+        else:
+            actual_checksum = self._compute_checksum(version.file_path)
+        
         filename = os.path.basename(version.file_path)
         manifest_checksum = self._checksums.get(filename)
 
@@ -822,16 +918,21 @@ class ModelRegistry:
             logger.warning("No version available for %s", model_name)
             return None
 
-        # Cross-environment path resolution (Docker absolute path vs Windows local)
-        if not os.path.exists(resolved_version.file_path):
-            basename = os.path.basename(resolved_version.file_path)
-            local_path = os.path.join(self._model_dir, basename)
-            if os.path.exists(local_path):
-                resolved_version.file_path = local_path
-                self._save_registry()
+        resolved_version.file_path = self._normalize_model_path(resolved_version.file_path)
+        self._save_registry()
 
-        self._ensure_version_security_metadata(model_name, resolved_version)
-        self._verify_artifact_integrity(model_name, resolved_version)
+        # Compute checksum once and reuse it in both ensure_metadata and verify_integrity
+        cached_checksum = self._ensure_version_security_metadata(model_name, resolved_version)
+        self._verify_artifact_integrity(model_name, resolved_version, cached_checksum=cached_checksum)
+
+        # Check if model is already cached (avoid re-parsing large JSON files)
+        if resolved_version.file_path in self._loaded_model_cache:
+            logger.info(
+                "Model '%s' version '%s' loaded from cache",
+                model_name,
+                resolved_version.version,
+            )
+            return self._loaded_model_cache[resolved_version.file_path]
 
         try:
             if resolved_version.file_path.endswith(".pt"):
@@ -866,6 +967,9 @@ class ModelRegistry:
                 }
             )
             return None
+
+        # Cache the loaded model for future use
+        self._loaded_model_cache[resolved_version.file_path] = loaded_model
 
         self._append_lifecycle_event(
             "load",
@@ -973,8 +1077,9 @@ class ModelRegistry:
         if target_version is None:
             return {"success": False, "reason": "version_not_found"}
 
-        self._ensure_version_security_metadata(model_name, target_version)
-        self._verify_artifact_integrity(model_name, target_version)
+        # Compute checksum once and reuse it
+        cached_checksum = self._ensure_version_security_metadata(model_name, target_version)
+        self._verify_artifact_integrity(model_name, target_version, cached_checksum=cached_checksum)
 
         previous_stage = target_version.stage
         target_version.stage = target_stage
@@ -1035,8 +1140,9 @@ class ModelRegistry:
         if target is None:
             return {"success": False, "reason": "rollback_target_not_found"}
 
-        self._ensure_version_security_metadata(model_name, target)
-        self._verify_artifact_integrity(model_name, target)
+        # Compute checksum once and reuse it
+        cached_checksum = self._ensure_version_security_metadata(model_name, target)
+        self._verify_artifact_integrity(model_name, target, cached_checksum=cached_checksum)
 
         if current_active is not None and current_active.stage and target.stage != current_active.stage:
             target.stage = current_active.stage
